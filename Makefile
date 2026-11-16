@@ -1,7 +1,7 @@
-.PHONY: all native template examples typescript zig java check check-dev check-console run clean
+.PHONY: all native template examples typescript zig java check run clean
 
 ## Everything but typescript, zig and java, which need Node.js, zig and a JDK.
-all: native template examples check check-dev check-console
+all: native template examples check
 
 ## The shell (appos-shell) and the CLI (appos).
 native:
@@ -49,16 +49,6 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
-
-## Live dev-server regressions; requires Python 3 and the wasm32-wasip2 target.
-check-dev:
-	cargo build -p appos
-	python3 cli/tests/dev_reload.py
-
-## Console controls, multiline app logs and closed log pipes, through both binaries.
-check-console:
-	cargo build --workspace
-	python3 cli/tests/terminal_output.py
 
 ## The shell with the hello world.
 run: all

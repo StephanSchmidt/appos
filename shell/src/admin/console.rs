@@ -1568,17 +1568,21 @@ impl Board<'_> {
     fn app_readouts(&self, a: &App) -> String {
         let sums = self.sums(a);
         let live = a.versions.iter().find(|x| x.status == VersionStatus::Live);
-        let since = match &a.changed {
-            Some(e) if matches!(e.kind, Kind::RolledBack | Kind::AutoRolledBack) => format!("back since {}", hm(e.at)),
-            Some(e) if e.kind == Kind::TurnedOff => format!("off since {}", hm(e.at)),
-            _ => live.map_or("not live".to_string(), |l| format!("since {}", clock(l.deployed_at))),
+        let folder = a.folder_version();
+        let since = match (&a.changed, live, folder) {
+            (Some(e), ..) if matches!(e.kind, Kind::RolledBack | Kind::AutoRolledBack) => format!("back since {}", hm(e.at)),
+            (Some(e), ..) if e.kind == Kind::TurnedOff => format!("off since {}", hm(e.at)),
+            (_, Some(l), _) => format!("since {}", clock(l.deployed_at)),
+            (_, None, Some(_)) => "from its folder".to_string(),
+            (_, None, None) => "not live".to_string(),
         };
+        let version = live.map(|l| l.version.as_str()).or(folder).unwrap_or("—");
         let (unit, _) = self.view.zoom.per();
         let window = self.view.zoom.range();
         let (risk, grant) = self.risk_line(a);
         let failed_sub = if sums.stops > 0 { format!("{} at the limit", sums.stops) } else { format!("in {window}") };
         readouts(&[
-            (a.name.clone(), live.map_or("—".to_string(), |l| l.version.clone()), since, Ink::White),
+            (a.name.clone(), version.to_string(), since, Ink::White),
             (format!("Req{unit}"), self.rate(sums.requests), format!("{} in {window}", thousands(sums.requests)), Ink::Cyan),
             ("Failed".to_string(), thousands(sums.failures), failed_sub, if sums.failures > 0 { Ink::Coral } else { Ink::Dim }),
             ("Risk".to_string(), risk, grant, Ink::Blue),
@@ -1644,7 +1648,12 @@ impl Board<'_> {
     fn story(&self, a: &App) -> String {
         let owner = owner_of(a);
         let live = a.versions.iter().find(|x| x.status == VersionStatus::Live);
-        let left = format!(r#"{}<span class="c">{}</span>"#, self.who_line(a), live.map_or("not live".to_string(), |l| format!("{} live", escape(&l.version))));
+        let state = match (live, a.folder_version()) {
+            (Some(l), _) => format!("{} live", escape(&l.version)),
+            (None, Some(v)) => format!("{} from its folder", escape(v)),
+            (None, None) => "not live".to_string(),
+        };
+        let left = format!(r#"{}<span class="c">{state}</span>"#, self.who_line(a));
         let lines: String = self
             .timeline(a)
             .iter()

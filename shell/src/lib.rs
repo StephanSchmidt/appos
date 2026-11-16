@@ -111,9 +111,12 @@ pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
     }
     let engine = runtime::engine()?;
     let db = tx::open_db(&opts.data.join("appos.db"))?;
+    // No platform.db yet: the first start, with no last one to compare with.
+    let first = !opts.data.join("platform.db").exists();
     let platform = platform::PlatformDb::open(&opts.data.join("platform.db"))?;
     match platform.risk_levels(opts.risk.levels()) {
         Ok(0) => {}
+        Ok(_) if first => {}
         Ok(n) => println!("risk.toml: {n} grants rated differently than at the last start"),
         Err(e) => eprintln!("could not keep the risk levels: {e:#}"),
     }

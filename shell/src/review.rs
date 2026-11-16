@@ -27,8 +27,9 @@ use crate::terminal_errorln as eprintln;
 use crate::tx::{self, MAX_SCAN};
 
 /// The oldest appfuzz that reads what this writes: `[entry] examples`,
-/// `req.` paths, `clock.rfc3339` and the `json` label came in 0.8.0.
-pub const MIN_APPFUZZ: (u32, u32, u32) = (0, 8, 0);
+/// `req.` paths, `clock.rfc3339` and the `json` label came in 0.8.0,
+/// `[[entry.rules]]` in 0.8.1.
+pub const MIN_APPFUZZ: (u32, u32, u32) = (0, 8, 1);
 
 /// Where `appos dev` serves, for the requests made up here.
 const ORIGIN: &str = "http://127.0.0.1:8080";
@@ -89,7 +90,7 @@ pub async fn prepare(dir: &Path, data: &Path, wasm: &str) -> anyhow::Result<Revi
         requests.push(json!([r.handler, request]));
         examples.push(Example { route: r.pattern(), kept });
     }
-    let handlers: Vec<&str> = app.routes.iter().map(|r| r.handler.as_str()).collect();
+    let handlers: Vec<(&str, &str)> = app.routes.iter().map(|r| (r.handler.as_str(), r.method.as_str())).collect();
     Ok(Review {
         manifest: manifest(m, wasm, &requests, &now, &handlers)?,
         plan: serde_json::to_string_pretty(&plan(m, &entries))?,
@@ -144,7 +145,8 @@ fn toml_value(v: impl serde::Serialize) -> anyhow::Result<String> {
 /// appfuzz.toml: how to call the app (`start(handler, req)`, one request
 /// per route), what it may import, what one request may use, and what
 /// each host function costs and does.
-fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &[&str]) -> anyhow::Result<String> {
+/// `handlers`: each handler init registered, with its route's method.
+fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &[(&str, &str)]) -> anyhow::Result<String> {
     let a = &m.app;
     let mut t = String::new();
     writeln!(t, "# appfuzz manifest for {} {}, written by `appos review` from what the", a.id, a.version)?;
@@ -165,9 +167,15 @@ fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &
     let fields = [("now", "clock.rfc3339"), ("method", "http.method"), ("path", "http.path"), ("query", "http.query"), ("form", "http.form")];
     let fields: Vec<String> = fields.iter().map(|(f, role)| format!("\"req.{f}\" = \"{role}\"")).collect();
     writeln!(t, "fields = {{ {} }}", fields.join(", "))?;
-    // The shell only ever calls a handler init registered.
-    if handlers.iter().all(|h| !h.contains(',')) {
-        writeln!(t, "values = {{ handler = {} }}", toml_value(format!("enum:{}", handlers.join(",")))?)?;
+    // The shell only ever calls a handler init registered,
+    let names: Vec<&str> = handlers.iter().map(|(h, _)| *h).collect();
+    if names.iter().all(|h| !h.contains(',')) {
+        writeln!(t, "values = {{ handler = {} }}", toml_value(format!("enum:{}", names.join(",")))?)?;
+    }
+    // and only with its route's method: HEAD comes as GET.
+    for (handler, method) in handlers {
+        writeln!(t, "\n[[entry.rules]]\nwhen = {{ handler = {} }}", toml_value(handler)?)?;
+        writeln!(t, "values = {{ \"req.method\" = {} }}", toml_value(format!("enum:{method}"))?)?;
     }
 
     let mut imports: Vec<String> = ALWAYS.iter().filter(|i| **i != "handler").map(|i| format!("{FRAMEWORK}{i}")).collect();
@@ -243,7 +251,8 @@ mod tests {
 
     fn written(m: &Manifest, handlers: &[&str]) -> toml::Table {
         let requests: Vec<Value> = handlers.iter().map(|h| json!([h, request_json(&made_up(&route(h, h), "events", "2026-11-15T10:00:00Z"))])).collect();
-        manifest(m, "events.wasm", &requests, "2026-11-15T10:00:00Z", handlers).unwrap().parse().unwrap()
+        let with_methods: Vec<(&str, &str)> = handlers.iter().map(|h| (*h, h.split_once(' ').unwrap().0)).collect();
+        manifest(m, "events.wasm", &requests, "2026-11-15T10:00:00Z", &with_methods).unwrap().parse().unwrap()
     }
 
     #[test]
@@ -291,6 +300,19 @@ mod tests {
     fn a_handler_with_a_comma_gets_no_enum() {
         let t = written(&manifest_with(""), &["GET /", "GET /a,b"]);
         assert!(t["entry"].get("values").is_none());
+    }
+
+    /// A GET to a handler only POST reaches never comes: no write_on_safe_method.
+    #[test]
+    fn each_handler_gets_only_its_routes_method() {
+        let t = written(&manifest_with(""), &["GET /", "POST /items", "GET /a,b"]);
+        let rules: Vec<(&str, &str)> = t["entry"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["when"]["handler"].as_str().unwrap(), r["values"]["req.method"].as_str().unwrap()))
+            .collect();
+        assert_eq!(rules, [("GET /", "enum:GET"), ("POST /items", "enum:POST"), ("GET /a,b", "enum:GET")]);
     }
 
     #[test]

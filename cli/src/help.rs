@@ -521,7 +521,7 @@ review reaches every page.
 appfuzz keeps its runs there too: appfuzz --human findings there shows
 the findings again. appos review writes its files anew each time.
 
-Needs appfuzz 0.8.0 or newer: curl -fsSL https://appfuzz.dev/install.sh | sh
+Needs appfuzz 0.8.1 or newer: curl -fsSL https://appfuzz.dev/install.sh | sh
 ";
 
 const HELP_BUILD: &str = "appos build

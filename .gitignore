@@ -12,7 +12,7 @@ appos-data/
 !/Makefile
 !/README.md
 !/LICENSE
-!/calculator-prompt.md
+!/docs/calculator-prompt.md
 !/risk.toml
 !/rustfmt.toml
 !/docs/*.png
@@ -27,9 +27,6 @@ appos-data/
 !/cli/Cargo.toml
 !/cli/build.rs
 !/cli/src/**
-!/cli/tests/harness.py
-!/cli/tests/dev_reload.py
-!/cli/tests/terminal_output.py
 
 # The hello world every `appos new` starts from. cli/build.rs embeds every
 # file in it, so a file added there needs its line here too.

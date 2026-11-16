@@ -191,6 +191,14 @@ impl App {
             .or_else(|| live.into_iter().chain(&self.versions).map(|v| v.owner.as_str()).find(|o| !o.is_empty()))
     }
 
+    /// The version it runs when it runs from the folder the shell was
+    /// started with (`appos-shell examples/discounts`, `appos dev`): running,
+    /// with no live version deployed.
+    pub(super) fn folder_version(&self) -> Option<&str> {
+        let deployed = self.versions.iter().any(|v| v.status == VersionStatus::Live);
+        self.running.as_ref().filter(|_| !deployed).map(|r| r.manifest.app.version.as_str())
+    }
+
     /// Its group from the running manifest, then the live or newest
     /// stored version that names one.
     pub(super) fn group(&self) -> Option<&str> {
@@ -625,6 +633,11 @@ mod tests {
         let app = apps.iter().find(|a| a.id == "test").unwrap();
         assert_eq!(app.owner(), Some("Tests"));
         assert_eq!(app.group(), Some("Tests"));
+        assert_eq!(app.folder_version(), Some("1"), "running, though never deployed");
+
+        crate::deploy::deploy(&shell, &crate::testing::bundle("2", None).pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();
+        let (apps, _) = load(&shell, crate::platform::now_ms());
+        assert_eq!(apps.iter().find(|a| a.id == "test").unwrap().folder_version(), None, "deployed");
     }
 
     /// A "seen" names its problems by id and reads them back; none is

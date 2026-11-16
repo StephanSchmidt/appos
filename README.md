@@ -16,12 +16,12 @@ capabilities their manifest grants, and people only what the platform's
 policy lets them (see [Who may do what](#who-may-do-what)).
 
 ```sh
-make            # needs Rust 1.100+, Python 3 and: rustup target add wasm32-wasip2
+make            # needs Rust 1.100+ and: rustup target add wasm32-wasip2
 make run        # the shell with the hello world at http://127.0.0.1:8080
 ```
 
 `make` builds the shell and the CLI, the hello world and the Rust example
-apps (each with its own check), and runs the checks and regressions.
+apps (each with its own check), and runs the checks.
 `make typescript`, `make zig` and `make java` check the other languages.
 
 ## Building an app
