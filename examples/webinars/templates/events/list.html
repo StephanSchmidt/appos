@@ -1,0 +1,38 @@
+<div class="kw">
+  {% include "events/brand.html" %}
+  <header class="kw-hero">
+    <h1>Live webinars with the Kitewell team</h1>
+    <p class="kw-lead">Short, practical sessions on planning work with Kitewell. Free, on Zoom, with time for your questions.</p>
+  </header>
+
+  {% if sessions.is_empty() %}
+  <div class="kw-empty">
+    <strong>No sessions scheduled right now</strong>
+    <p>New dates are added regularly. Check back soon.</p>
+  </div>
+  {% else %}
+  <ol class="kw-sessions">
+    {% for s in sessions %}
+    <li class="kw-session">
+      <div class="kw-session-head">
+        {% include "events/leaf.html" %}
+        <div>
+          <h2><a href="{{ base }}/sessions/{{ s.id }}{{ query }}">{{ s.title }}</a></h2>
+          <p class="kw-date">{{ s.long_date }}</p>
+        </div>
+      </div>
+      {% include "events/zones.html" %}
+      {% if let Some(p) = s.paragraphs.first() %}<p class="kw-desc">{{ p }}</p>{% endif %}
+      {% include "events/speaker.html" %}
+      <div class="kw-session-foot">
+        <div class="kw-facts">
+          <span>{{ s.length }} on Zoom</span>
+          <span class="kw-seats{% if s.is_full() %} kw-seats-full{% endif %}">{{ s.seats_label() }}</span>
+        </div>
+        <a class="kw-button{% if s.is_full() %} kw-button-quiet{% endif %}" href="{{ base }}/sessions/{{ s.id }}{{ query }}#register">{% if s.is_full() %}Join the waitlist{% else %}Register{% endif %}</a>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</div>

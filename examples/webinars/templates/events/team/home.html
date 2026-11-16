@@ -1,0 +1,51 @@
+<div class="kw kw-wide">
+  <header class="kw-team-head">
+    <div>
+      <p class="kw-note">Kitewell events team</p>
+      <h1>Webinars</h1>
+    </div>
+    <div class="kw-actions">
+      <a class="kw-button kw-button-line" href="{{ base }}" target="_blank" rel="noopener">Open the public page</a>
+      <a class="kw-button" href="{{ team }}/new">Add a session</a>
+    </div>
+  </header>
+
+  {% if let Some(n) = notice %}<p class="kw-alert kw-alert-ok" role="status" style="margin-bottom:1rem">{{ n }}</p>{% endif %}
+
+  {% if sessions.is_empty() %}
+  <div class="kw-empty">
+    <strong>No sessions yet</strong>
+    <p>Add your first session: it shows on the public page right away.</p>
+  </div>
+  {% else %}
+  <ul class="kw-board">
+    {% for s in sessions %}
+    <li>
+      <div class="kw-board-top{% if !s.is_open() %} kw-past{% endif %}">
+        {% include "events/leaf.html" %}
+        <div>
+          <h2><a href="{{ team }}/sessions/{{ s.id }}">{{ s.title }}</a></h2>
+          <p class="kw-date">{{ s.long_date }}, {{ s.berlin_span }}
+            {% if s.cancelled %}<span class="kw-tag kw-tag-stop">Cancelled</span>{% else if s.ended %}<span class="kw-tag">Ended</span>{% else if s.started %}<span class="kw-tag kw-tag-ok">Live now</span>{% endif %}</p>
+          <p class="kw-note">{{ s.speaker }}</p>
+        </div>
+      </div>
+      <div class="kw-meter">
+        <div class="kw-meter-bar" aria-hidden="true"><i style="width: {{ s.percent_taken() }}%"></i></div>
+        <p><b>{{ s.seated }}</b> of {{ s.seats }} registered, <b>{{ s.waiting }}</b> waiting, <b>{{ s.cancellations }}</b> cancelled</p>
+        <div class="kw-actions">
+          <a class="kw-button kw-button-quiet kw-button-small" href="{{ team }}/sessions/{{ s.id }}">Attendees</a>
+          <a class="kw-button kw-button-line kw-button-small" href="{{ team }}/sessions/{{ s.id }}/edit">Edit</a>
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <div class="kw-link-box">
+    <p>Links for ads and posts: add the source and campaign, and they show up with every registration.</p>
+    <code>{{ origin }}{{ base }}?utm_source=linkedin&amp;utm_campaign=q4-agencies</code>
+    <p>This page is only reachable through its secret address. Keep it in your bookmarks and share it only with the events team.</p>
+  </div>
+</div>

@@ -1,0 +1,36 @@
+{% include "desk/_bar.html" %}
+<div class="page">
+  <section class="section">
+    <div class="page-head">
+      <div><h1>{{ quarter }}</h1><p>Requests made in the quarter, whatever happened to them since.</p></div>
+      <div class="qnav"><a class="button small" href="{{ prev_url }}">Previous quarter</a>{% if !next_url.is_empty() %}<a class="button small" href="{{ next_url }}">Next quarter</a>{% endif %}</div>
+    </div>
+    <div class="tiles">
+      {% for t in tiles %}<div class="tile"><span class="k">{{ t.label }}</span><span class="v">{{ t.value }}</span><span class="s">{{ t.sub }}</span></div>{% endfor %}
+    </div>
+    <div class="table-wrap"><table class="reps">
+      <thead><tr><th>Rep</th><th class="opt">Team</th><th>Requests</th><th>Avg. discount</th><th>Approved</th><th>Given away</th></tr></thead>
+      <tbody>
+        {% for p in reps %}<tr><td>{{ p.name }}</td><td class="opt">{{ p.team }}</td><td>{{ p.count }}</td><td>{{ p.avg_discount }}</td><td>{{ p.approval }}</td><td>{{ p.given }}</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>All requests</h2><span class="note">{{ count_text }}</span></div>
+    <form class="filters" method="get" action="{{ frame.home }}/all">
+      <input type="hidden" name="q" value="{{ q }}">
+      <div class="field"><label for="f-status">Status</label>
+        <select id="f-status" name="status">{% for c in statuses %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="f-rep">Rep</label>
+        <select id="f-rep" name="rep">{% for c in rep_filter %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select></div>
+      <button class="small">Show</button>
+      {% if filtered %}<a href="{{ frame.home }}/all?q={{ q }}">Show all</a>{% endif %}
+    </form>
+    {% if rows.is_empty() %}
+    <p class="empty">No requests match.</p>
+    {% else %}
+    {% include "desk/_rows.html" %}
+    {% endif %}
+  </section>
+</div>

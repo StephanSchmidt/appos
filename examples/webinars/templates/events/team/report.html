@@ -1,0 +1,104 @@
+<div class="kw kw-wide">
+  <a class="kw-back" href="{{ team }}">All sessions</a>
+  <header class="kw-team-head" style="padding-top:0">
+    <div class="kw-board-top">
+      {% include "events/leaf.html" %}
+      <div>
+        <h1>{{ s.title }}</h1>
+        <p class="kw-date">{{ s.long_date }}, {{ s.berlin_span }}, {{ s.speaker }}
+          {% if s.cancelled %}<span class="kw-tag kw-tag-stop">Cancelled</span>{% else if s.ended %}<span class="kw-tag">Ended</span>{% else if s.started %}<span class="kw-tag kw-tag-ok">Live now</span>{% endif %}</p>
+      </div>
+    </div>
+    <div class="kw-actions">
+      <a class="kw-button kw-button-line" href="{{ base }}/sessions/{{ s.id }}" target="_blank" rel="noopener">Public page</a>
+      <a class="kw-button" href="{{ team }}/sessions/{{ s.id }}/edit">Edit session</a>
+    </div>
+  </header>
+
+  {% if let Some(n) = notice %}<p class="kw-alert kw-alert-ok" role="status" style="margin-bottom:1rem">{{ n }}</p>{% endif %}
+
+  <div class="kw-stats">
+    <div class="kw-stat"><b>{{ s.seated }} <small style="font-size:1rem;font-weight:500;color:var(--ink-faint)">of {{ s.seats }}</small></b><span>registered</span></div>
+    <div class="kw-stat"><b>{{ s.waiting }}</b><span>on the waitlist</span></div>
+    <div class="kw-stat"><b>{{ s.cancellations }}</b><span>cancelled</span></div>
+    <div class="kw-stat"><b>{{ free_mail }}</b><span>free-mail addresses</span></div>
+  </div>
+
+  <section class="kw-section">
+    <header><h2>Registrations by source</h2></header>
+    {% if by_source.is_empty() %}<p class="kw-note">No registrations yet.</p>{% else %}
+    <div class="kw-scroll">
+      <table class="kw-table">
+        <thead><tr><th>Source</th><th class="kw-num">Registered</th><th class="kw-num">Waitlist</th><th class="kw-num">Cancelled</th><th class="kw-num">All sign-ups</th></tr></thead>
+        <tbody>{% for c in by_source %}
+          <tr><td>{% if c.name.is_empty() %}<span class="kw-muted">direct (no source)</span>{% else %}{{ c.name }}{% endif %}</td><td class="kw-num">{{ c.registered }}</td><td class="kw-num">{{ c.waitlist }}</td><td class="kw-num">{{ c.cancelled }}</td><td class="kw-num">{{ c.total() }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="kw-scroll">
+      <table class="kw-table">
+        <thead><tr><th>Campaign</th><th class="kw-num">Registered</th><th class="kw-num">Waitlist</th><th class="kw-num">Cancelled</th><th class="kw-num">All sign-ups</th></tr></thead>
+        <tbody>{% for c in by_campaign %}
+          <tr><td>{% if c.name.is_empty() %}<span class="kw-muted">no campaign</span>{% else %}{{ c.name }}{% endif %}</td><td class="kw-num">{{ c.registered }}</td><td class="kw-num">{{ c.waitlist }}</td><td class="kw-num">{{ c.cancelled }}</td><td class="kw-num">{{ c.total() }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="kw-section">
+    <header>
+      <h2>Attendees</h2>
+      {% if !rows.is_empty() %}<a class="kw-button kw-button-small" href="{{ csv }}" download="{{ csv_name }}">Download CSV for HubSpot</a>{% endif %}
+    </header>
+    {% if rows.is_empty() %}<p class="kw-note">Nobody has registered yet.</p>{% else %}
+    <div class="kw-scroll">
+      <table class="kw-table">
+        <thead><tr><th>Status</th><th>Name</th><th>Email</th><th>Company</th><th>Job title</th><th>Consent</th><th>Registered (Berlin)</th><th>Source</th><th>Campaign</th><th></th></tr></thead>
+        <tbody>{% for r in rows %}
+          <tr>
+            <td>{% match r.status %}{% when Status::Seated %}<span class="kw-tag kw-tag-ok">registered</span>{% when Status::Waitlist(n) %}<span class="kw-tag kw-tag-wait">waitlist {{ n }}</span>{% when Status::Cancelled %}<span class="kw-tag">cancelled</span>{% endmatch %}</td>
+            <td>{{ r.name }}</td>
+            <td>{{ r.email }}{% if r.free_mail %} <span class="kw-tag kw-tag-wait">free mail</span>{% endif %}</td>
+            <td>{{ r.company }}</td>
+            <td>{{ r.job_title }}</td>
+            <td>{% if r.consent %}yes, {{ r.consent_at }}{% else %}<span class="kw-muted">no</span>{% endif %}</td>
+            <td>{{ r.registered_at }}</td>
+            <td>{{ r.source }}</td>
+            <td>{{ r.campaign }}</td>
+            <td><details><summary>Delete</summary><form method="post" action="{{ team }}/sessions/{{ s.id }}/registrations/{{ r.id }}/delete"><button class="kw-button kw-button-danger kw-button-small" type="submit">Delete {{ r.name }}'s data</button></form></details></td>
+          </tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <details class="kw-section">
+      <summary class="kw-label" style="cursor:pointer">Copy as text for a spreadsheet</summary>
+      <p class="kw-note">Click into the box, select all (Ctrl+A or Cmd+A), copy and paste into Google Sheets or Excel. Every column lands in its own cell, the consent text included.</p>
+      <textarea class="kw-copy" readonly rows="8" aria-label="Attendees as tab-separated text">{{ tsv }}</textarea>
+    </details>
+    {% endif %}
+  </section>
+
+  <section class="kw-danger-zone">
+    {% if s.cancelled %}
+    <p class="kw-note">This session is cancelled. Its people see that on their registration pages.</p>
+    {% else %}
+    <details>
+      <summary>Cancel this session</summary>
+      <form method="post" action="{{ team }}/sessions/{{ s.id }}/cancel">
+        <p class="kw-note">It leaves the public page, and everyone's registration page says it was cancelled. Emails don't go out: tell people yourself if you need to.</p>
+        <button class="kw-button kw-button-danger kw-button-small" type="submit">Yes, cancel the session</button>
+      </form>
+    </details>
+    {% endif %}
+    {% if rows.is_empty() %}
+    <details>
+      <summary>Delete this session</summary>
+      <form method="post" action="{{ team }}/sessions/{{ s.id }}/delete">
+        <p class="kw-note">Nobody has registered, so the session can be removed completely.</p>
+        <button class="kw-button kw-button-danger kw-button-small" type="submit">Yes, delete it</button>
+      </form>
+    </details>
+    {% endif %}
+  </section>
+</div>

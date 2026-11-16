@@ -1,0 +1,12 @@
+<div class="pick">
+  <h1>{% include "desk/_icon.html" %}Discount desk</h1>
+  <p>Who are you? There are no logins yet: pick your name. Your choice stays in the address, so bookmark your page to come back to it.</p>
+  <div class="pick-groups">
+    {% for g in groups %}
+    <section class="pick-group">
+      <h2>{{ g.label }}</h2>
+      {% for p in g.people %}<a href="{{ p.url }}"><strong>{{ p.name }}</strong><span>{{ p.title }}</span></a>{% endfor %}
+    </section>
+    {% endfor %}
+  </div>
+</div>

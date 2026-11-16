@@ -1,0 +1,2 @@
+# rustfmt.toml: apps use rustfmt defaults. This file stops the repo root config
+# (width 160, for the shell and CLI) from reaching the example apps.

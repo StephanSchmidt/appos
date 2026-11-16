@@ -1,0 +1,10 @@
+[app]
+id = "webinars"
+name = "Webinars"
+version = "0.1.0"
+owner = "Lukas Brandt <lukas.brandt@example.com>"
+group = "Marketing"
+wasm = "target/wasm32-wasip2/release/webinars.wasm"
+
+[capabilities]
+grant = ["kv-read", "kv-write"]

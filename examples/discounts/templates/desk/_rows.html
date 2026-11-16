@@ -1,0 +1,15 @@
+<div class="rows">
+  <div class="rows-head" aria-hidden="true"><span>Ref</span><span>Customer</span><span class="r">Discount</span><span class="r">Net ARR</span><span>Rep</span><span>Where it is</span><span class="r">Approvals</span></div>
+  {% for r in rows %}
+  <a class="row{% if r.overdue %} overdue{% endif %}" href="{{ r.url }}">
+    <span class="ref">{{ r.reference }}</span>
+    <span class="customer">{{ r.customer }}<span>{{ r.deal }}</span></span>
+    <span class="pct r">{{ r.discount }}</span>
+    <span class="arr money r">{{ r.net_arr }}</span>
+    <span class="rep">{{ r.rep }}</span>
+    <span class="where"><span><span class="status {{ r.status_key }}">{{ r.status }}</span> {{ r.where_ }}</span>{% if !r.age.is_empty() %}<small class="age">{{ r.age }}</small>{% endif %}</span>
+    <span class="meta">{{ r.reference }}, {{ r.rep }}, {{ r.net_arr }} net ARR</span>
+    <span class="marks">{% if r.auto %}<span class="mark auto">auto</span>{% endif %}{% for m in r.marks %}<span class="mark {{ m.state }}" title="{{ m.title }}">{{ m.initials }}</span>{% endfor %}</span>
+  </a>
+  {% endfor %}
+</div>

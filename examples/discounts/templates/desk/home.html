@@ -1,0 +1,21 @@
+{% include "desk/_bar.html" %}
+<div class="page">
+  <div class="page-head">
+    <div>
+      <h1>{{ heading }}</h1>
+      <p>{{ intro }}</p>
+    </div>
+    {% if new_url.len() > 0 %}<a class="button primary" href="{{ new_url }}">New request</a>{% endif %}
+  </div>
+  {% for s in sections %}
+  <section class="section">
+    <div class="section-head"><h2>{{ s.title }}</h2>{% if !s.note.is_empty() %}<span class="note">{{ s.note }}</span>{% endif %}</div>
+    {% if s.rows.is_empty() %}
+    <p class="empty">{{ s.empty }}</p>
+    {% else %}
+    {% let rows = &s.rows %}
+    {% include "desk/_rows.html" %}
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>

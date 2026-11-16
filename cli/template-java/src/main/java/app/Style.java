@@ -1,0 +1,136 @@
+// The app's design, shared by its modules. It goes into the page's <head>
+// (see fullPage() in hello/Web.java). Change anything; the shell only adds
+// the top bar.
+
+package app;
+
+public final class Style {
+    private Style() {}
+
+    public static final String CSS = """
+        :root {
+          --bg: #f6f6fb;
+          --surface: rgba(255, 255, 255, .8);
+          --text: #0f1222;
+          --muted: #5d6278;
+          --line: rgba(15, 18, 34, .09);
+          --accent: #6d5efc;
+          --gradient: linear-gradient(135deg, #6d5efc 0%, #b44cf0 55%, #ff5c8a 100%);
+          --soft: linear-gradient(135deg, rgba(109, 94, 252, .12), rgba(255, 92, 138, .12));
+          --shadow: 0 18px 40px -18px rgba(52, 40, 140, .3);
+          --glow: 0 10px 24px -10px rgba(109, 94, 252, .65);
+          --error: #d0264f;
+        }
+        @media (prefers-color-scheme: dark) {
+          :root {
+            --bg: #0b0c14;
+            --surface: rgba(24, 25, 40, .75);
+            --text: #eef0ff;
+            --muted: #9aa0bd;
+            --line: rgba(255, 255, 255, .08);
+            --accent: #8b80ff;
+            --soft: linear-gradient(135deg, rgba(139, 128, 255, .18), rgba(255, 92, 138, .14));
+            --shadow: 0 18px 40px -18px rgba(0, 0, 0, .6);
+            --error: #ff7d9b;
+          }
+        }
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+          min-height: 100vh;
+          color: var(--text);
+          font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          background:
+            radial-gradient(1100px 560px at 8% -12%, rgba(109, 94, 252, .2), transparent 62%),
+            radial-gradient(900px 520px at 108% 4%, rgba(255, 92, 138, .15), transparent 60%),
+            var(--bg);
+          background-attachment: fixed;
+        }
+
+        .hello {
+          max-width: 760px;
+          margin: 0 auto;
+          padding: 3rem 1.25rem 4rem;
+          display: grid;
+          gap: 1.5rem;
+
+          & h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); line-height: 1.05; letter-spacing: -.04em; margin: 0; }
+          & h2 { font-size: 1.25rem; margin: 0; }
+          & p { margin: 0; }
+        }
+
+        .eyebrow {
+          justify-self: start;
+          font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+          color: var(--accent); background: var(--soft);
+          padding: .3rem .75rem; border-radius: 999px;
+        }
+        .intro { display: grid; gap: .9rem; }
+        .lead { font-size: 1.15rem; color: var(--muted); }
+        .gradient-text { background: var(--gradient); background-clip: text; color: transparent; }
+
+        .card {
+          display: grid; gap: 1rem;
+          padding: 1.75rem; border-radius: 20px;
+          background: var(--surface); border: 1px solid var(--line);
+          backdrop-filter: blur(14px);
+          box-shadow: var(--shadow);
+        }
+
+        .greet { display: flex; gap: .75rem; flex-wrap: wrap; }
+        .greet input {
+          flex: 1; min-width: 12rem;
+          font: inherit; color: inherit;
+          padding: .8rem 1rem; border-radius: 12px;
+          background: var(--bg); border: 1px solid var(--line);
+          outline: none; transition: border-color .15s, box-shadow .15s;
+        }
+        .greet input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(109, 94, 252, .2); }
+        .greet button {
+          font: inherit; font-weight: 650; color: #fff; cursor: pointer;
+          padding: .8rem 1.3rem; border: 0; border-radius: 12px;
+          background: var(--gradient); box-shadow: var(--glow);
+          transition: transform .12s, filter .2s;
+        }
+        .greet button:hover { transform: translateY(-1px); filter: brightness(1.06); }
+        .greet button:active { transform: scale(.98); }
+
+        .greeting {
+          text-align: center;
+          padding: 2.25rem 1.5rem; border-radius: 20px;
+          color: #fff; background: var(--gradient); box-shadow: var(--glow);
+          & .name { font-size: clamp(2.6rem, 8vw, 4.2rem); font-weight: 850; letter-spacing: -.045em; line-height: 1.05; }
+          & .when { opacity: .85; margin-top: .5rem; }
+        }
+
+        .error {
+          margin: .75rem 0 0; color: var(--error); font-weight: 600;
+          &:empty { display: none; }
+        }
+
+        .history {
+          list-style: none; margin: 0; padding: 0;
+          & li {
+            display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+            padding: .6rem .1rem; border-bottom: 1px solid var(--line);
+          }
+          & li:last-child { border-bottom: 0; }
+          & .who {
+            font-weight: 600; overflow-wrap: anywhere; color: inherit; text-decoration: none;
+            &:hover { color: var(--accent); }
+          }
+          & time { color: var(--muted); font-variant-numeric: tabular-nums; }
+          & .empty { color: var(--muted); justify-content: center; }
+        }
+
+        .back {
+          text-align: center;
+          & a { color: var(--accent); font-weight: 600; text-decoration: none; }
+          & a:hover { text-decoration: underline; }
+        }
+
+        /* htmx marks requests in flight and content it just swapped in */
+        .htmx-request { opacity: .65; transition: opacity .2s; }
+        """;
+}

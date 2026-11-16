@@ -1,0 +1,16 @@
+{
+  "name": "status-ts",
+  "private": true,
+  "type": "module",
+  "description": "Kitewell's status page and support desk in TypeScript, compiled to WebAssembly with scriptc. Build and run with appos dev.",
+  "scripts": {
+    "test": "node --import ./bindings/node.mjs --test"
+  },
+  "devDependencies": {
+    "@scriptc/runtime-wasm32-wasi": "0.4.13",
+    "scriptc": "0.4.13"
+  },
+  "allowScripts": {
+    "scriptc@0.4.13": true
+  }
+}

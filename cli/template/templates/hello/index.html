@@ -1,0 +1,36 @@
+<div class="hello">
+  <section class="intro">
+    <span class="eyebrow">Your new app</span>
+    <h1>Hello, <span class="gradient-text">world</span></h1>
+    <p class="lead">This is your app. Make it yours: the page is templates/hello/index.html, the design templates/style.css, the logic src/hello/.</p>
+  </section>
+
+  <section class="card">
+    <h2>Say hello</h2>
+    <form class="greet" method="post" action="{{ base }}/greet" hx-post="{{ base }}/greet" hx-swap="none">
+      <input type="text" name="name" value="{{ name }}" placeholder="Your name" maxlength="{{ domain::NAME_MAX }}" autocomplete="off" aria-describedby="name_error">
+      <button>Say hello</button>
+    </form>
+    <p class="error" id="name_error" aria-live="polite">{% block name_error %}{% if let Some(error) = error %}{{ error }}{% endif %}{% endblock %}</p>
+  </section>
+
+  <section class="greeting" id="greeting">{% block greeting %}
+    {% if let Some(g) = history.first() %}
+      <p class="name">Hello, {{ g.name }}!</p>
+      <p class="when">Said hello at {{ g.time() }}.</p>
+    {% else %}
+      <p class="name">Hello!</p>
+    {% endif %}
+  {% endblock %}</section>
+
+  <section class="card">
+    <h2>Recent hellos</h2>
+    <ul class="history" id="history">{% block history %}
+      {% for g in history %}
+        <li><a class="who" href="{{ base }}/greetings/{{ g.id }}">{{ g.name }}</a><time>{{ g.time() }}</time></li>
+      {% else %}
+        <li class="empty">Nobody yet. Be the first!</li>
+      {% endfor %}
+    {% endblock %}</ul>
+  </section>
+</div>

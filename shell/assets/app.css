@@ -1,0 +1,85 @@
+/* The shell's own styles: the top bar, and the shell's pages (the app list,
+   error messages). Everything is under appos-* classes so it doesn't touch
+   an app's design; each app brings its own CSS. */
+body { margin: 0; }
+
+.appos-topbar {
+  position: sticky; top: 0; z-index: 1000;
+  display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap;
+  padding: .7rem 1.5rem;
+  font: 500 15px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #0f1222;
+  background: rgba(255, 255, 255, .8);
+  backdrop-filter: saturate(160%) blur(16px);
+  -webkit-backdrop-filter: saturate(160%) blur(16px);
+  border-bottom: 1px solid rgba(15, 18, 34, .08);
+}
+.appos-brand {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-weight: 800; letter-spacing: -.02em; color: inherit; text-decoration: none;
+}
+.appos-brand::before {
+  content: ""; width: 20px; height: 20px; border-radius: 6px;
+  background: linear-gradient(135deg, #6d5efc, #b44cf0 55%, #ff5c8a);
+}
+.appos-topbar nav { display: flex; gap: .25rem; flex-wrap: wrap; }
+.appos-topbar nav a {
+  color: #5d6278; text-decoration: none; padding: .35rem .8rem; border-radius: 999px;
+}
+.appos-topbar nav a:hover { color: #0f1222; background: rgba(15, 18, 34, .06); }
+.appos-topbar nav a.active { color: #0f1222; background: rgba(109, 94, 252, .12); }
+.appos-user { margin-left: auto; display: flex; align-items: center; gap: .75rem; color: #5d6278; }
+.appos-user form { margin: 0; }
+.appos-user a, .appos-user button {
+  font: inherit; color: #0f1222; text-decoration: none; cursor: pointer;
+  padding: .35rem .8rem; border-radius: 999px; border: 1px solid rgba(15, 18, 34, .12); background: transparent;
+}
+.appos-user a:hover, .appos-user button:hover { background: rgba(15, 18, 34, .06); }
+
+/* the shell's forms (sign-in) */
+.appos-form { display: grid; gap: 1rem; max-width: 420px; }
+.appos-form label { display: grid; gap: .35rem; font-weight: 600; }
+.appos-form input {
+  font: inherit; font-weight: 400; padding: .6rem .8rem; border-radius: 10px;
+  border: 1px solid rgba(15, 18, 34, .18); background: #fff; color: inherit;
+}
+.appos-form button {
+  justify-self: start; font: inherit; font-weight: 600; cursor: pointer;
+  padding: .6rem 1.2rem; border-radius: 999px; border: 0; color: #fff; background: #6d5efc;
+}
+.appos-error { color: #b42318; font-weight: 600; }
+
+/* the shell's own pages */
+.appos-page {
+  max-width: 880px; margin: 0 auto; padding: 3rem 1.25rem;
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #0f1222;
+}
+.appos-page h1 { font-size: 2.4rem; letter-spacing: -.03em; margin: 0 0 1.5rem; }
+.appos-apps { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.appos-card {
+  display: block; padding: 1.25rem 1.5rem; border-radius: 16px; text-decoration: none; color: inherit;
+  background: #fff; border: 1px solid rgba(15, 18, 34, .08);
+  box-shadow: 0 12px 30px -18px rgba(52, 40, 140, .35);
+}
+a.appos-card:hover { border-color: #6d5efc; }
+.appos-card img { display: block; width: 40px; height: 40px; margin-bottom: .75rem; border-radius: 10px; }
+.appos-card strong { display: block; font-size: 1.15rem; }
+.appos-muted { color: #5d6278; font-size: .9rem; }
+
+@media (prefers-color-scheme: dark) {
+  .appos-topbar { color: #eef0ff; background: rgba(16, 17, 28, .8); border-color: rgba(255, 255, 255, .08); }
+  .appos-topbar nav a { color: #9aa0bd; }
+  .appos-topbar nav a:hover, .appos-topbar nav a.active { color: #eef0ff; background: rgba(255, 255, 255, .08); }
+  body:has(.appos-page) { background: #0b0c14; }
+  .appos-page { color: #eef0ff; }
+  .appos-card { background: #171826; border-color: rgba(255, 255, 255, .08); }
+  .appos-muted { color: #9aa0bd; }
+  .appos-user { color: #9aa0bd; }
+  .appos-user a, .appos-user button { color: #eef0ff; border-color: rgba(255, 255, 255, .16); }
+  .appos-user a:hover, .appos-user button:hover { background: rgba(255, 255, 255, .08); }
+  .appos-form input { background: #171826; border-color: rgba(255, 255, 255, .16); }
+  .appos-error { color: #ff8a80; }
+}
+
+@media print { .appos-topbar { display: none; } }

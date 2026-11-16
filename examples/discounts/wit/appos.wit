@@ -1,0 +1,94 @@
+// The AppOS contract between the shell and an app.
+//
+// The shell calls the app:
+//   init    once, when the shell loads the app: it registers routes and menu
+//           entries through `registry`.
+//   start   once per request, in a fresh sandbox, with the request's data.
+//           The app builds the page with `page` calls (set-html, add-header)
+//           and calls page.done: the app stops there and is unloaded, and
+//           the shell sends the result to the browser.
+//
+// `kv` needs grants in the app's manifest: `kv-read` for get and scan,
+// `kv-write` for set and delete.
+// The platform's policy can say who may use a grant: a host call it
+// denies ends the request, writes nothing, and the shell sends the visitor
+// to sign in or shows "not allowed". Apps don't see who is signed in.
+package appos:framework@0.1.0;
+
+interface types {
+    record request {
+        method: string,
+        /// The path below the app's base, e.g. "/fireside-2026/desk".
+        path: string,
+        /// Values of the route's `:name` segments.
+        params: list<tuple<string, string>>,
+        query: list<tuple<string, string>>,
+        form: list<tuple<string, string>>,
+        /// Where the app is mounted, e.g. "/events". Build links with it.
+        base: string,
+        /// The site's public origin, e.g. "https://apps.acme.com".
+        origin: string,
+        /// True for an htmx fragment swap; false for full pages and history restoration.
+        htmx: bool,
+        /// The current time, RFC 3339.
+        now: string,
+    }
+}
+
+/// Only callable during `init`.
+interface registry {
+    /// `path` is below the app's base; `:name` segments become params.
+    add-route: func(method: string, path: string, handler: string);
+    add-menu: func(label: string, path: string);
+}
+
+/// The page for the current request. Only callable during `start`.
+interface page {
+    /// Adds HTML to the page's <head>: a stylesheet link, a <title>, a
+    /// <meta>. Used for full pages; htmx requests keep the head they have.
+    add-header: func(html: string);
+    /// Sets the HTML named `name`. "page" is the whole page content. On an
+    /// htmx request every other name replaces the content of the element
+    /// with that id.
+    set-html: func(name: string, html: string);
+    /// The HTTP status, 200 unless set.
+    set-status: func(code: u16);
+    /// Sends the browser to a path on this site instead of showing a page.
+    redirect: func(path: string);
+    /// The app is done: it stops here and is unloaded, and the shell sends
+    /// the page to the browser. Nothing after this call runs.
+    done: func();
+}
+
+interface log {
+    info: func(message: string);
+    warn: func(message: string);
+}
+
+/// Key-value storage, private to the app.
+interface kv {
+    get: func(key: string) -> option<string>;
+    set: func(key: string, value: string);
+    delete: func(key: string);
+    /// Keys starting with `prefix` and their values, in key order: at most
+    /// `limit` of them (up to 1000). `reverse` starts from the last key.
+    /// `after` continues a scan: pass the last key of the previous page and
+    /// the scan goes on after it, in the same direction.
+    scan: func(prefix: string, after: option<string>, limit: u32, reverse: bool) -> list<tuple<string, string>>;
+}
+
+interface handler {
+    use types.{request};
+
+    init: func();
+    start: func(handler: string, req: request);
+}
+
+world app {
+    import registry;
+    import page;
+    import log;
+    import kv;
+
+    export handler;
+}

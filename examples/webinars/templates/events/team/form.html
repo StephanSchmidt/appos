@@ -1,0 +1,67 @@
+<div class="kw">
+  <a class="kw-back" href="{{ team }}">All sessions</a>
+  <header class="kw-hero" style="padding-top:0">
+    <h1>{% if editing %}Edit session{% else %}Add a session{% endif %}</h1>
+    <p class="kw-lead">Plan in Berlin time: the public page also shows London and New York.</p>
+  </header>
+
+  {% if let Some(p) = problem %}<p class="kw-alert kw-alert-stop" role="alert" style="margin-bottom:1rem">{{ p }}</p>{% endif %}
+  {% if !errors.is_empty() %}<p class="kw-alert kw-alert-stop" role="alert" style="margin-bottom:1rem">Please check the fields marked below.</p>{% endif %}
+
+  <form class="kw-form kw-panel" method="post" action="{{ action }}" novalidate style="margin-top:0">
+    <div class="kw-field">
+      <label for="title">Title</label>
+      <input id="title" name="title" value="{{ form.title }}" maxlength="{{ domain::TITLE_MAX }}" required{% if errors.get("title").is_some() %} aria-invalid="true"{% endif %}>
+      <p class="kw-error">{% if let Some(e) = errors.get("title") %}{{ e }}{% endif %}</p>
+    </div>
+    <div class="kw-field">
+      <label for="description">Short description <small>(two or three sentences)</small></label>
+      <textarea id="description" name="description" maxlength="{{ domain::DESCRIPTION_MAX }}" required{% if errors.get("description").is_some() %} aria-invalid="true"{% endif %}>{{ form.description }}</textarea>
+      <p class="kw-error">{% if let Some(e) = errors.get("description") %}{{ e }}{% endif %}</p>
+    </div>
+    <div class="kw-row">
+      <div class="kw-field">
+        <label for="date">Date</label>
+        <input id="date" name="date" type="date" value="{{ form.date }}" required{% if errors.get("date").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("date") %}{{ e }}{% endif %}</p>
+      </div>
+      <div class="kw-field">
+        <label for="time">Start time <small>(Berlin)</small></label>
+        <input id="time" name="time" type="time" value="{{ form.time }}" required{% if errors.get("time").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("time") %}{{ e }}{% endif %}</p>
+      </div>
+    </div>
+    <div class="kw-row">
+      <div class="kw-field">
+        <label for="minutes">Length in minutes</label>
+        <input id="minutes" name="minutes" type="number" inputmode="numeric" min="5" max="{{ domain::MINUTES_MAX }}" value="{{ form.minutes }}" required{% if errors.get("minutes").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("minutes") %}{{ e }}{% endif %}</p>
+      </div>
+      <div class="kw-field">
+        <label for="seats">Seats <small>(at most {{ domain::SEATS_MAX }})</small></label>
+        <input id="seats" name="seats" type="number" inputmode="numeric" min="1" max="{{ domain::SEATS_MAX }}" value="{{ form.seats }}" required{% if errors.get("seats").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("seats") %}{{ e }}{% endif %}</p>
+        {% if editing %}<p class="kw-hint">More seats move the first people on the waitlist up right away.</p>{% endif %}
+      </div>
+    </div>
+    <div class="kw-row">
+      <div class="kw-field">
+        <label for="speaker">Speaker</label>
+        <input id="speaker" name="speaker" value="{{ form.speaker }}" maxlength="{{ domain::NAME_MAX }}" required{% if errors.get("speaker").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("speaker") %}{{ e }}{% endif %}</p>
+      </div>
+      <div class="kw-field">
+        <label for="role">Speaker's role</label>
+        <input id="role" name="role" value="{{ form.role }}" maxlength="{{ domain::NAME_MAX }}"{% if errors.get("role").is_some() %} aria-invalid="true"{% endif %}>
+        <p class="kw-error">{% if let Some(e) = errors.get("role") %}{{ e }}{% endif %}</p>
+      </div>
+    </div>
+    <div class="kw-field">
+      <label for="join_link">Zoom join link</label>
+      <input id="join_link" name="join_link" type="url" inputmode="url" value="{{ form.join_link }}" placeholder="https://" maxlength="{{ domain::LINK_MAX }}" required{% if errors.get("join_link").is_some() %} aria-invalid="true"{% endif %}>
+      <p class="kw-error">{% if let Some(e) = errors.get("join_link") %}{{ e }}{% endif %}</p>
+      <p class="kw-hint">Only people with a seat see it, on their own registration page.</p>
+    </div>
+    <button class="kw-button" type="submit">{% if editing %}Save changes{% else %}Add session{% endif %}</button>
+  </form>
+</div>

@@ -1,0 +1,6 @@
+bindings/
+target/
+appos-data/
+.zig-cache/
+zig-pkg/
+src/calculator/view.zig

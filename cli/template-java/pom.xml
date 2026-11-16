@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The app's build. `appos build` runs `mvn -P wasm process-classes`: javac
+  compiles src/main/java and bindings/ (the WIT bindings appos writes),
+  then TeaVM compiles the classes to WebAssembly with GC, from
+  appos.wit.Wit, into target/teavm/. appos turns that into the app's
+  component. `mvn test` runs the unit tests on the JVM.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>app</groupId>
+  <artifactId>hello</artifactId>
+  <version>0.1.0</version>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <teavm.version>0.16.0</teavm.version>
+  </properties>
+
+  <dependencies>
+    <!-- TeaVM's Java class library and its access to linear memory: they
+         exist only in the WebAssembly, so they are provided. -->
+    <dependency>
+      <groupId>org.teavm</groupId>
+      <artifactId>teavm-classlib</artifactId>
+      <version>${teavm.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.teavm</groupId>
+      <artifactId>teavm-interop</artifactId>
+      <version>${teavm.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.teavm</groupId>
+      <artifactId>teavm-core</artifactId>
+      <version>${teavm.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <id>bindings</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>bindings</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <!-- TeaVM, on with `-P wasm` (as `appos build` runs Maven), so that
+       `mvn test` stays a plain JVM run. -->
+  <profiles>
+    <profile>
+      <id>wasm</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.teavm</groupId>
+            <artifactId>teavm-maven-plugin</artifactId>
+            <version>${teavm.version}</version>
+            <executions>
+              <execution>
+                <id>wasm</id>
+                <phase>process-classes</phase>
+                <goals>
+                  <goal>compile</goal>
+                </goals>
+                <configuration>
+                  <mainClass>appos.wit.Wit</mainClass>
+                  <targetType>WEBASSEMBLY_GC</targetType>
+                  <targetDirectory>${project.build.directory}/teavm</targetDirectory>
+                  <optimizationLevel>FULL</optimizationLevel>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

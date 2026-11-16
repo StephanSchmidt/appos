@@ -1,0 +1,3 @@
+<div class="kw-zones" role="list" aria-label="Start time">{% for z in s.zones %}
+  <div role="listitem"><b>{{ z.time }}</b><span>{{ z.name }}{% if let Some(d) = z.other_day %}, {{ d }}{% endif %}</span></div>{% endfor %}
+</div>

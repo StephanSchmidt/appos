@@ -1,0 +1,78 @@
+<div class="kw">
+  {% include "events/brand.html" %}
+  <a class="kw-back" href="{{ base }}{{ query }}">All sessions</a>
+
+  <article class="kw-detail">
+    <div class="kw-detail-head">
+      {% include "events/leaf.html" %}
+      <div>
+        <h1>{{ s.title }}</h1>
+        <p class="kw-date">{{ s.long_date }}, {{ s.length }} on Zoom</p>
+      </div>
+    </div>
+    {% include "events/zones.html" %}
+    <div class="kw-prose">{% for p in s.paragraphs %}<p>{{ p }}</p>{% endfor %}</div>
+    {% include "events/speaker.html" %}
+  </article>
+
+  <section class="kw-panel" id="register" aria-labelledby="register-title">
+    {% if s.cancelled %}
+      <header><h2 id="register-title">This session was cancelled</h2></header>
+      <p class="kw-note">Sorry for the change of plans. <a href="{{ base }}{{ query }}">See the upcoming sessions</a>.</p>
+    {% else if s.started %}
+      <header><h2 id="register-title">Registration has closed</h2></header>
+      <p class="kw-note">This session has started. <a href="{{ base }}{{ query }}">See the upcoming sessions</a>.</p>
+    {% else %}
+      <header>
+        <h2 id="register-title">{% if s.is_full() %}Join the waitlist{% else %}Register for free{% endif %}</h2>
+        {% if s.is_full() %}
+        <p class="kw-note">All {{ s.seats }} seats are taken. Join the waitlist: when a seat frees up, the first person on the list gets it automatically.</p>
+        {% else %}
+        <p class="kw-note"><span class="kw-seats">{{ s.seats_label() }}.</span> Right after registering you get your own page with the Zoom link and calendar buttons.</p>
+        {% endif %}
+      </header>
+
+      {% if let Some(p) = problem %}<p class="kw-alert kw-alert-stop" role="alert">{{ p }}</p>{% endif %}
+      {% if !errors.is_empty() %}<p class="kw-alert kw-alert-stop" role="alert">Please check the fields marked below.</p>{% endif %}
+
+      <form class="kw-form" method="post" action="{{ base }}/sessions/{{ s.id }}/register#register" novalidate>
+        <input type="hidden" name="utm_source" value="{{ tracking.source }}">
+        <input type="hidden" name="utm_campaign" value="{{ tracking.campaign }}">
+        <div class="kw-row">
+          <div class="kw-field">
+            <label for="first_name">First name</label>
+            <input id="first_name" name="first_name" value="{{ form.first_name }}" autocomplete="given-name" maxlength="{{ domain::NAME_MAX }}" required{% if errors.get("first_name").is_some() %} aria-invalid="true"{% endif %} aria-describedby="first_name_error">
+            <p class="kw-error" id="first_name_error">{% if let Some(e) = errors.get("first_name") %}{{ e }}{% endif %}</p>
+          </div>
+          <div class="kw-field">
+            <label for="last_name">Last name</label>
+            <input id="last_name" name="last_name" value="{{ form.last_name }}" autocomplete="family-name" maxlength="{{ domain::NAME_MAX }}" required{% if errors.get("last_name").is_some() %} aria-invalid="true"{% endif %} aria-describedby="last_name_error">
+            <p class="kw-error" id="last_name_error">{% if let Some(e) = errors.get("last_name") %}{{ e }}{% endif %}</p>
+          </div>
+        </div>
+        <div class="kw-field">
+          <label for="email">Work email</label>
+          <input id="email" name="email" type="email" inputmode="email" value="{{ form.email }}" autocomplete="email" autocapitalize="off" spellcheck="false" maxlength="{{ domain::EMAIL_MAX }}" required{% if errors.get("email").is_some() %} aria-invalid="true"{% endif %} aria-describedby="email_error">
+          <p class="kw-error" id="email_error">{% if let Some(e) = errors.get("email") %}{{ e }}{% endif %}</p>
+        </div>
+        <div class="kw-row">
+          <div class="kw-field">
+            <label for="company">Company</label>
+            <input id="company" name="company" value="{{ form.company }}" autocomplete="organization" maxlength="{{ domain::COMPANY_MAX }}" required{% if errors.get("company").is_some() %} aria-invalid="true"{% endif %} aria-describedby="company_error">
+            <p class="kw-error" id="company_error">{% if let Some(e) = errors.get("company") %}{{ e }}{% endif %}</p>
+          </div>
+          <div class="kw-field">
+            <label for="job_title">Job title <small>(optional)</small></label>
+            <input id="job_title" name="job_title" value="{{ form.job_title }}" autocomplete="organization-title" maxlength="{{ domain::COMPANY_MAX }}"{% if errors.get("job_title").is_some() %} aria-invalid="true"{% endif %} aria-describedby="job_title_error">
+            <p class="kw-error" id="job_title_error">{% if let Some(e) = errors.get("job_title") %}{{ e }}{% endif %}</p>
+          </div>
+        </div>
+        <label class="kw-consent">
+          <input type="checkbox" name="consent" value="yes"{% if form.consent %} checked{% endif %}>
+          <span>{{ consent_text }}</span>
+        </label>
+        <button class="kw-button" type="submit">{% if s.is_full() %}Join the waitlist{% else %}Register{% endif %}</button>
+      </form>
+    {% endif %}
+  </section>
+</div>

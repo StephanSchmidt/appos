@@ -1,0 +1,10 @@
+[app]
+id = "discounts"
+name = "Discounts"
+version = "0.1.0"
+owner = "Daniel Reyes <daniel.reyes@example.com>"
+group = "Sales"
+wasm = "target/wasm32-wasip2/release/discounts.wasm"
+
+[capabilities]
+grant = ["kv-read", "kv-write"]

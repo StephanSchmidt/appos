@@ -1,0 +1,30 @@
+[package]
+name = "appos"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+description = "Build apps for an AppOS shell: scaffold, build, run locally."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+appos-shell = { path = "../shell" }
+chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+toml = "1"
+ureq = "3"
+# TypeScript apps (scriptc): WIT bindings, adapting the core module, componentizing.
+wasm-encoder = { version = "0.261", features = ["wasmparser"] }
+wasmparser = "0.261"
+wit-component = "0.261"
+wit-parser = "0.261"
+
+[dev-dependencies]
+wat = "1"

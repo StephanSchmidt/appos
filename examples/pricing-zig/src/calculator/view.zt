@@ -1,0 +1,138 @@
+// The page and the parts htmx swaps in while the visitor types, drags and
+// clicks. zt compiles this file to view.zig at build time; `{expr}`
+// escapes, attributes too.
+
+const domain = @import("domain.zig");
+const web = @import("web.zig");
+
+fn planClass(c: web.Card) []const u8 {
+    if (c.popular) return if (c.available) "kw-plan is-popular" else "kw-plan is-popular is-out";
+    return if (c.available) "kw-plan" else "kw-plan is-out";
+}
+
+pub templ Page(t: *const web.Index) {
+<div class="kw" hx-history="false">
+  <header class="kw-intro">
+    <h1>Kitewell pricing</h1>
+    <p>Enter your team size and compare the plans. Prices update as you type or drag.</p>
+  </header>
+  <form class="kw-controls" method="get" action={t.base} hx-get={t.base} hx-trigger="submit" hx-swap="none" hx-replace-url="true" hx-include="closest form" hx-indicator="closest form">
+    <div class="kw-utm" hidden>
+      for (t.utm) |p| {
+        <input type="hidden" name={p[0]} value={p[1]} />
+      }
+    </div>
+    <div class="kw-size">
+      <label for="users">People on your team</label>
+      <div class="kw-size-field" id="users_box">
+        @UsersBox(t)
+      </div>
+      <p class="kw-error" id="users_error" aria-live="polite">
+        @UsersError(t)
+      </p>
+      <div class="kw-slider">
+        <div id="slider_box">
+          @SliderBox(t)
+        </div>
+        <div class="kw-marks" aria-hidden="true">
+          for (t.marks) |m| {
+            <span style="--at: {m.at}">{m.label}</span>
+          }
+        </div>
+      </div>
+    </div>
+    <fieldset class="kw-billing" hx-get={t.base} hx-trigger="change">
+      <legend>Billing</legend>
+      <div class="kw-segments">
+        <label><input type="radio" name="billing" value="monthly" checked?={!t.yearly} /><span>Monthly</span></label>
+        <label><input type="radio" name="billing" value="yearly" checked?={t.yearly} /><span>Yearly <em>2 months free</em></span></label>
+      </div>
+    </fieldset>
+    <label class="kw-ai" hx-get={t.base} hx-trigger="change">
+      <input type="checkbox" name="ai" value="yes" role="switch" checked?={t.ai} />
+      <span><strong>AI planning assistant</strong> <small>Add-on for Starter and Team, included in Business</small></span>
+    </label>
+    <noscript><button class="kw-update">Show prices</button></noscript>
+  </form>
+  <section class="kw-results" id="results" aria-label="Plans and prices">
+    @Results(t)
+  </section>
+  <footer class="kw-fine">
+    <p>Prices in US dollars, excluding VAT and sales tax.</p>
+    <p>More than 250 users? <a href={t.sales}>Talk to sales</a>.</p>
+  </footer>
+</div>
+}
+
+pub templ UsersBox(t: *const web.Index) {
+<input id="users" name="users" type="text" inputmode="numeric" enterkeyhint="done" autocomplete="off" spellcheck="false" maxlength="20" value={t.users} aria-describedby="users_error" hx-get={t.base} hx-trigger="input delay:200ms" />
+<span aria-hidden="true">users</span>
+}
+
+pub templ UsersError(t: *const web.Index) {
+if (t.err) |e| {
+  {domain.message(e)} Enter a number of users from 1 to 250. More than 250? <a href={t.sales}>Talk to sales</a>.}
+}
+
+pub templ SliderBox(t: *const web.Index) {
+<input type="range" name="slider" form="kw-slider" min="0" max={t.slider_last} step="1" value={t.slider} tabindex="-1" aria-hidden="true" hx-get={t.base} hx-trigger="input throttle:80ms, change" hx-include=".kw-billing, .kw-ai, .kw-utm" hx-sync="this:queue last" />
+}
+
+pub templ Results(t: *const web.Index) {
+<p class="kw-summary" aria-live="polite">{t.summary}</p>
+if (t.enterprise) |e| {
+  <article class="kw-plan kw-enterprise" aria-labelledby="plan-enterprise">
+    <h2 id="plan-enterprise">Enterprise</h2>
+    <p class="kw-tagline">For more than 250 users</p>
+    <p class="kw-enterprise-text">For {e.users} users, our sales team works out a plan and a price with you.</p>
+    <a class="kw-cta" href={e.sales}>Talk to sales</a>
+  </article>
+}
+if (t.cards.len > 0) {
+  <div class="kw-plans">
+    for (t.cards) |c| {
+      <article class={planClass(c)} aria-labelledby="plan-{c.id}">
+        <div class="kw-plan-head">
+          <h2 id="plan-{c.id}">{c.name}</h2>
+          if (c.popular) {
+            <span class="kw-badge">Most popular</span>
+          }
+        </div>
+        <p class="kw-tagline">{c.tagline}</p>
+        <div class="kw-price">
+          <p><span class="kw-amount">{c.price}</span> <span class="kw-unit">{c.price_unit}</span></p>
+          <p class={if (c.ai_included) "kw-ai-note is-included" else "kw-ai-note"}>{c.ai_note}</p>
+        </div>
+        <div class="kw-bill">
+          if (c.reason) |reason| {
+            <p class="kw-reason">{reason}</p>
+          } else if (c.total) |total| {
+            <p class="kw-total"><strong>{total}</strong>{" "}{c.total_unit}</p>
+            if (c.minimum) |minimum| {
+              <p class="kw-minimum">{minimum}</p>
+            }
+            if (c.saving) |saving| {
+              <p class="kw-saving">{saving}</p>
+            }
+          } else {
+            <p class="kw-hint">Enter your team size to see the total.</p>
+          }
+        </div>
+        <div class="kw-action">
+          if (c.signup) |signup| {
+            <a class="kw-cta" href={signup}>Start free trial</a>
+          }
+        </div>
+        <ul class="kw-features">
+          for (c.features) |feature| {
+            <li>{feature}</li>
+          }
+        </ul>
+      </article>
+    }
+  </div>
+}
+if (t.share) |share| {
+  <p class="kw-share"><a href={share}>Link to this price</a></p>
+}
+}

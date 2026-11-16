@@ -1,0 +1,10 @@
+[app]
+id = "status-ts"
+name = "Status (TypeScript)"
+version = "0.1.0"
+owner = "Amara Okafor <amara.okafor@example.com>"
+group = "Customer service"
+wasm = "target/status-ts.wasm"
+
+[capabilities]
+grant = ["kv-read", "kv-write"]

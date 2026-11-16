@@ -1,0 +1,90 @@
+# Ignore everything, then let back in what the repo needs, so nothing
+# (notes, kv data, build output) is committed by accident. A new file
+# outside the paths below needs its own line here.
+*
+!*/
+target/
+appos-data/
+
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/Makefile
+!/README.md
+!/LICENSE
+!/calculator-prompt.md
+!/risk.toml
+!/rustfmt.toml
+
+!/wit/*.wit
+!/wit-auth/*.wit
+
+!/shell/Cargo.toml
+!/shell/src/**
+!/shell/assets/**
+
+!/cli/Cargo.toml
+!/cli/build.rs
+!/cli/src/**
+!/cli/tests/harness.py
+!/cli/tests/dev_reload.py
+!/cli/tests/terminal_output.py
+
+# The hello world every `appos new` starts from. cli/build.rs embeds every
+# file in it, so a file added there needs its line here too.
+!/cli/template/.gitignore
+!/cli/template/Cargo.toml
+!/cli/template/Cargo.lock
+!/cli/template/app.toml
+!/cli/template/Makefile
+!/cli/template/clippy.toml
+!/cli/template/rust-toolchain.toml
+!/cli/template/rustfmt.toml
+!/cli/template/wit
+!/cli/template/src/**
+!/cli/template/templates/**
+
+# The same hello world in TypeScript, for `appos new --ts`; embedded the same way.
+!/cli/template-ts/.gitignore
+!/cli/template-ts/app.toml
+!/cli/template-ts/Makefile
+!/cli/template-ts/package.json
+!/cli/template-ts/tsconfig.json
+!/cli/template-ts/wit
+!/cli/template-ts/src/**
+
+# The same hello world in Java, for `appos new --java`; embedded the same way.
+!/cli/template-java/.gitignore
+!/cli/template-java/app.toml
+!/cli/template-java/Makefile
+!/cli/template-java/pom.xml
+!/cli/template-java/wit
+!/cli/template-java/src/**
+
+# Example apps, each built by an agent that knew only the appos binary, from
+# the request in its request.md. Each builds on its own, outside this repo.
+!/examples/README.md
+!/examples/rustfmt.toml
+!/examples/*/.gitignore
+!/examples/*/request.md
+!/examples/*/app.toml
+!/examples/*/icon.svg
+!/examples/*/Cargo.toml
+!/examples/*/Cargo.lock
+!/examples/*/Makefile
+!/examples/*/clippy.toml
+!/examples/*/rust-toolchain.toml
+!/examples/*/wit/*.wit
+# The sign-in plugin example: how auth.toml names it.
+!/examples/*/auth.toml
+!/examples/*/src/**
+!/examples/*/templates/**
+# TypeScript examples (scriptc): packages and compiler settings.
+!/examples/*/package.json
+!/examples/*/package-lock.json
+!/examples/*/tsconfig.json
+# Zig examples: the build and its dependencies.
+!/examples/*/build.zig
+!/examples/*/build.zig.zon
+# Java examples: the Maven build.
+!/examples/*/pom.xml

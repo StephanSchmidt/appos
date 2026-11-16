@@ -1,0 +1,71 @@
+<div class="kw">
+  {% include "events/brand.html" %}
+
+  <article class="kw-pass">
+    {% if s.cancelled %}
+    <header class="kw-pass-status kw-pass-off">
+      <h1>This session was cancelled</h1>
+      <p>Sorry, {{ reg.first_name }}: this webinar won't take place. You don't need to do anything.</p>
+    </header>
+    {% else if status == Status::Cancelled %}
+    <header class="kw-pass-status kw-pass-off">
+      <h1>You cancelled</h1>
+      <p>Your registration is cancelled, {{ reg.first_name }}.{% if s.is_open() %} Changed your mind? <a href="{{ base }}/sessions/{{ s.id }}#register">Register again</a>.{% endif %}</p>
+    </header>
+    {% else if s.ended %}
+    <header class="kw-pass-status kw-pass-off">
+      <h1>This session has ended</h1>
+      <p>Thanks for your interest, {{ reg.first_name }}.</p>
+    </header>
+    {% else if status == Status::Seated %}
+    <header class="kw-pass-status kw-pass-in">
+      <h1>You're in</h1>
+      <p>Your seat is booked, {{ reg.first_name }}. Bookmark this page: it has your Zoom link and always shows your registration.</p>
+    </header>
+    {% else %}
+    <header class="kw-pass-status kw-pass-wait">
+      <h1>You're number {{ position }} on the waitlist</h1>
+      <p>The session is full, {{ reg.first_name }}. When a seat frees up, the first person on the waitlist gets it automatically. Bookmark this page and open it again: once you're in, it shows the Zoom link.</p>
+    </header>
+    {% endif %}
+
+    <div class="kw-pass-body">
+      <div class="kw-pass-session">
+        {% include "events/leaf.html" %}
+        <div>
+          <h2>{{ s.title }}</h2>
+          <p class="kw-date">{{ s.long_date }}, {{ s.berlin_span }}</p>
+        </div>
+      </div>
+      {% include "events/zones.html" %}
+      {% include "events/speaker.html" %}
+
+      {% if seated && !s.cancelled && !s.ended %}
+      <div class="kw-join">
+        <p class="kw-label">Your Zoom link</p>
+        <a class="kw-button" href="{{ join_link }}" rel="noopener">Join on Zoom</a>
+        <code>{{ join_link }}</code>
+      </div>
+      <div class="kw-cal" role="group" aria-label="Add to your calendar">
+        <a class="kw-button kw-button-line" href="{{ google }}" target="_blank" rel="noopener">Add to Google Calendar</a>
+        <a class="kw-button kw-button-line" href="{{ outlook }}" target="_blank" rel="noopener">Add to Outlook</a>
+        <a class="kw-button kw-button-line" href="{{ ics }}" download="{{ ics_name }}">Apple Calendar (.ics)</a>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if !s.cancelled && !s.started && status != Status::Cancelled %}
+    <footer class="kw-pass-foot">
+      <details class="kw-cancel">
+        <summary>{% if seated %}Can't make it? Cancel your seat{% else %}Leave the waitlist{% endif %}</summary>
+        <form method="post" action="{{ base }}/registration/{{ s.id }}/{{ reg.id }}/cancel">
+          <p class="kw-note">{% if seated %}Your seat goes to the next person on the waitlist.{% else %}You lose your place on the waitlist.{% endif %} You can register again later if seats are free.</p>
+          <button class="kw-button kw-button-danger" type="submit">{% if seated %}Cancel my seat{% else %}Leave the waitlist{% endif %}</button>
+        </form>
+      </details>
+    </footer>
+    {% endif %}
+  </article>
+
+  <p class="kw-fine" style="margin-top:1.25rem">Registered as {{ reg.first_name }} {{ reg.last_name }}, {{ reg.email }}. <a href="{{ base }}">More Kitewell webinars</a></p>
+</div>

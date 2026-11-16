@@ -1,0 +1,4 @@
+# How much harm each grant can do, from 0 (none) to 10. The company running
+# the shell decides, not the apps: appos-shell --risk risk.toml
+kv-read = 1
+kv-write = 2

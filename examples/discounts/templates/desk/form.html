@@ -1,0 +1,112 @@
+{% include "desk/_bar.html" %}
+<div class="page">
+  <div class="page-head">
+    <div><h1>{{ heading }}</h1><p>{{ intro }}</p></div>
+  </div>
+  {% if errors.len() > 0 || !note_error.is_empty() %}<p class="alert" role="alert">{% if errors.len() <= 1 %}One field needs a fix{% else %}{{ errors.len() }} fields need a fix{% endif %}: see below.</p>{% endif %}
+  <form class="form-grid" method="post" action="{{ action }}" hx-post="{{ quote_url }}" hx-trigger="input delay:300ms, change" hx-swap="none" novalidate>
+    <div class="form-main">
+      {% if resubmit %}
+      <div class="field">
+        <label for="note">What did you change?</label>
+        <textarea id="note" name="note" rows="2" maxlength="1000" placeholder="Optional, for the approvers and the history.">{{ note }}</textarea>
+        <p class="error">{{ note_error }}</p>
+      </div>
+      {% endif %}
+      <div class="form-row">
+        <div class="field{% if !errors.message("customer").is_empty() %} bad{% endif %}">
+          <label for="customer">Customer</label>
+          <input type="text" id="customer" name="customer" value="{{ input.customer }}" maxlength="120" autocomplete="off" required aria-describedby="customer-e">
+          <p class="error" id="customer-e">{{ errors.message("customer") }}</p>
+        </div>
+        <div class="field{% if !errors.message("link").is_empty() %} bad{% endif %}">
+          <label for="link">Salesforce opportunity <span class="hint">(optional)</span></label>
+          <input type="url" id="link" name="link" value="{{ input.link }}" maxlength="300" placeholder="https://kitewell.lightning.force.com/…" autocomplete="off" aria-describedby="link-e">
+          <p class="error" id="link-e">{{ errors.message("link") }}</p>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field{% if !errors.message("plan").is_empty() %} bad{% endif %}">
+          <span class="label" id="plan-l">Plan</span>
+          <div class="choices" role="radiogroup" aria-labelledby="plan-l">{% for c in plans %}<label><input type="radio" name="plan" value="{{ c.value }}"{% if c.selected %} checked{% endif %}>{{ c.label }}</label>{% endfor %}</div>
+          <p class="hint">Starter is never discounted.</p>
+          <p class="error">{{ errors.message("plan") }}</p>
+        </div>
+        <div class="field{% if !errors.message("seats").is_empty() %} bad{% endif %}">
+          <label for="seats">Seats</label>
+          <input type="text" inputmode="numeric" id="seats" name="seats" value="{{ input.seats }}" maxlength="7" autocomplete="off" aria-describedby="seats-e">
+          <p class="error" id="seats-e">{{ errors.message("seats") }}</p>
+        </div>
+        <div class="field{% if !errors.message("years").is_empty() %} bad{% endif %}">
+          <span class="label" id="years-l">Contract length</span>
+          <div class="choices" role="radiogroup" aria-labelledby="years-l">{% for c in years %}<label><input type="radio" name="years" value="{{ c.value }}"{% if c.selected %} checked{% endif %}>{{ c.label }}</label>{% endfor %}</div>
+          <p class="error">{{ errors.message("years") }}</p>
+        </div>
+      </div>
+      <div class="form-row terms">
+        <div class="field{% if !errors.message("discount").is_empty() %} bad{% endif %}">
+          <label for="discount">Discount in %</label>
+          <input type="text" inputmode="decimal" id="discount" name="discount" value="{{ input.discount }}" maxlength="6" placeholder="like 12 or 12.5" autocomplete="off" aria-describedby="discount-e">
+          <p class="hint">Whole numbers or halves, up to 50.</p>
+          <p class="error" id="discount-e">{{ errors.message("discount") }}</p>
+        </div>
+        <div class="field{% if !errors.message("billing").is_empty() %} bad{% endif %}">
+          <span class="label" id="billing-l">Billing</span>
+          <div class="choices" role="radiogroup" aria-labelledby="billing-l">{% for c in billings %}<label><input type="radio" name="billing" value="{{ c.value }}"{% if c.selected %} checked{% endif %}>{{ c.label }}</label>{% endfor %}</div>
+          <p class="hint">Annually upfront is our standard.</p>
+          <p class="error">{{ errors.message("billing") }}</p>
+        </div>
+        <div class="field{% if !errors.message("payment").is_empty() %} bad{% endif %}">
+          <span class="label" id="payment-l">Payment terms</span>
+          <div class="choices" role="radiogroup" aria-labelledby="payment-l">{% for c in payments %}<label><input type="radio" name="payment" value="{{ c.value }}"{% if c.selected %} checked{% endif %}>{{ c.label }}</label>{% endfor %}</div>
+          <p class="hint">Net 30 is our standard.</p>
+          <p class="error">{{ errors.message("payment") }}</p>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field{% if !errors.message("competitor").is_empty() %} bad{% endif %}">
+          <label for="competitor">Competitor in the deal <span class="hint">(if any)</span></label>
+          <input type="text" id="competitor" name="competitor" value="{{ input.competitor }}" maxlength="80" autocomplete="off" aria-describedby="competitor-e">
+          <p class="error" id="competitor-e">{{ errors.message("competitor") }}</p>
+        </div>
+        <div class="field{% if !errors.message("close_date").is_empty() %} bad{% endif %}">
+          <label for="close_date">Expected close date</label>
+          <input type="date" id="close_date" name="close_date" value="{{ input.close_date }}" min="{{ today }}" aria-describedby="close_date-e">
+          <p class="error" id="close_date-e">{{ errors.message("close_date") }}</p>
+        </div>
+      </div>
+      <div class="field{% if !errors.message("justification").is_empty() %} bad{% endif %}">
+        <label for="justification">Justification</label>
+        <textarea id="justification" name="justification" rows="4" maxlength="2000" placeholder="Why does this deal need this discount? &quot;Customer asked&quot; isn't a reason: what's the competition, the commitment, the strategic value?" aria-describedby="justification-e">{{ input.justification }}</textarea>
+        <p class="error" id="justification-e">{{ errors.message("justification") }}</p>
+      </div>
+      <div class="form-actions">
+        <button class="primary">{{ submit_label }}</button>
+        <a href="{{ cancel_url }}">Cancel</a>
+      </div>
+    </div>
+    <aside class="quote panel" id="quote" aria-live="polite">{% block quote %}
+      <h2>The numbers</h2>
+      {% if quote.ready %}
+      <dl class="numbers">
+        <div><dt>List price</dt><dd>{{ quote.list }}<small>a year</small></dd></div>
+        <div><dt>Discount</dt><dd>{{ quote.discount }}<small>a year</small></dd></div>
+        <div class="net"><dt>Net ARR</dt><dd>{{ quote.net_arr }}<small>a year</small></dd></div>
+        <div><dt>Contract value</dt><dd>{{ quote.tcv }}<small>{{ quote.years }}</small></dd></div>
+      </dl>
+      {% else %}
+      <p class="pending">{{ quote.problem }}</p>
+      {% endif %}
+      <div class="needs">
+        <h2>Who approves</h2>
+        {% if !quote.route_ready %}
+        <p class="pending">Fill in the discount, billing and payment terms to see who approves.</p>
+        {% else if quote.approvers.is_empty() %}
+        <p class="no-route">Nobody: up to 10% with standard terms is approved automatically.</p>
+        {% else %}
+        <ol>{% for a in quote.approvers %}<li>{{ a.name }} <span>{{ a.reasons }}</span></li>{% endfor %}</ol>
+        {% endif %}
+      </div>
+    {% endblock %}</aside>
+  </form>
+</div>

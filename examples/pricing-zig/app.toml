@@ -1,0 +1,10 @@
+[app]
+id = "pricing-zig"
+name = "Pricing (Zig)"
+version = "0.2.0"
+owner = "Nora Feld <nora.feld@example.com>"
+group = "Marketing"
+wasm = "target/pricing-zig.wasm"
+
+[capabilities]
+grant = []

@@ -1,0 +1,115 @@
+// The contract between the shell and a sign-in plugin: a WebAssembly
+// component for a sign-in the built-in providers (dev, header, oidc) don't
+// do. auth.toml names it:
+//
+//   provider = "plugin"
+//   wasm = "acme-auth.wasm"          # found next to auth.toml
+//   hosts = ["login.acme.com"]       # the only hosts http.fetch may call
+//   [config]                         # what config.get returns
+//   tenant = "acme"
+//   [config-env]                     # secrets: config.get("client-secret")
+//   client-secret = "ACME_SECRET"    # is $ACME_SECRET, never in the file
+//
+// The shell owns the session: a plugin runs only while someone signs in,
+// in a fresh sandbox per step, with no files, no environment, no storage
+// and no network but `http.fetch` to `hosts`.
+//
+//   GET  /_auth/sign-in    start: show a page, or redirect to the identity
+//                          provider with `state`, `nonce`, `challenge`
+//   POST /_auth/sign-in    finish: a form the plugin's page posted
+//   GET  /_auth/callback   finish: back from the identity provider; the
+//                          shell has checked `state` before the plugin runs
+package appos:auth@0.1.0;
+
+interface types {
+    /// Who signed in. The policy names people by email, so it is required;
+    /// groups become `group:<name>` in the policy.
+    record identity {
+        /// Stable, as the identity provider calls them; the email if empty.
+        id: string,
+        email: string,
+        /// Shown in the top bar; the part of the email before @ if empty.
+        name: string,
+        groups: list<string>,
+    }
+
+    /// A request to one of the sign-in pages.
+    record request {
+        method: string,
+        /// "/_auth/sign-in" or "/_auth/callback".
+        path: string,
+        query: list<tuple<string, string>>,
+        form: list<tuple<string, string>>,
+        /// The origin of the listener, e.g. "https://apps.acme.com".
+        origin: string,
+        /// Where the identity provider sends the browser back to.
+        callback: string,
+        /// For this sign-in only. Send `state` to the identity provider; the
+        /// shell checks it comes back. `nonce` is for OIDC id tokens.
+        state: string,
+        nonce: string,
+        /// PKCE: send `challenge` (S256) when starting, `verifier` when
+        /// trading the code for a token.
+        verifier: string,
+        challenge: string,
+    }
+
+    /// What the shell does next.
+    variant step {
+        /// Show this HTML in the shell's layout. Scripts don't run; a form
+        /// posts to /_auth/sign-in.
+        page(string),
+        /// Send the browser there: an https URL or a path on this site.
+        redirect(string),
+        /// Signed in.
+        done(identity),
+        /// Not signed in; the reason, for the person.
+        refuse(string),
+        /// The identity provider can't be reached; for the person.
+        unavailable(string),
+    }
+}
+
+/// What auth.toml's [config] and [config-env] give the plugin.
+interface config {
+    get: func(key: string) -> option<string>;
+}
+
+/// Outgoing HTTP: only to auth.toml's `hosts`, over https (http only to
+/// localhost). Redirects are not followed; a 3xx comes back as it is.
+interface http {
+    record request {
+        /// GET, POST, PUT, PATCH or DELETE.
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        /// Up to 1 MB.
+        body: string,
+    }
+
+    /// An error is why the call was not made or failed: a host not in
+    /// `hosts`, no answer in time.
+    fetch: func(req: request) -> result<response, string>;
+}
+
+interface provider {
+    use types.{request, step};
+
+    /// GET /_auth/sign-in.
+    start: func(req: request) -> step;
+    /// POST /_auth/sign-in, or GET /_auth/callback.
+    finish: func(req: request) -> step;
+}
+
+world sign-in {
+    import config;
+    import http;
+
+    export provider;
+}

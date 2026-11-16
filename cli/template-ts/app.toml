@@ -1,0 +1,10 @@
+[app]
+id = "hello"
+name = "Hello"
+version = "0.1.0"
+owner = ""
+group = ""
+wasm = "target/hello.wasm"
+
+[capabilities]
+grant = ["kv-read", "kv-write"]

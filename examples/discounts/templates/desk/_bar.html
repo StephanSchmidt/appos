@@ -1,0 +1,16 @@
+<header class="desk-bar">
+  <div class="inner">
+    <a class="desk-name" href="{{ frame.home }}">{% include "desk/_icon.html" %}Discount desk</a>
+    <nav class="desk-nav" aria-label="Discount desk">
+      {% for n in frame.nav %}<a href="{{ n.url }}"{% if n.active %} class="active" aria-current="page"{% endif %}>{{ n.label }}{% if !n.badge.is_empty() %}<span class="badge{% if n.hot %} hot{% endif %}">{{ n.badge }}</span>{% endif %}</a>{% endfor %}
+    </nav>
+    <form class="whoami" method="get" action="{{ frame.base }}/switch">
+      <label for="who">You are</label>
+      <select id="who" name="who">
+        {% for p in frame.people %}<option value="{{ p.value }}"{% if p.selected %} selected{% endif %}>{{ p.label }}</option>{% endfor %}
+      </select>
+      <input type="hidden" name="to" value="{{ frame.here }}">
+      <button class="small">Switch</button>
+    </form>
+  </div>
+</header>

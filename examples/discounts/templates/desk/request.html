@@ -1,0 +1,107 @@
+{% include "desk/_bar.html" %}
+<div class="page">
+  <div class="req-head">
+    <p class="ref">{{ r.reference }} <span class="status {{ r.status_key }}">{{ r.status }}</span> {{ r.where_ }}</p>
+    <h1>{{ r.customer }}</h1>
+    <p class="by">{{ r.rep }}, {{ r.rep_title }}. Asked on {{ r.created }}.{% if !r.link.is_empty() %} <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer">Salesforce opportunity</a>{% endif %}</p>
+  </div>
+
+  {% if !actions.error.is_empty() %}<p class="alert" role="alert">{{ actions.error }}</p>{% endif %}
+
+  <dl class="numbers">
+    <div><dt>List price</dt><dd>{{ r.numbers.list }}<small>a year</small></dd></div>
+    <div><dt>Discount</dt><dd>{{ r.numbers.discount }}<small>a year, {{ r.numbers.discount_total }} over {{ r.years }}</small></dd></div>
+    <div class="net"><dt>Net ARR</dt><dd>{{ r.numbers.net_arr }}<small>what they pay a year</small></dd></div>
+    <div><dt>Total contract value</dt><dd>{{ r.numbers.tcv }}<small>net ARR × {{ r.years }}</small></dd></div>
+  </dl>
+
+  <div class="req-grid">
+    <aside class="req-side">
+      <section class="panel" aria-labelledby="terms-h">
+        <h2 id="terms-h">Terms</h2>
+        <dl class="facts">
+          {% for f in r.facts %}<dt>{{ f.label }}</dt><dd{% if f.off %} class="off"{% endif %}>{{ f.value }}</dd>{% endfor %}
+        </dl>
+      </section>
+      <section class="panel" aria-labelledby="just-h">
+        <h2 id="just-h">Justification</h2>
+        <p class="why-text">{{ r.justification }}</p>
+      </section>
+    </aside>
+
+    <section class="panel" aria-labelledby="route-h">
+      <h2 id="route-h">Approvals</h2>
+      {% if r.chain.is_empty() %}
+      <p class="no-route">{{ r.no_route }}</p>
+      {% else %}
+      <ol class="route">
+        {% for c in r.chain %}
+        <li class="{{ c.state }}{% if c.overdue %} overdue{% endif %}">
+          <span class="dot" aria-hidden="true">{{ c.mark }}</span>
+          <span class="role">{{ c.role }}</span>
+          <span class="who">{{ c.name }}</span>
+          <span class="state">{{ c.when }}</span>
+          <span class="why">{{ c.reasons }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+      {% endif %}
+    </section>
+
+    {% if actions.decide %}
+    <section class="panel act" aria-labelledby="decide-h">
+      <h2 id="decide-h">Your decision</h2>
+      <form class="decide" method="post" action="{{ actions.url }}/decide">
+        <div class="field">
+          <label for="comment">Comment</label>
+          <textarea id="comment" name="comment" rows="3" maxlength="1000" placeholder="Optional to approve. To reject or send back, tell {{ r.rep_first }} why or what to change.">{{ actions.comment }}</textarea>
+        </div>
+        <div class="buttons">
+          <button class="primary" name="decision" value="approve">Approve</button>
+          <button name="decision" value="send_back">Send back for changes</button>
+          <button class="danger" name="decision" value="reject">Reject</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
+
+    {% if actions.mine %}
+    <section class="panel{% if actions.change || actions.won || actions.renew %} act{% endif %}" aria-labelledby="mine-h">
+      <h2 id="mine-h">{{ actions.mine_heading }}</h2>
+      {% if !actions.mine_text.is_empty() %}<p class="why-text">{{ actions.mine_text }}</p>{% endif %}
+      {% if actions.change %}<p><a class="button primary" href="{{ actions.url }}/change">Change and send again</a></p>{% endif %}
+      {% if actions.renew %}<p><a class="button primary" href="{{ actions.renew_url }}">Ask again with these terms</a></p>{% endif %}
+      {% if actions.won || actions.lost || actions.withdraw %}
+      <form class="decide" method="post" action="{{ actions.url }}/close">
+        <div class="field">
+          <label for="close-comment">Comment <span class="hint">(optional)</span></label>
+          <textarea id="close-comment" name="comment" rows="2" maxlength="1000">{{ actions.comment }}</textarea>
+        </div>
+        <div class="buttons">
+          {% if actions.won %}<button class="primary" name="outcome" value="won">Deal won</button>{% endif %}
+          {% if actions.lost %}<button name="outcome" value="lost">Deal lost</button>{% endif %}
+          {% if actions.withdraw %}<button class="danger" name="outcome" value="withdraw">Withdraw request</button>{% endif %}
+        </div>
+      </form>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <section class="panel" aria-labelledby="hist-h">
+      <h2 id="hist-h">History</h2>
+      <ol class="history">
+        {% for h in r.history %}
+        <li>
+          <time datetime="{{ h.at }}">{{ h.when }}</time>
+          <div class="what">
+            <span><span class="act {{ h.key }}">{{ h.action }}</span> by {{ h.who }}{% if h.changed %} <span class="changed">new terms</span>{% endif %}</span>
+            {% if !h.comment.is_empty() %}<blockquote>{{ h.comment }}</blockquote>{% endif %}
+            {% if !h.note.is_empty() %}<span class="note">{{ h.note }}</span>{% endif %}
+            {% if !h.terms.is_empty() %}<span class="terms">{{ h.terms }}</span>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+    </section>
+  </div>
+</div>
