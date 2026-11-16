@@ -6,7 +6,7 @@
 //!   args.rs       how every command reads its arguments
 //!   scaffold.rs   appos new and appos sync: the template, the SDK, the contract
 //!   dev.rs        appos build and appos dev
-//!   review.rs     appos review: appfuzz with what the shell knows
+//!   review.rs     appos review: appfuzz's files, from what the shell knows
 //!   commands.rs   the commands that talk to a platform
 //!   platform.rs   the platform API and the platforms this CLI knows
 //!   sources.rs    what appos dev watches
@@ -38,7 +38,6 @@ const NEW: Spec = Spec {
     ..Spec::bare("appos new <name> [--group <team>] [--ts | --java]")
 };
 const DEV: Spec = Spec { options: &["--addr"], ..Spec::bare("appos dev [--addr 127.0.0.1:8080]") };
-const REVIEW: Spec = Spec { options: &["--time"], ..Spec::bare("appos review [--time 30s]") };
 const LOGIN: Spec = Spec { required: 1, positional: 1, ..Spec::bare("appos login <url>") };
 const USE: Spec = Spec { required: 1, positional: 1, ..Spec::bare("appos use <name>") };
 const HOSTS: Spec = Spec { switches: &["--wit"], ..Spec::bare("appos hosts [--wit]") };
@@ -94,12 +93,8 @@ async fn run(cmd: &str, rest: &[String]) -> anyhow::Result<()> {
         }
         "dev" => dev::dev(DEV.parse(rest)?.option("--addr")).await,
         "review" => {
-            // appfuzz's exit code: 1 warnings, 2 failures, 3 incomplete.
-            let code = review::review(REVIEW.parse(rest)?.option("--time")).await?;
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
+            Spec::bare("appos review").parse(rest)?;
+            review::review().await
         }
         "login" => commands::login(LOGIN.parse(rest)?.first().unwrap_or_default()),
         "logout" => {

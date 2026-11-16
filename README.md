@@ -2,8 +2,8 @@
 
 Marketing ships to production. So do sales and customer service: anyone
 with an idea and an AI agent. AppOS is one way to make that safe. Each
-idea is its own small app. `appos review` fuzzes it with
-[appfuzz](https://appfuzz.dev), WebAssembly sandboxes it, and it may do
+idea is its own small app. [appfuzz](https://appfuzz.dev) fuzzes it
+(`appos review` sets that up), WebAssembly sandboxes it, and it may do
 only what its manifest grants and the policy lets its users do.
 Engineering owns the platform: it sees every app, who owns it, what it
 may do and how it runs, and can limit it, roll it back or turn it off.
@@ -32,13 +32,14 @@ appos new events --group Marketing  # a working hello world in ./events
 cd events
 appos dev                           # run it at http://127.0.0.1:8080/events; changes rebuild and reload
 appos guide                         # how apps work
-appos review                        # appfuzz runs it against a simulated shell
+appos review                        # writes appfuzz's files and the command that runs it
 ```
 
-`appos review` is the app review: the shell writes the appfuzz manifest
-(grants, kv costs, the I/O budget, fuel, memory) and takes the data and
-one request per route from what you did in `appos dev`. Needs
-[appfuzz](https://appfuzz.dev).
+`appos review` sets up the app review: the shell writes the appfuzz
+manifest (grants, kv costs, the I/O budget, fuel, memory) and takes the
+data and one request per route from what you did in `appos dev`.
+[appfuzz](https://appfuzz.dev) runs the review; `appos review` prints the
+command.
 
 `appos` with no arguments explains itself. Telling an agent "use the appos
 CLI to build an app" is meant to be enough.

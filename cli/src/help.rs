@@ -20,8 +20,9 @@ Apps:
   appos dev            build the app in this directory, run it in a local
                        shell, and rebuild and reload it whenever you change it
   appos build          build only
-  appos review         have appfuzz run the app many thousands of times
-                       against a simulated shell and say what it found
+  appos review         write what appfuzz needs to review the app (its
+                       grants and limits, your data and requests) and
+                       the command that runs it
   appos sync           update the app's SDK (src/appos.rs, src/appos.ts or
                        src/main/java/app/Appos.java) and wit/ to this
                        appos and the current platform
@@ -493,14 +494,21 @@ prints its address and exits. If the port is taken by something else, it
 says so before building; use --addr.
 ";
 
-const HELP_REVIEW: &str = "appos review [--time 30s]
+const HELP_REVIEW: &str = "appos review
 
-Builds the app in this directory and has appfuzz (https://appfuzz.dev)
-run it many thousands of times against a simulated shell: every route,
-with changed requests and stored data, looking for crashes, requests over
-the shell's limits, request or stored text that reaches the page as
-markup, and more. It prints what it found. Exit code 0: no findings; 1:
-warnings; 2: failures; 3: the review could not finish.
+Builds the app in this directory and writes what appfuzz
+(https://appfuzz.dev) needs to review it into ./appos-data/review:
+appfuzz.toml, plan.json and the app's wasm. It doesn't run appfuzz; it
+prints the command that does:
+
+  cd appos-data/review && appfuzz --human review --plan plan.json
+
+appfuzz runs the app many thousands of times against a simulated shell:
+every route, with changed requests and stored data, looking for crashes,
+requests over the shell's limits, request or stored text that reaches the
+page as markup, and more. Its options (--time: how long it searches) and
+its exit code (0: no findings; 1: warnings; 2: failures; 3: the review
+could not finish) are its own: appfuzz help review.
 
 The shell writes what appfuzz simulates: what app.toml grants, what each
 kv call costs, and the I/O budget, fuel and memory of one request. The
@@ -510,12 +518,10 @@ opened in appos dev gets a request made from its pattern (:name becomes
 \"name\"), and review lists it: use the app in appos dev first, so the
 review reaches every page.
 
---time is how long appfuzz searches; without it, appfuzz's default. The
-files stay in ./appos-data/review (appfuzz.toml, plan.json and appfuzz's
-runs): appfuzz --human findings there shows the findings again.
+appfuzz keeps its runs there too: appfuzz --human findings there shows
+the findings again. appos review writes its files anew each time.
 
 Needs appfuzz 0.8.0 or newer: curl -fsSL https://appfuzz.dev/install.sh | sh
-APPOS_APPFUZZ names another appfuzz binary.
 ";
 
 const HELP_BUILD: &str = "appos build
