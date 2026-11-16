@@ -15,6 +15,7 @@ appos-data/
 !/calculator-prompt.md
 !/risk.toml
 !/rustfmt.toml
+!/docs/*.png
 
 !/wit/*.wit
 !/wit-auth/*.wit

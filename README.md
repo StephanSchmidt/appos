@@ -1,5 +1,15 @@
 # AppOS
 
+Marketing ships to production. So do sales and customer service: anyone
+with an idea and an AI agent. AppOS is one way to make that safe. Each
+idea is its own small app. `appos review` fuzzes it with
+[appfuzz](https://appfuzz.dev), WebAssembly sandboxes it, and it may do
+only what its manifest grants and the policy lets its users do.
+Engineering owns the platform: it sees every app, who owns it, what it
+may do and how it runs, and can limit it, roll it back or turn it off.
+
+![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
+
 A shell that runs WebAssembly apps, written by anyone (or their agents),
 behind one layout. The shell owns the page and the data; apps get only the
 capabilities their manifest grants, and people only what the platform's
