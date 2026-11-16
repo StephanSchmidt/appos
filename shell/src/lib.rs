@@ -107,7 +107,7 @@ fn with_peer(router: axum::Router) -> axum::extract::connect_info::IntoMakeServi
 pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
     check_auth(&opts)?;
     if opts.no_auth {
-        println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen too");
+        println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too");
     }
     let engine = runtime::engine()?;
     let db = tx::open_db(&opts.data.join("appos.db"))?;
@@ -199,7 +199,9 @@ fn check_auth(opts: &Options) -> anyhow::Result<()> {
         (false, true, true) | (true, false, false) => Ok(()),
         (false, false, false) => only_here(opts),
         (true, ..) => anyhow::bail!("--no-auth means no sign-in and no policy: drop --auth and --policy, or --no-auth"),
-        (false, true, false) => anyhow::bail!("--auth needs --policy policy.csv: without one, anyone may do anything, on the admin screen too"),
+        (false, true, false) => {
+            anyhow::bail!("--auth needs --policy policy.csv: without one, anyone may do anything, on the admin screen and the platform API too")
+        }
         (false, false, true) => anyhow::bail!("--policy needs --auth auth.toml, to know who is who"),
     }
 }
