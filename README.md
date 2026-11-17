@@ -350,16 +350,19 @@ signs in shows "Sign-in isn't working right now", and the site goes on.
 GitHub organization, with their teams as groups: Rust and wit-bindgen,
 `make build` makes `auth_github.wasm`.
 
-## Limits
+## Every request has a budget
+
+An endless loop or a page that eats memory stops when its request runs
+out of budget. Its visitor gets an error, the request counts as a failure
+(5 within a minute roll the app back, see Deploying) and the shell and
+the other apps keep running.
 
 Each request gets 1 billion instructions (fuel), 64 MB memory, 100 I/O
 units and 2 seconds; an app may ask for up to 30 seconds in app.toml
 (`[limits] seconds = 5`). An admin can set an app's memory (16–512 MB),
 time (1–30 s) and instructions (250 million–8 billion) on the admin screen;
-they stay across deploys until set back. A request over a limit stops: its
-visitor gets an error and it counts as a failure.
-The time limit stops an app wherever it is, also
-while it waits in a host call.
+they stay across deploys until set back. The time limit stops an app
+wherever it is, also while it waits in a host call.
 Database reads and commits run off the async worker threads. Waiting for
 the KV connection or a SQLite writer lock uses the request's remaining
 time; an expired transaction rolls back its writes.
