@@ -1,12 +1,16 @@
 # AppOS
 
 Marketing ships to production. So do sales and customer service: anyone
-with an idea and an AI agent. AppOS is one way to make that safe. Each
-idea is its own small app. [appfuzz](https://appfuzz.dev) fuzzes it
-(`appos review` sets that up), WebAssembly sandboxes it, and it may do
-only what its manifest grants and the policy lets its users do.
-Engineering owns the platform: it sees every app, who owns it, what it
-may do and how it runs, and can limit it, roll it back or turn it off.
+with an idea and an AI agent. That takes shift left to the extreme, since
+development moves to the people who need the app. AppOS is one way to
+make it safe. Each idea is its own small app. Before it goes live it is
+checked and, where needed, hardened; [appfuzz](https://appfuzz.dev) is one
+way to automate that check (`appos review` sets it up). WebAssembly
+sandboxes it, and it may do only what its manifest grants and the policy
+lets its users do. Engineering owns the platform and gardens the live
+apps: it sees every app, who owns it, what it may do and how it runs,
+checks its packages for known vulnerabilities (`appos audit`, Rust apps
+for now), and can limit it, roll it back or turn it off.
 
 ![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
 
@@ -35,14 +39,19 @@ appos guide                         # how apps work
 appos review                        # writes appfuzz's files and the command that runs it
 ```
 
-`appos review` sets up the app review: the shell writes the appfuzz
-manifest (grants, kv costs, the I/O budget, fuel, memory) and takes the
-data and one request per route from what you did in `appos dev`.
-[appfuzz](https://appfuzz.dev) runs the review; `appos review` prints the
-command.
-
 `appos` with no arguments explains itself. Telling an agent "use the appos
 CLI to build an app" is meant to be enough.
+
+## Hardening
+
+Hardening means checking an app before it goes live and fixing what the
+check finds. `appos review` sets up the app review: the shell writes the
+appfuzz manifest (grants, kv costs, the I/O budget, fuel, memory) and
+takes the data and one request per route from what you did in `appos
+dev`. [appfuzz](https://appfuzz.dev), one way to automate the review, runs
+it; `appos review` prints the command. Deploys don't run it yet, so run it
+before `appos deploy`. The deploy then checks the app as the shell does
+at startup (see Deploying).
 
 ## Platforms
 
@@ -92,7 +101,7 @@ cd calculator && appos deploy        # http://127.0.0.1:8080/calculator
 
 An app travels as one file, app.zip: app.toml, the .wasm, icon.svg and,
 for a Rust app, deps.json, the crates compiled into it (see
-[Audit](#audit)). `appos deploy` builds and packs it in memory; `appos
+[Gardening](#gardening)). `appos deploy` builds and packs it in memory; `appos
 pack` writes it (`target/app.zip`, the same bytes for the same app), and
 `appos deploy app.zip` sends one built elsewhere, by CI or another
 machine. app.toml
@@ -152,10 +161,12 @@ Browser writes to app routes and platform endpoints must come from the
 same origin. A TLS terminating reverse proxy should set `X-Forwarded-Proto`
 to `https`.
 
-## Audit
+## Gardening
 
-Which live apps use a package with a known vulnerability, and who owns
-them:
+Gardening means checking the live apps regularly: what failed, whose owner
+left, and which packages turned unsafe after the deploy. `appos audit`
+lists the live apps that use a package with a known vulnerability, and
+who owns them:
 
 ```sh
 appos audit                # the live apps on the current platform
