@@ -8,11 +8,15 @@
 //!   dev.rs        appos build and appos dev
 //!   review.rs     appos review: appfuzz's files, from what the shell knows
 //!   commands.rs   the commands that talk to a platform
+//!   audit.rs      appos audit: the live apps' packages against OSV
+//!   deps/         deps.json: the packages compiled into an app, per language
 //!   platform.rs   the platform API and the platforms this CLI knows
 //!   sources.rs    what appos dev watches
 
 mod args;
+mod audit;
 mod commands;
+mod deps;
 mod dev;
 mod help;
 mod java;
@@ -47,6 +51,7 @@ const LOG: Spec = Spec { switches: &["--failures"], options: &["--before"], ..Sp
 const ROLLBACK: Spec = Spec { positional: 1, options: &["--reason"], ..Spec::bare("appos rollback [version] [--reason <text>]") };
 const OFF: Spec = Spec { options: &["--reason"], ..Spec::bare("appos off [--reason <text>]") };
 const ON: Spec = Spec { options: &["--reason"], ..Spec::bare("appos on [--reason <text>]") };
+const AUDIT: Spec = Spec { switches: &["--json"], ..Spec::bare("appos audit [--json]") };
 
 #[tokio::main]
 async fn main() {
@@ -123,6 +128,7 @@ async fn run(cmd: &str, rest: &[String]) -> anyhow::Result<()> {
         }
         "off" => commands::turn(false, OFF.parse(rest)?.option("--reason")),
         "on" => commands::turn(true, ON.parse(rest)?.option("--reason")),
+        "audit" => audit::audit(AUDIT.parse(rest)?.switch("--json")),
         other => Err(unknown(other)),
     }
 }
@@ -245,6 +251,7 @@ mod tests {
             "rollback",
             "off",
             "on",
+            "audit",
         ] {
             assert!(help::command(cmd).is_some_and(|h| h.lines().take(2).any(|l| l.starts_with(&format!("appos {cmd}")))), "{cmd}");
         }

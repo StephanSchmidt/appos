@@ -92,7 +92,7 @@ pub fn logout() -> anyhow::Result<()> {
 }
 
 /// The current platform, for commands that need one.
-fn current() -> anyhow::Result<Platform> {
+pub(crate) fn current() -> anyhow::Result<Platform> {
     let config = Config::load()?;
     match config.current() {
         Some(p) => Ok(p.clone()),
@@ -121,7 +121,8 @@ fn pack_here() -> anyhow::Result<(String, Vec<u8>)> {
     dev::build()?;
     let wasm = std::fs::read(&wasm_path).map_err(|e| anyhow::anyhow!("{}: {e}", wasm_path.display()))?;
     let icon = std::fs::read_to_string(dir.join("icon.svg")).ok();
-    let zip = Bundle { manifest, wasm, icon }.pack()?;
+    let deps = crate::deps::json(&dir);
+    let zip = Bundle { manifest, wasm, icon, deps }.pack()?;
     if zip.len() > bundle::MAX {
         anyhow::bail!("app.zip is {} MB, more than the {} MB a platform takes", zip.len() >> 20, bundle::MAX >> 20);
     }

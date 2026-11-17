@@ -51,6 +51,8 @@ is nothing to configure.
                        turn the app off: it answers with a page saying so
   appos on [--reason <text>]
                        turn it on again, unless an admin turned it off
+  appos audit [--json] the live apps on the current platform that use a
+                       crate with a known vulnerability
 
 Every command has its own help: appos <command> --help
 
@@ -571,8 +573,9 @@ granted and the apps running there. --wit prints the full contract.
 const HELP_DEPLOY: &str = "appos deploy [app.zip]
 
 Builds the app in this directory and sends it to the current platform
-(see `appos platforms`) as app.zip: app.toml, the .wasm, and icon.svg if
-there is one. With a file, sends that app.zip instead, as `appos pack`
+(see `appos platforms`) as app.zip: app.toml, the .wasm, icon.svg if
+there is one and, for a Rust app, deps.json: the crates it is built with,
+for `appos audit`. With a file, sends that app.zip instead, as `appos pack`
 makes it, so an app built elsewhere (CI, another machine) deploys without
 building. The platform checks it as it does at startup and makes it live:
 the next request gets the new version, and the data in kv stays. Prints
@@ -598,8 +601,9 @@ the like) isn't the one of this appos; `appos sync` updates both.
 const HELP_PACK: &str = "appos pack [file]
 
 Builds the app in this directory and writes it as one file, app.zip:
-app.toml, the .wasm, and icon.svg if there is one. Writes target/app.zip,
-or the file given. `appos deploy app.zip` sends it to a platform.
+app.toml, the .wasm, icon.svg if there is one and, for a Rust app,
+deps.json: the crates it is built with, for `appos audit`. Writes
+target/app.zip, or the file given. `appos deploy app.zip` sends it to a platform.
 `appos deploy` alone builds, packs and sends in one go; pack is for
 deploying later or from somewhere else.
 
@@ -670,6 +674,33 @@ in the platform's history, where admins see it.
 An app an admin turned off goes back on only from the admin screen.
 ";
 
+const HELP_AUDIT: &str = "appos audit [--json]
+
+Shows which live apps on the current platform use a package with a known
+vulnerability, and who owns them.
+
+`appos deploy` and `appos pack` put deps.json into app.zip: the packages
+compiled into the app. For a Rust app, the crates.io crates in its .wasm,
+read from Cargo.lock and the crates' Cargo.toml as cargo resolves them: no
+dev- or build-dependencies, no proc-macros, only what the features and
+wasm32-wasip2 turn on. The platform keeps it with the version. appos
+audit matches the live versions against the advisories OSV publishes for
+their ecosystem (for crates.io: RustSec, GitHub, known malware),
+downloaded at most once an hour into ~/.cache/appos.
+
+For each app: the package, the advisory, and the versions that fix it. Fix
+a crate with `cargo update -p <crate>` (or a newer version in Cargo.toml)
+and `appos deploy`. Unmaintained and unsound crates are warnings. Apps
+without deps.json (TypeScript, Java and Zig apps, or packed by an older
+appos) are listed as not checked.
+
+It finds accidents, not intent: an app that means harm doesn't need a
+vulnerable package. The sandbox and the grants hold every app either way.
+
+Exits with 1 when a live app uses a package with a known vulnerability, so
+CI can run it every day. --json prints the findings as JSON.
+";
+
 const HELP_SYNC: &str = "appos sync
 
 Brings the app in this directory up to date with this appos: writes its
@@ -712,6 +743,7 @@ pub fn command(cmd: &str) -> Option<&'static str> {
         "log" => HELP_LOG,
         "rollback" => HELP_ROLLBACK,
         "off" | "on" => HELP_SWITCH,
+        "audit" => HELP_AUDIT,
         _ => return None,
     })
 }

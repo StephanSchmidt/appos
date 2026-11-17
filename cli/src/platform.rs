@@ -25,7 +25,7 @@ pub struct Platform {
 }
 
 // The platform API's answers, the same types the shell sends.
-pub use appos_shell::api::{Deployed, LogPage, Me, News, NewsEvent, RolledBack, Spec, Version};
+pub use appos_shell::api::{Deployed, LivePackages, LogPage, Me, News, NewsEvent, RolledBack, Spec, Version};
 use appos_shell::api::{RollbackRequest, SwitchRequest, Switched};
 
 /// Platform responses may provide contract text, never paths outside wit/
@@ -268,6 +268,11 @@ pub fn deploy(p: &Platform, zip: &[u8]) -> anyhow::Result<Deployed> {
 
 pub fn versions(p: &Platform, app_id: &str) -> anyhow::Result<Vec<Version>> {
     call_json(p, &format!("/_platform/apps/{app_id}/versions"), None, "")
+}
+
+/// What each live app is built with, for `appos audit`.
+pub fn packages(p: &Platform) -> anyhow::Result<Vec<LivePackages>> {
+    call_json(p, "/_platform/packages", None, "")
 }
 
 /// What happened to an app after `since` (a `News::now`); without it, the

@@ -10,6 +10,7 @@ pub mod api;
 mod auth;
 pub mod bundle;
 mod deploy;
+pub mod deps;
 mod log_filter;
 mod manifest;
 mod platform;

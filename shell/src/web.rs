@@ -305,6 +305,7 @@ pub fn platform_router(shell: Arc<Shell>, own: Option<&str>) -> Router {
         .route("/_platform/me", get(me))
         .route("/_platform/deploy", post(deploy).layer(DefaultBodyLimit::max(crate::bundle::MAX)))
         .route("/_platform/apps/{id}/versions", get(versions))
+        .route("/_platform/packages", get(packages))
         .route("/_platform/apps/{id}/news", get(news))
         .route("/_platform/log", get(log))
         .route("/_platform/apps/{id}/rollback", post(rollback))
@@ -503,6 +504,24 @@ async fn versions(State(shell): S, Path(id): Path<String>) -> Response {
         Ok(v) if v.is_empty() => (StatusCode::NOT_FOUND, format!("{id} was never deployed here")).into_response(),
         result => json(result),
     }
+}
+
+/// `appos audit`: what each live app is built with.
+async fn packages(State(shell): S) -> Response {
+    let live = shell.platform.run(|db| db.live_packages()).await;
+    json(live.map(|live| {
+        live.into_iter()
+            .map(|(v, packages)| crate::api::LivePackages {
+                id: v.app_id,
+                name: v.name,
+                version: v.version,
+                label: v.label,
+                owner: v.owner,
+                group: v.group,
+                packages,
+            })
+            .collect::<Vec<_>>()
+    }))
 }
 
 /// What a builder hears about: the platform or an admin acting on their app.
@@ -1020,6 +1039,28 @@ mod tests {
             assert!(csp.split(';').any(|d| d.trim() == "script-src 'none'"), "{path}: {csp}");
             assert_eq!(to_bytes(response.into_body(), 64 * 1024).await.unwrap().as_ref(), svg.as_bytes());
         }
+    }
+
+    #[tokio::test]
+    async fn the_platform_tells_what_each_live_app_is_built_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = crate::testing::shell(dir.path().to_path_buf());
+        let deploy = |version: &str, packages: Option<&[&str]>| {
+            let deps = packages.map(|p| crate::deps::to_json(p.iter().map(|p| p.to_string())));
+            let bundle = crate::bundle::Bundle { deps, ..crate::testing::bundle(version, None) };
+            let shell = shell.clone();
+            async move { crate::deploy::deploy(&shell, &bundle.pack().unwrap(), Actor::Cli).await.unwrap() }
+        };
+        deploy("1", Some(&["pkg:cargo/time@0.1.43"])).await;
+        deploy("2", Some(&["pkg:cargo/time@0.3.47", "pkg:cargo/serde@1.0.228"])).await;
+        let other =
+            crate::bundle::Bundle { manifest: crate::testing::bundle("1", None).manifest.replace("'test'", "'other'"), ..crate::testing::bundle("1", None) };
+        crate::deploy::deploy(&shell, &other.pack().unwrap(), Actor::Cli).await.unwrap();
+        let response = platform_router(shell, None).oneshot(Request::builder().uri("/_platform/packages").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let live: Vec<crate::api::LivePackages> = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        let seen: Vec<_> = live.iter().map(|a| (a.id.as_str(), a.version.as_str(), a.packages.clone())).collect();
+        assert_eq!(seen, [("other", "1", None), ("test", "2", Some(vec!["pkg:cargo/serde@1.0.228".into(), "pkg:cargo/time@0.3.47".into()]))]);
     }
 
     #[tokio::test]

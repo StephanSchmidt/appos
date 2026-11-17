@@ -104,12 +104,14 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
         risk: shell.risk.of_app(&m),
         grants: m.capabilities.grant.clone(),
         routes: vec![],
+        packages: None,
     };
 
     let loaded = async {
         bundle::check(&bundle.manifest)?;
         let checked = bundle.checked()?;
         let app = runtime::load(&shell.engine, shell.db.clone(), &checked).await?;
+        let packages = checked.packages.clone();
         // Kept as `pack` writes it, whatever zipped it: one file per version.
         let (data, stored) = (shell.data.clone(), checked.bundle.clone());
         let (id, label) = (v.app_id.clone(), v.label.clone());
@@ -119,18 +121,18 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
             store_bundle(&dir.join(bundle::FILE), &stored)
         })
         .await??;
-        anyhow::Ok(app)
+        anyhow::Ok((app, packages))
     }
     .await;
-    let app = match loaded {
-        Ok(app) => Arc::new(app),
+    let (app, packages) = match loaded {
+        Ok((app, packages)) => (Arc::new(app), packages),
         Err(e) => {
             let (refused, why) = (v.clone(), format!("{e:#}"));
             shell.platform.run(move |db| db.refused(&refused, &why, started.elapsed())).await?;
             return Err(e);
         }
     };
-    let v = NewVersion { routes: app.routes.iter().map(|r| r.pattern()).collect(), ..v };
+    let v = NewVersion { routes: app.routes.iter().map(|r| r.pattern()).collect(), packages, ..v };
     let held = shell.state.deployed(app.clone(), v, started).await?;
     Ok(Deployed { app, held })
 }

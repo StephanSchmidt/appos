@@ -71,6 +71,7 @@ pub fn kv_bundle() -> Bundle {
             .into(),
         wasm: include_bytes!("testing-kv.wat").to_vec(),
         icon: None,
+        deps: None,
     }
 }
 
@@ -79,5 +80,6 @@ pub fn bundle(version: &str, icon: Option<&str>) -> Bundle {
         manifest: format!("[app]\nid = 'test'\nname = 'Test'\nversion = '{version}'\nowner = 'Tests'\ngroup = 'Tests'\n"),
         wasm: include_bytes!("testing.wat").to_vec(),
         icon: icon.map(str::to_string),
+        deps: None,
     }
 }

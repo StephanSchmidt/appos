@@ -161,6 +161,22 @@ pub struct RolledBack {
     pub url: String,
 }
 
+/// `GET /_platform/packages`: what each live app is built with, from the
+/// deps.json in its app.zip, for `appos audit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LivePackages {
+    pub id: String,
+    pub name: String,
+    /// From app.toml, like "0.3.0".
+    pub version: String,
+    pub label: String,
+    pub owner: String,
+    pub group: String,
+    /// Package URLs like pkg:cargo/serde@1.0.228. None: the app has no
+    /// deps.json (not a Rust app, or packed by an older appos).
+    pub packages: Option<Vec<String>>,
+}
+
 /// `GET /_platform/spec`: what this platform offers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spec {

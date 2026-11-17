@@ -24,7 +24,7 @@ use crate::runtime::AdminLimits;
 
 /// Goes up with every change to SCHEMA. Unreleased, so there are no
 /// migrations: an older platform.db is refused with a message to delete it.
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 const SCHEMA: &str = r#"
 -- Every deploy, refused ones too. At most one version per app is live.
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS versions (
     deployed_at INTEGER NOT NULL,  -- unix ms
     took_ms INTEGER NOT NULL,      -- from receiving it to live, or refused
     grants TEXT NOT NULL,          -- JSON array, as deployed
-    routes TEXT NOT NULL           -- JSON array like "GET /", empty if refused
+    routes TEXT NOT NULL,          -- JSON array like "GET /", empty if refused
+    packages TEXT                  -- JSON array of package URLs from deps.json; NULL without one
 );
 CREATE INDEX IF NOT EXISTS versions_app ON versions (app_id, id);
 
@@ -523,6 +524,9 @@ pub struct NewVersion {
     pub grants: Vec<String>,
     /// Empty for a refused version: its routes aren't known.
     pub routes: Vec<String>,
+    /// From deps.json: what it is built with, for `appos audit`. None
+    /// without one, and for a refused version.
+    pub packages: Option<Vec<String>>,
 }
 
 /// Who rolled back and why. The shell rolls back on its own after failures
@@ -634,8 +638,8 @@ impl PlatformDb {
 
     fn insert_version(conn: &Connection, v: &NewVersion, status: VersionStatus, reason: Option<&str>, took: Duration) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT INTO versions (app_id, label, version, name, owner, app_group, status, reason, deployed_at, took_ms, grants, routes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO versions (app_id, label, version, name, owner, app_group, status, reason, deployed_at, took_ms, grants, routes, packages)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 v.app_id,
                 v.label,
@@ -648,7 +652,8 @@ impl PlatformDb {
                 now_ms(),
                 took.as_millis() as i64,
                 serde_json::to_string(&v.grants)?,
-                serde_json::to_string(&v.routes)?
+                serde_json::to_string(&v.routes)?,
+                v.packages.as_ref().map(serde_json::to_string).transpose()?
             ],
         )?;
         Ok(())
@@ -983,6 +988,21 @@ impl PlatformDb {
         Ok(stmt.query_map([VersionStatus::Live], version)?.collect::<Result<_, _>>()?)
     }
 
+    /// The live version of every app, with the packages it is built with
+    /// (None: it has no deps.json).
+    pub fn live_packages(&self) -> anyhow::Result<Vec<(Version, Option<Vec<String>>)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("SELECT {VERSION_COLS}, packages FROM versions WHERE status = ?1 ORDER BY app_id"))?;
+        let rows = stmt.query_map([VersionStatus::Live], |r| {
+            let packages = match r.get::<_, Option<String>>(13)? {
+                Some(_) => Some(list(r, 13)?),
+                None => None,
+            };
+            Ok((version(r)?, packages))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn live_of(&self, app_id: &str) -> anyhow::Result<Option<Version>> {
         let conn = self.conn();
         let sql = format!("SELECT {VERSION_COLS} FROM versions WHERE app_id = ?1 AND status = ?2");
@@ -1310,6 +1330,7 @@ mod tests {
             risk: Some(8),
             grants: vec![],
             routes: vec![],
+            packages: None,
         }
     }
 

@@ -90,10 +90,12 @@ appos login http://127.0.0.1:8080    # open the link, then paste a token from /a
 cd calculator && appos deploy        # http://127.0.0.1:8080/calculator
 ```
 
-An app travels as one file, app.zip: app.toml, the .wasm and icon.svg.
-`appos deploy` builds and packs it in memory; `appos pack` writes it
-(`target/app.zip`, the same bytes for the same app), and `appos deploy
-app.zip` sends one built elsewhere, by CI or another machine. app.toml
+An app travels as one file, app.zip: app.toml, the .wasm, icon.svg and,
+for a Rust app, deps.json, the crates compiled into it (see
+[Audit](#audit)). `appos deploy` builds and packs it in memory; `appos
+pack` writes it (`target/app.zip`, the same bytes for the same app), and
+`appos deploy app.zip` sends one built elsewhere, by CI or another
+machine. app.toml
 names the app's owner, the person or team to ask about it, and its group,
 the team it belongs to; the admin screen groups apps by it. A deploy
 without either is refused:
@@ -110,8 +112,8 @@ group = "Marketing"                     # appos new --group Marketing
 The shell checks a deployed app as it does at startup, keeps its app.zip
 in `<data>/apps/<app-id>/<version>/` and makes it live; its kv data stays.
 A version is the version from app.toml followed by 32 hex digits from a
-SHA-256 hash of app.toml, the .wasm and icon.svg. Stored versions are
-immutable: changing an icon creates a new version too.
+SHA-256 hash of app.toml, the .wasm, icon.svg and deps.json. Stored
+versions are immutable: changing an icon creates a new version too.
 Versions use 1–200 ASCII letters, digits, dots, underscores, dashes or plus
 signs, so their stored bundles stay inside the app's directory.
 
@@ -149,6 +151,42 @@ proxy, give `--origin` the address people use.
 Browser writes to app routes and platform endpoints must come from the
 same origin. A TLS terminating reverse proxy should set `X-Forwarded-Proto`
 to `https`.
+
+## Audit
+
+Which live apps use a package with a known vulnerability, and who owns
+them:
+
+```sh
+appos audit                # the live apps on the current platform
+appos audit --json         # the same as JSON, for scripts
+```
+
+`appos deploy` and `appos pack` put deps.json into a Rust app's app.zip:
+the crates.io crates compiled into its .wasm, as package URLs like
+`pkg:cargo/serde@1.0.228`. appos reads them from Cargo.lock and the
+crates' Cargo.toml as cargo resolves them for wasm32-wasip2, without
+running cargo: no dev- or build-dependencies, no proc-macros, only what
+the features and the target turn on. The shell keeps deps.json with the
+version; `/_platform/packages` lists it for every live app.
+
+`appos audit` matches these lists against the advisories OSV
+(https://osv.dev) publishes for each ecosystem, for crates.io those of
+RustSec and GitHub and the known malicious crates. It downloads them at
+most once an hour into ~/.cache/appos. For each app with a vulnerable
+package it names the owner, the advisory and the versions that fix it,
+and it exits with 1 if there is one, so CI can run it every day.
+Unmaintained and unsound crates are warnings.
+
+Where appos can't tell which crates cargo builds, the app.zip goes
+without deps.json and `appos deploy` and `appos pack` warn: resolver 1
+(edition 2015 or 2018 without `resolver = "2"`), rustflags that change
+the target's cfg, `[replace]`, a crate missing from the cargo cache
+(build the app first). The audit lists those apps as not checked, like
+TypeScript, Java and Zig apps, which get no deps.json yet.
+
+It finds accidents, like a forgotten `cargo update`, not intent: the
+sandbox and the grants hold an app whatever it is built with.
 
 ## Admin screen
 
@@ -386,6 +424,9 @@ shell/                the shell: library + appos-shell binary
                       (axum, wasmtime, SQLite for kv and the platform
                       database, platform API, admin screen)
 cli/                  the appos CLI; runs the same shell for `appos dev`
+cli/src/deps/         deps.json: the packages in an app, a lister per
+                      language (cargo/ for Rust); shell/src/deps/ matches
+                      them against OSV
 cli/template/         the hello world every new app starts from
 cli/template-ts/      the same in TypeScript (appos new --ts)
 cli/template-java/    the same in Java (appos new --java)
