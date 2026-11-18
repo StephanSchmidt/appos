@@ -7,7 +7,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::response::Response;
 
 use crate::log_filter::{PLATFORM, Pick};
-use crate::manifest::{Band, allows};
+use crate::manifest::Band;
 use crate::platform::{Kind, Request, Version, VersionStatus, now_ms};
 use crate::runtime::IO_BUDGET;
 use crate::shell::Shell;
@@ -197,7 +197,7 @@ pub(super) fn risk_table(shell: &Shell, a: &App) -> String {
                 if *l == level { r#" class="sets""# } else { "" },
                 escape(g),
                 grant_chip(*l),
-                allows(g),
+                escape(shell.kits.allows(g)),
             )
         })
         .collect();

@@ -11,6 +11,7 @@ mod auth;
 pub mod bundle;
 mod deploy;
 pub mod deps;
+pub mod kit;
 mod log_filter;
 mod manifest;
 mod platform;
@@ -74,16 +75,53 @@ pub struct Options {
     pub no_auth: bool,
 }
 
+/// A platform: the shell and its kits, what apps call besides the page
+/// (kit.rs).
+///
+/// ```ignore
+/// appos_shell::Platform::new()
+///     .kit(Crm::new(crm_db))
+///     .serve(opts)
+///     .await
+/// ```
+pub struct Platform {
+    /// A mistake, like two kits offering the same grant, stops `serve`.
+    kits: anyhow::Result<kit::Kits>,
+}
+
+impl Default for Platform {
+    fn default() -> Self {
+        Platform { kits: Ok(kit::Kits::builtin()) }
+    }
+}
+
+impl Platform {
+    /// A platform with kv, which every platform has.
+    pub fn new() -> Platform {
+        Platform::default()
+    }
+
+    /// With one kit more.
+    pub fn kit(self, kit: impl kit::Kit) -> Platform {
+        Platform { kits: self.kits.and_then(|k| k.with(kit)) }
+    }
+
+    /// Loads the apps and serves them until the process ends.
+    pub async fn serve(self, opts: Options) -> anyhow::Result<()> {
+        serve_with(opts, self.kits?).await
+    }
+}
+
 /// Loads the apps from directories, with the checks a deployed bundle gets
 /// (bundle.rs). An app that fails to load is refused with a message; the
 /// others still run.
-async fn load_all(engine: &Engine, db: &tx::Db, paths: &[PathBuf]) -> Vec<Arc<runtime::LoadedApp>> {
+async fn load_all(engine: &Engine, db: &tx::Db, kits: &kit::Kits, paths: &[PathBuf]) -> Vec<Arc<runtime::LoadedApp>> {
     let mut apps = Vec::new();
     for path in paths {
         let loaded = async {
             let path = path.clone();
             let checked = tokio::task::spawn_blocking(move || bundle::Bundle::from_dir(&path)?.checked()).await??;
-            runtime::load(engine, db.clone(), &checked).await
+            runtime::load(engine, db.clone(), kits, &checked).await
         }
         .await;
         match loaded {
@@ -104,9 +142,15 @@ fn with_peer(router: axum::Router) -> axum::extract::connect_info::IntoMakeServi
     router.into_make_service_with_connect_info::<std::net::SocketAddr>()
 }
 
-/// Loads the apps and serves them until the process ends.
-pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
+/// Loads the apps and serves them until the process ends: a platform with
+/// kv only.
+pub async fn serve(opts: Options) -> anyhow::Result<()> {
+    Platform::new().serve(opts).await
+}
+
+async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     check_auth(&opts)?;
+    opts.risk.check(&kits)?;
     if opts.no_auth {
         println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too");
     }
@@ -121,7 +165,7 @@ pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
         Ok(n) => println!("risk.toml: {n} grants rated differently than at the last start"),
         Err(e) => eprintln!("could not keep the risk levels: {e:#}"),
     }
-    let apps = load_all(&engine, &db, &opts.apps).await;
+    let apps = load_all(&engine, &db, &kits, &opts.apps).await;
 
     let origin = opts.origin.clone().unwrap_or_else(|| format!("http://{}", opts.addr));
     // Neither --auth nor --no-auth: the token sign-in (auth/token.rs).
@@ -133,11 +177,11 @@ pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
     };
     let policy = match &opts.policy {
         Some(path) => {
-            let policies = access::Policies::load(path).await?;
+            let policies = access::Policies::load(path, kits.names()).await?;
             println!("{}: {} rules", policies.file_name(), policies.current().rules());
             Some(policies)
         }
-        None if token.is_some() => Some(access::Policies::built_in(&auth::token::policy()).await?),
+        None if token.is_some() => Some(access::Policies::built_in(&auth::token::policy(&kits.names()), kits.names()).await?),
         None => None,
     };
     let shell = shell::Shell::new(shell::Parts {
@@ -149,6 +193,7 @@ pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
         data: opts.data.clone(),
         platform,
         risk: opts.risk.clone(),
+        kits: kits.clone(),
         keep_examples: opts.keep_examples,
         auth,
         policy,
@@ -162,7 +207,7 @@ pub async fn serve(mut opts: Options) -> anyhow::Result<()> {
         let paths = opts.apps.clone();
         tokio::spawn(async move {
             while reload.recv().await.is_some() {
-                shell.state.insert_loaded(load_all(&engine, &db, &paths).await);
+                shell.state.insert_loaded(load_all(&engine, &db, &kits, &paths).await);
             }
         });
     }

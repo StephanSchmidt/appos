@@ -110,7 +110,7 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
     let loaded = async {
         bundle::check(&bundle.manifest)?;
         let checked = bundle.checked()?;
-        let app = runtime::load(&shell.engine, shell.db.clone(), &checked).await?;
+        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await?;
         let packages = checked.packages.clone();
         // Kept as `pack` writes it, whatever zipped it: one file per version.
         let (data, stored) = (shell.data.clone(), checked.bundle.clone());
@@ -154,7 +154,7 @@ async fn load_stored(shell: &Shell, app_id: &str, label: &str) -> anyhow::Result
         anyhow::Ok(checked)
     })
     .await??;
-    runtime::load(&shell.engine, shell.db.clone(), &checked).await
+    runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await
 }
 
 /// At startup: loads the live version of every deployed app. The shell
@@ -264,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
         let checked = crate::testing::bundle("1", None).checked().unwrap();
-        let app = runtime::load(&shell.engine, shell.db.clone(), &checked).await.unwrap();
+        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await.unwrap();
         shell.state.insert_loaded([Arc::new(app)]);
         assert!(shell.platform.live_of("test").unwrap().is_none());
 

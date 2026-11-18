@@ -58,39 +58,25 @@ fn default_wasm() -> PathBuf {
     PathBuf::from("app.wasm")
 }
 
-names! {
-    /// A capability an app can be granted. `registry`, `log` and `page`
-    /// need no grant.
-    pub enum Grant {
-        KvRead = "kv-read",
-        KvWrite = "kv-write",
+/// Grants one app may hold.
+pub const MAX_GRANTS: usize = 64;
+/// Bytes of a grant's name.
+const MAX_GRANT_NAME: usize = 60;
+
+/// A grant's name, as kits offer it and app.toml asks for it: lowercase
+/// letters, digits and dashes, like "kv-read". The kits say which exist
+/// (kit.rs). `admin` is the admin screen's, in the policy.
+pub fn validate_grant_name(name: &str) -> Result<(), String> {
+    let ok = name.len() <= MAX_GRANT_NAME
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok {
+        return Err(format!("grant {name:?} must be up to {MAX_GRANT_NAME} lowercase letters, digits and dashes, starting with a letter"));
     }
-}
-
-impl Grant {
-    /// What it lets an app do, in words.
-    pub fn allows(self) -> &'static str {
-        match self {
-            Grant::KvRead => "Read its data: kv::get, kv::scan",
-            Grant::KvWrite => "Change its data: kv::set, kv::delete",
-        }
+    if name == crate::access::ADMIN {
+        return Err("admin is the admin screen's, not a grant".into());
     }
-
-    /// The grant a kv function needs.
-    pub fn of_kv(function: &str) -> Grant {
-        match function {
-            "get" | "scan" => Grant::KvRead,
-            _ => Grant::KvWrite,
-        }
-    }
-}
-
-/// Every grant's name.
-pub const CAPABILITIES: [&str; Grant::NAMES.len()] = Grant::NAMES;
-
-/// What a grant lets an app do, in words.
-pub fn allows(grant: &str) -> &'static str {
-    Grant::parse(grant).map_or("Unknown grant", Grant::allows)
+    Ok(())
 }
 
 /// The highest risk level.
@@ -109,17 +95,24 @@ impl Risk {
         Self::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
     }
 
+    /// Reads `grant = level` lines; `check` then holds them against the
+    /// kits.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let levels: BTreeMap<String, u8> = toml::from_str(text)?;
         for (grant, level) in &levels {
-            if Grant::parse(grant).is_none() {
-                anyhow::bail!("unknown grant {grant:?}; known: {}", CAPABILITIES.join(", "));
-            }
             if *level > MAX_RISK {
                 anyhow::bail!("{grant} = {level}: risk goes from 0 to {MAX_RISK}");
             }
         }
         Ok(Self(levels))
+    }
+
+    /// Refuses grants no kit offers.
+    pub fn check(&self, kits: &crate::kit::Kits) -> anyhow::Result<()> {
+        match self.0.keys().find(|g| kits.grant(g).is_none()) {
+            Some(grant) => anyhow::bail!("risk file: unknown grant {grant:?}; known: {}", kits.names().join(", ")),
+            None => Ok(()),
+        }
     }
 
     /// Every rated grant and its level.
@@ -240,10 +233,12 @@ impl Manifest {
         {
             return Err(format!("[limits] seconds = {s}: must be 1 to {MAX_SECONDS}"));
         }
+        // Which grants exist, the kits say when the app loads (runtime.rs).
         for cap in &self.capabilities.grant {
-            if Grant::parse(cap).is_none() {
-                return Err(format!("unknown capability {cap:?}; known: {}", CAPABILITIES.join(", ")));
-            }
+            validate_grant_name(cap)?;
+        }
+        if self.capabilities.grant.len() > MAX_GRANTS {
+            return Err(format!("[capabilities] grant: at most {MAX_GRANTS} grants"));
         }
         Ok(())
     }
@@ -283,8 +278,8 @@ impl Manifest {
         Duration::from_secs(self.limits.seconds.unwrap_or(SECONDS))
     }
 
-    pub fn grants(&self, grant: Grant) -> bool {
-        self.capabilities.grant.iter().any(|g| g == grant.as_str())
+    pub fn grants(&self, grant: &str) -> bool {
+        self.capabilities.grant.iter().any(|g| g == grant)
     }
 }
 
@@ -306,15 +301,25 @@ mod tests {
 
     #[test]
     fn every_grant_says_what_it_allows() {
-        for grant in CAPABILITIES {
-            assert_ne!(allows(grant), allows("unknown"), "{grant}");
+        let kits = crate::kit::Kits::builtin();
+        for grant in kits.names() {
+            assert_ne!(kits.allows(&grant), kits.allows("unknown"), "{grant}");
         }
     }
 
     #[test]
     fn risk_files_name_known_grants_from_0_to_10() {
         assert!(Risk::parse("kv-read = 11").is_err());
-        assert!(Risk::parse("kv = 1").is_err());
+        assert!(Risk::parse("kv = 1").unwrap().check(&crate::kit::Kits::builtin()).is_err());
+        assert!(Risk::parse("kv-read = 10").unwrap().check(&crate::kit::Kits::builtin()).is_ok());
+    }
+
+    #[test]
+    fn grants_are_names() {
+        assert!(Manifest::parse("[app]\nid = 'a'\nname = 'A'\nversion = '1'\n[capabilities]\ngrant = ['leads-read']").is_ok(), "the kits say which exist");
+        for bad in ["Kv-Read", "kv read", "kv-*", "", "admin", "1kv"] {
+            assert!(Manifest::parse(&format!("[app]\nid = 'a'\nname = 'A'\nversion = '1'\n[capabilities]\ngrant = ['{bad}']")).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

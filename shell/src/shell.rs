@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::access::Policies;
 use crate::auth::Auth;
+use crate::kit::Kits;
 use crate::manifest::Risk;
 use crate::platform::PlatformDb;
 use crate::state::State;
@@ -26,6 +27,8 @@ pub struct Shell {
     pub usage: Recorder,
     /// The grants' risk levels, as the company rates them.
     pub risk: Risk,
+    /// What apps call besides the page: kv and the platform's kits.
+    pub kits: Kits,
     /// Keep each route's last request that worked, for `appos review`.
     pub keep_examples: bool,
     /// What runs; every change goes through it.
@@ -49,6 +52,7 @@ pub struct Parts {
     pub data: PathBuf,
     pub platform: PlatformDb,
     pub risk: Risk,
+    pub kits: Kits,
     pub keep_examples: bool,
     pub auth: Option<Auth>,
     pub policy: Option<Policies>,
@@ -69,6 +73,7 @@ impl Shell {
             usage: crate::usage::start(p.platform.clone()),
             platform: p.platform,
             risk: p.risk,
+            kits: p.kits,
             keep_examples: p.keep_examples,
             auth: p.auth,
             policy: p.policy,

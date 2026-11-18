@@ -627,7 +627,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
         let checked = crate::testing::bundle("1", None).checked().unwrap();
-        let app = crate::runtime::load(&shell.engine, shell.db.clone(), &checked).await.unwrap();
+        let app = crate::runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await.unwrap();
         shell.state.insert_loaded([Arc::new(app)]);
         let (apps, _) = load(&shell, crate::platform::now_ms());
         let app = apps.iter().find(|a| a.id == "test").unwrap();

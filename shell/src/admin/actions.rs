@@ -273,7 +273,7 @@ mod tests {
     /// The test app, loaded from a folder at startup.
     async fn startup_app(shell: &Shell) -> std::sync::Arc<crate::runtime::LoadedApp> {
         let checked = crate::testing::bundle("1", None).checked().unwrap();
-        let app = std::sync::Arc::new(crate::runtime::load(&shell.engine, shell.db.clone(), &checked).await.unwrap());
+        let app = std::sync::Arc::new(crate::runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await.unwrap());
         shell.state.insert_loaded([app.clone()]);
         app
     }

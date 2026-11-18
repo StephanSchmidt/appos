@@ -175,7 +175,26 @@ fn app_info(dir: &Path) -> anyhow::Result<(String, PathBuf)> {
         anyhow::bail!("no app.toml here; run this in an app's directory, or create one with `appos new <name>`");
     }
     let (m, _, wasm) = appos_shell::Manifest::load(dir).map_err(|e| anyhow::anyhow!("app.toml: {}", e.root_cause()))?;
+    check_builtin_grants(&m.capabilities.grant)?;
     Ok((m.app.id, wasm))
+}
+
+/// A platform's kits decide which grants exist, when the app loads there.
+/// Here only the built-in kits' are known: a grant that starts like one of
+/// theirs (kv-) must be one of theirs.
+fn check_builtin_grants(grants: &[String]) -> anyhow::Result<()> {
+    let builtin = scaffold::builtin_capabilities();
+    let prefix = |g: &str| g.split('-').next().unwrap_or(g).to_string();
+    for g in grants {
+        if !builtin.contains(g) && builtin.iter().any(|b| prefix(b) == prefix(g)) {
+            anyhow::bail!(
+                "app.toml: unknown grant {g:?}; the {}- grants are {}",
+                prefix(g),
+                builtin.iter().filter(|b| prefix(b) == prefix(g)).cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -272,5 +291,8 @@ mod tests {
         assert_eq!(app_info(root.path()).unwrap(), ("fine".to_string(), root.path().join("app.wasm")));
         std::fs::write(root.path().join("app.toml"), "[app]\nid = 'fine'\nname = 'X'\nversion = '1.0'\n[capabilities]\ngrant = ['kv-wrte']\n").unwrap();
         assert!(app_info(root.path()).unwrap_err().to_string().contains("kv-wrte"), "a misspelt grant shows before the build");
+        std::fs::write(root.path().join("app.toml"), "[app]\nid = 'fine'\nname = 'X'\nversion = '1.0'\n[capabilities]\ngrant = ['kv-read', 'leads-read']\n")
+            .unwrap();
+        assert!(app_info(root.path()).is_ok(), "a platform's kits offer grants this CLI doesn't know");
     }
 }

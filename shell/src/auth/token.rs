@@ -7,7 +7,6 @@
 use super::Identity;
 use super::routes::Step;
 use crate::access::ADMIN;
-use crate::manifest::Grant;
 use crate::web::escape;
 
 /// Who the token signs in.
@@ -64,10 +63,10 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// The policy that goes with it: the token's admin may use every grant in
-/// every app, and the admin screen.
-pub fn policy() -> String {
-    let grants: String = Grant::NAMES.iter().map(|g| format!("p, {EMAIL}, *, {g}\n")).collect();
+/// The policy that goes with it: the token's admin may use every grant
+/// (the kits') in every app, and the admin screen.
+pub fn policy(grants: &[String]) -> String {
+    let grants: String = grants.iter().map(|g| format!("p, {EMAIL}, *, {g}\n")).collect();
     format!("{grants}p, {EMAIL}, *, {ADMIN}\n")
 }
 
@@ -116,12 +115,13 @@ mod tests {
 
     #[tokio::test]
     async fn its_policy_is_every_grant_and_admin_for_the_token_only() {
-        let p = crate::access::Policy::parse(&policy()).await.unwrap();
+        let grants = crate::kit::Kits::builtin().names();
+        let p = crate::access::Policy::parse(&policy(&grants), &grants).await.unwrap();
         let admin = super::super::Who::signed_in(Identity::new("token", EMAIL, "Admin", []).unwrap());
         assert!(p.may(&admin, ADMIN));
-        for &g in Grant::ALL.iter() {
-            assert!(p.access(&admin, "any", "Any", &[g]).allows(g), "{g}");
-            assert!(!p.access(&super::super::Who::default(), "any", "Any", &[g]).allows(g), "{g}");
+        for g in grants {
+            assert!(p.access(&admin, "any", "Any", std::slice::from_ref(&g)).allows(0), "{g}");
+            assert!(!p.access(&super::super::Who::default(), "any", "Any", std::slice::from_ref(&g)).allows(0), "{g}");
         }
         assert!(!p.may(&super::super::Who::default(), ADMIN));
         assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", "abcd"));

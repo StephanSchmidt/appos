@@ -20,9 +20,9 @@
 //! `g, who, group:<name>` puts someone in a group. What no line allows is
 //! denied; with `--no-auth` there is no policy and everything is allowed.
 //!
-//! The policy is worked out once per request, before the app runs, as the
-//! grants this person may use in this app (`Access`); a host call tests a
-//! bit. The file is checked every 2 s and read again when it changes; a
+//! The grants are the kits' (kit.rs). The policy is worked out once per
+//! request, before the app runs, as the grants this person may use in this
+//! app (`Access`); a kit call tests a bit. The file is checked every 2 s and read again when it changes; a
 //! file with a mistake leaves the policy as it was.
 
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ use casbin::{CoreApi, DefaultModel, Enforcer, MemoryAdapter, MgmtApi};
 use parking_lot::{Mutex, RwLock};
 
 use crate::auth::{ANYONE, SIGNED_IN, Who};
-use crate::manifest::{Grant, validate_app_id};
+use crate::manifest::{MAX_GRANTS, validate_app_id};
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::runtime::LoadedApp;
 use crate::shell::Shell;
@@ -62,22 +62,29 @@ const POLL: Duration = Duration::from_secs(2);
 /// Requests worked out and kept, per policy. A cache this full starts over.
 const CACHED: usize = 10_000;
 
-/// The grants a request may use: a bit per `Grant`.
+/// The grants a request may use: a bit per grant the app holds, by its
+/// place in app.toml.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Access(u32);
+pub struct Access(u64);
 
-const _: () = assert!(Grant::ALL.len() <= 32);
+const _: () = assert!(MAX_GRANTS <= 64);
 
 impl Access {
-    pub const ALL: Access = Access(u32::MAX);
+    pub const ALL: Access = Access(u64::MAX);
     pub const NONE: Access = Access(0);
 
-    pub fn allows(self, g: Grant) -> bool {
-        self.0 & (1 << g as u32) != 0
+    /// Whether the app's grant number `bit` may be used.
+    pub fn allows(self, bit: u32) -> bool {
+        bit < 64 && self.0 & (1 << bit) != 0
     }
 
-    fn with(self, g: Grant) -> Access {
-        Access(self.0 | 1 << g as u32)
+    fn with(self, bit: usize) -> Access {
+        Access(self.0 | 1 << bit)
+    }
+
+    #[cfg(test)]
+    pub fn without(self, bit: u32) -> Access {
+        Access(self.0 & !(1 << bit))
     }
 }
 
@@ -85,12 +92,11 @@ impl Access {
 pub fn of(shell: &Shell, who: &Who, app: &LoadedApp) -> Access {
     let Some(policies) = &shell.policy else { return Access::ALL };
     let m = &app.manifest;
-    let held: Vec<Grant> = m.capabilities.grant.iter().filter_map(|g| Grant::parse(g)).collect();
-    policies.current().access(who, &m.app.id, m.app.group.as_deref().unwrap_or("").trim(), &held)
+    policies.current().access(who, &m.app.id, m.app.group.as_deref().unwrap_or("").trim(), &m.capabilities.grant)
 }
 
 /// A request's subjects, the app, its group and the grants it holds.
-type Asked = (Vec<String>, String, String, Access);
+type Asked = (Vec<String>, String, String, Vec<String>);
 
 /// policy.csv as casbin holds it.
 pub struct Policy {
@@ -103,9 +109,9 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Checks every line, then hands them to casbin. A mistake anywhere
-    /// refuses the whole file.
-    pub async fn parse(text: &str) -> anyhow::Result<Policy> {
+    /// Checks every line against the kits' `grants`, then hands them to
+    /// casbin. A mistake anywhere refuses the whole file.
+    pub async fn parse(text: &str, grants: &[String]) -> anyhow::Result<Policy> {
         let (mut p, mut g) = (Vec::<Vec<String>>::new(), Vec::<Vec<String>>::new());
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
@@ -114,7 +120,7 @@ impl Policy {
             }
             let fields: Vec<&str> = line.split(',').map(str::trim).collect();
             let rule = match fields[..] {
-                ["p", who, app, what] => rule(who, app, what).map(|r| (&mut p, r)),
+                ["p", who, app, what] => rule(who, app, what, grants).map(|r| (&mut p, r)),
                 ["g", who, group] => member(who, group).map(|r| (&mut g, r)),
                 _ => Err("give `p, who, app, what` or `g, who, group:<name>`".to_string()),
             };
@@ -146,14 +152,16 @@ impl Policy {
         (&self.lines.0, &self.lines.1)
     }
 
-    /// The grants of `held` that someone may use in this app.
-    pub fn access(&self, who: &Who, app_id: &str, group: &str, held: &[Grant]) -> Access {
-        let key = (who.subjects(), app_id.to_string(), format!("apps:{group}"), held.iter().fold(Access::NONE, |a, g| a.with(*g)));
+    /// The grants of `held` (the app's, in app.toml's order) that someone
+    /// may use in this app.
+    pub fn access(&self, who: &Who, app_id: &str, group: &str, held: &[String]) -> Access {
+        let key = (who.subjects(), app_id.to_string(), format!("apps:{group}"), held.to_vec());
         if let Some(access) = self.cache.lock().get(&key) {
             return *access;
         }
         let (subjects, app, group, _) = &key;
-        let access = held.iter().filter(|g| subjects.iter().any(|s| self.allows(s, app, group, g.as_str()))).fold(Access::NONE, |a, g| a.with(*g));
+        let allowed = |g: &String| subjects.iter().any(|s| self.allows(s, app, group, g));
+        let access = held.iter().enumerate().take(MAX_GRANTS).filter(|(_, g)| allowed(g)).fold(Access::NONE, |a, (bit, _)| a.with(bit));
         let mut cache = self.cache.lock();
         if cache.len() >= CACHED {
             cache.clear();
@@ -177,7 +185,7 @@ impl Policy {
 }
 
 /// `p, who, app, what`.
-fn rule(who: &str, app: &str, what: &str) -> Result<Vec<String>, String> {
+fn rule(who: &str, app: &str, what: &str, grants: &[String]) -> Result<Vec<String>, String> {
     let who = subject(who)?;
     match app {
         "*" => {}
@@ -194,15 +202,16 @@ fn rule(who: &str, app: &str, what: &str) -> Result<Vec<String>, String> {
         }
     } else if key_match(ADMIN, what) {
         return Err(format!("{what:?} would also give admin: name the grants (kv-*), and admin on a line of its own"));
-    } else if grants_of(what).is_empty() {
-        return Err(format!("{what:?} is no grant; known: {}, admin", Grant::NAMES.join(", ")));
+    } else if grants_of(what, grants).is_empty() {
+        return Err(format!("{what:?} is no grant; known: {}, admin", grants.join(", ")));
     }
     Ok(vec![who, app.to_string(), what.to_string()])
 }
 
-/// The grants a rule's what names: the one, or those its pattern matches.
-pub fn grants_of(what: &str) -> Vec<&'static str> {
-    Grant::NAMES.iter().copied().filter(|g| key_match(g, what)).collect()
+/// The grants of `grants` a rule's what names: the one, or those its
+/// pattern matches.
+pub fn grants_of<'a>(what: &str, grants: &'a [String]) -> Vec<&'a str> {
+    grants.iter().map(String::as_str).filter(|g| key_match(g, what)).collect()
 }
 
 /// `g, who, group:<name>`.
@@ -233,6 +242,8 @@ fn subject(who: &str) -> Result<String, String> {
 /// sign-in's, which is built in (auth/token.rs).
 pub struct Policies {
     path: Option<PathBuf>,
+    /// The kits' grants, which the file may name.
+    grants: Vec<String>,
     current: RwLock<Arc<Policy>>,
     /// The file's mtime and length when last read; none while it's gone.
     seen: Mutex<Option<(SystemTime, u64)>>,
@@ -243,13 +254,15 @@ pub struct Policies {
 }
 
 impl Policies {
-    /// Reads the file; a mistake stops the shell from starting.
-    pub async fn load(path: &Path) -> anyhow::Result<Policies> {
+    /// Reads the file, which may name the kits' `grants`; a mistake stops
+    /// the shell from starting.
+    pub async fn load(path: &Path, grants: Vec<String>) -> anyhow::Result<Policies> {
         let seen = stamp(path);
         let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let policy = Policy::parse(&text).await.map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+        let policy = Policy::parse(&text, &grants).await.map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
         Ok(Policies {
             path: Some(path.to_path_buf()),
+            grants,
             current: RwLock::new(Arc::new(policy)),
             seen: Mutex::new(seen),
             since: Mutex::new(now_ms()),
@@ -262,9 +275,16 @@ impl Policies {
     }
 
     /// A policy no file holds: read once, never again.
-    pub async fn built_in(text: &str) -> anyhow::Result<Policies> {
-        let policy = Policy::parse(text).await?;
-        Ok(Policies { path: None, current: RwLock::new(Arc::new(policy)), seen: Mutex::default(), since: Mutex::new(now_ms()), refused: Mutex::default() })
+    pub async fn built_in(text: &str, grants: Vec<String>) -> anyhow::Result<Policies> {
+        let policy = Policy::parse(text, &grants).await?;
+        Ok(Policies {
+            path: None,
+            grants,
+            current: RwLock::new(Arc::new(policy)),
+            seen: Mutex::default(),
+            since: Mutex::new(now_ms()),
+            refused: Mutex::default(),
+        })
     }
 
     pub fn file_name(&self) -> String {
@@ -299,7 +319,7 @@ impl Policies {
         }
         let read = match now {
             Some(_) => match std::fs::read_to_string(path) {
-                Ok(text) => Policy::parse(&text).await,
+                Ok(text) => Policy::parse(&text, &self.grants).await,
                 Err(e) => Err(e.into()),
             },
             None => Err(anyhow::anyhow!("the file is gone")),
@@ -373,11 +393,13 @@ mod tests {
         Who::signed_in(Identity::new("", email, "", groups.iter().map(|g| g.to_string())).unwrap())
     }
 
-    const BOTH: &[Grant] = &[Grant::KvRead, Grant::KvWrite];
+    fn kv() -> Vec<String> {
+        crate::kit::Kits::builtin().names()
+    }
 
     fn may(p: &Policy, who: &Who, app: &str, group: &str) -> (bool, bool) {
-        let a = p.access(who, app, group, BOTH);
-        (a.allows(Grant::KvRead), a.allows(Grant::KvWrite))
+        let a = p.access(who, app, group, &kv());
+        (a.allows(0), a.allows(1))
     }
 
     #[tokio::test]
@@ -389,6 +411,7 @@ mod tests {
              p, group:sales, discounts, kv-*\n\
              p, Ann@Acme.com, pricing, kv-read\n\
              g, bob@acme.com, group:sales\n",
+            &kv(),
         )
         .await
         .unwrap();
@@ -405,18 +428,18 @@ mod tests {
 
     #[tokio::test]
     async fn apps_by_id_group_or_all() {
-        let p = Policy::parse("p, group:marketing, apps:Marketing, kv-read\np, group:ops, *, kv-*\n").await.unwrap();
+        let p = Policy::parse("p, group:marketing, apps:Marketing, kv-read\np, group:ops, *, kv-*\n", &kv()).await.unwrap();
         let marketing = person("m@acme.com", &["marketing"]);
         assert_eq!(may(&p, &marketing, "webinars", "Marketing"), (true, false));
         assert_eq!(may(&p, &marketing, "discounts", "Sales"), (false, false));
         assert_eq!(may(&p, &person("o@acme.com", &["ops"]), "discounts", "Sales"), (true, true));
         // Only the grants the app holds.
-        assert_eq!(p.access(&marketing, "webinars", "Marketing", &[Grant::KvWrite]), Access::NONE);
+        assert_eq!(p.access(&marketing, "webinars", "Marketing", &["kv-write".into()]), Access::NONE);
     }
 
     #[tokio::test]
     async fn admin_is_its_own_act() {
-        let p = Policy::parse("p, group:platform, *, admin\np, group:ops, *, kv-*\ng, bob@acme.com, group:platform\n").await.unwrap();
+        let p = Policy::parse("p, group:platform, *, admin\np, group:ops, *, kv-*\ng, bob@acme.com, group:platform\n", &kv()).await.unwrap();
         assert!(p.may(&person("bob@acme.com", &[]), ADMIN));
         assert!(p.may(&person("x@acme.com", &["platform"]), ADMIN));
         assert!(!p.may(&person("o@acme.com", &["ops"]), ADMIN), "all grants is not admin");
@@ -426,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn mistakes_refuse_the_file_with_the_line() {
-        let err = |text: &'static str| async move { Policy::parse(text).await.err().map(|e| e.to_string()).unwrap_or_default() };
+        let err = |text: &'static str| async move { Policy::parse(text, &kv()).await.err().map(|e| e.to_string()).unwrap_or_default() };
         assert!(err("p, anyone, webinars, kv-read\np, anyone, webinars, kv-fly").await.contains("line 2"));
         assert!(err("p, anyone, webinars, kv-fly").await.contains("no grant; known: kv-read, kv-write, admin"));
         assert!(err("p, anyone, webinars, *").await.contains("would also give admin"));
@@ -439,8 +462,8 @@ mod tests {
         assert!(err("p, anyone, webinars").await.contains("give `p, who, app, what`"));
         assert!(err("r, anyone, webinars, kv-read").await.contains("give `p, who, app, what`"));
         // Twice the same line is fine.
-        assert!(Policy::parse("p, anyone, webinars, kv-read\np, anyone, webinars, kv-read").await.is_ok());
-        assert!(Policy::parse("").await.is_ok());
+        assert!(Policy::parse("p, anyone, webinars, kv-read\np, anyone, webinars, kv-read", &kv()).await.is_ok());
+        assert!(Policy::parse("", &kv()).await.is_ok());
     }
 
     #[tokio::test]
@@ -448,7 +471,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.csv");
         std::fs::write(&path, "p, anyone, webinars, kv-read\n").unwrap();
-        let policies = Policies::load(&path).await.unwrap();
+        let policies = Policies::load(&path, kv()).await.unwrap();
         assert_eq!(policies.reload().await.unwrap(), None, "unchanged");
 
         std::fs::write(&path, "p, anyone, webinars, kv-*\np, anyone, pricing, kv-read\n").unwrap();
@@ -469,8 +492,8 @@ mod tests {
     async fn a_bad_file_stops_the_start() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.csv");
-        assert!(Policies::load(&path).await.is_err());
+        assert!(Policies::load(&path, kv()).await.is_err());
         std::fs::write(&path, "p, anyone, webinars, kv-fly\n").unwrap();
-        assert!(Policies::load(&path).await.err().unwrap().to_string().contains("policy.csv: line 1"));
+        assert!(Policies::load(&path, kv()).await.err().unwrap().to_string().contains("policy.csv: line 1"));
     }
 }

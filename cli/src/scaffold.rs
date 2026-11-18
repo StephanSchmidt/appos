@@ -72,11 +72,10 @@ impl Lang {
 /// The contract built into this CLI, used when no platform is current.
 const BUILTIN_WIT: &[(&str, &str)] = &[("appos.wit", include_str!("../../wit/appos.wit"))];
 
-/// What the built-in shell grants. Integration point: the shell's own
-/// CAPABILITIES list, once appos_shell exports it.
-/// The grants an app can ask for, as this appos's shell knows them.
-pub fn builtin_capabilities() -> Vec<&'static str> {
-    appos_shell::api::Grant::ALL.iter().map(|g| g.as_str()).collect()
+/// The grants an app can ask for, as this appos's shell knows them: its
+/// built-in kits'.
+pub fn builtin_capabilities() -> Vec<String> {
+    appos_shell::kit::Kits::builtin().names()
 }
 
 pub fn builtin_wit() -> BTreeMap<String, String> {

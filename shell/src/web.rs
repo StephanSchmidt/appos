@@ -686,11 +686,11 @@ async fn spec(State(shell): S) -> Response {
         name: shell.name.clone(),
         origin: shell.origin.clone(),
         framework: framework().to_string(),
-        capabilities: crate::manifest::CAPABILITIES.map(String::from).to_vec(),
+        capabilities: shell.kits.names(),
         risk: shell.risk.levels().clone(),
         apps,
         git: shell.git.clone(),
-        wit: WIT.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect(),
+        wit: WIT.iter().map(|(n, t)| (n.to_string(), t.to_string())).chain(shell.kits.wit()).collect(),
         sign_in: std::collections::BTreeMap::from([("auth.wit".to_string(), SIGN_IN_WIT.to_string())]),
         token: shell.policy.is_some(),
     })

@@ -28,6 +28,7 @@ pub fn parts(data: PathBuf, risk: Risk) -> Parts {
         data,
         platform: PlatformDb::in_memory(),
         risk,
+        kits: Default::default(),
         keep_examples: false,
         auth: None,
         policy: None,
@@ -46,7 +47,7 @@ pub async fn shell_with_policy(auth_toml: &str, policy_csv: &str) -> (tempfile::
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("policy.csv");
     std::fs::write(&path, policy_csv).unwrap();
-    let policy = crate::access::Policies::load(&path).await.unwrap();
+    let policy = crate::access::Policies::load(&path, crate::kit::Kits::builtin().names()).await.unwrap();
     let auth = (!auth_toml.is_empty()).then(|| crate::auth::Auth::parse(auth_toml, "http://localhost", [7; 32], "127.0.0.1:8080").unwrap());
     let shell = Shell::new(Parts { auth, policy: Some(policy), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
     crate::deploy::deploy(&shell, &kv_bundle().pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();
@@ -57,7 +58,9 @@ pub async fn shell_with_policy(auth_toml: &str, policy_csv: &str) -> (tempfile::
 /// `secret`, and its built-in policy, with the kv app deployed as "test".
 pub async fn shell_with_token(secret: &str) -> (tempfile::TempDir, Arc<Shell>) {
     let dir = tempfile::tempdir().unwrap();
-    let policy = crate::access::Policies::built_in(&crate::auth::token::policy()).await.unwrap();
+    let policy = crate::access::Policies::built_in(&crate::auth::token::policy(&crate::kit::Kits::builtin().names()), crate::kit::Kits::builtin().names())
+        .await
+        .unwrap();
     let auth = crate::auth::Auth::token_with(secret.into(), "http://localhost", [7; 32]);
     let shell = Shell::new(Parts { auth: Some(auth), policy: Some(policy), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
     crate::deploy::deploy(&shell, &kv_bundle().pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();

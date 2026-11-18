@@ -20,7 +20,8 @@ use anyhow::Context as _;
 use serde_json::{Map, Value, json};
 
 use crate::bundle::Bundle;
-use crate::manifest::{Grant, Manifest};
+use crate::kit::{KV_READ, KV_WRITE};
+use crate::manifest::Manifest;
 use crate::runtime::{self, ALLOWED_WASI, ALWAYS, FRAMEWORK, FUEL, IO_BUDGET, MEMORY, READ, Request, Route, WRITE};
 use crate::shell::Shell;
 use crate::terminal_errorln as eprintln;
@@ -70,7 +71,7 @@ pub async fn prepare(dir: &Path, data: &Path, wasm: &str) -> anyhow::Result<Revi
     let path = dir.to_path_buf();
     let checked = tokio::task::spawn_blocking(move || Bundle::from_dir(&path)?.checked()).await??;
     // init can't use kv; the routes are all this load is for.
-    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &checked).await?;
+    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &crate::kit::Kits::builtin(), &checked).await?;
     let m = &app.manifest;
     let (entries, kept) = match data.join("appos.db") {
         db if db.is_file() => {
@@ -179,7 +180,7 @@ fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &
     }
 
     let mut imports: Vec<String> = ALWAYS.iter().filter(|i| **i != "handler").map(|i| format!("{FRAMEWORK}{i}")).collect();
-    let (read, write) = (m.grants(Grant::KvRead), m.grants(Grant::KvWrite));
+    let (read, write) = (m.grants(KV_READ), m.grants(KV_WRITE));
     if read || write {
         imports.push(format!("{FRAMEWORK}kv"));
     }
@@ -211,7 +212,7 @@ fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &
 /// its first page; a later page is empty, and so is any other prefix.
 fn plan(m: &Manifest, entries: &[(String, String)]) -> Value {
     let mut plan = Map::new();
-    if !m.grants(Grant::KvRead) {
+    if !m.grants(KV_READ) {
         return Value::Object(plan);
     }
     let get: Vec<Value> = entries.iter().map(|(k, v)| json!({ "when": { "key": k }, "return": v })).collect();

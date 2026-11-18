@@ -7,7 +7,7 @@ use axum::response::{Html, IntoResponse, Response};
 
 use crate::deploy::{FAILURE_WINDOW, FAILURES_BEFORE_ROLLBACK};
 use crate::log_filter::Pick;
-use crate::manifest::{CAPABILITIES, MAX_RISK, MAX_SECONDS, Risk, SECONDS};
+use crate::manifest::{MAX_RISK, MAX_SECONDS, Risk, SECONDS};
 use crate::platform::{Actor, Event, Kind, VersionStatus, now_ms};
 use crate::runtime::{FUEL, IO_BUDGET, MEMORY};
 use crate::shell::Shell;
@@ -78,7 +78,7 @@ pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Opt
     } else {
         // Nothing to report yet: how the first app gets here, and the rules
         // it will run under.
-        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk));
+        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk, &shell.kits.names()));
     }
     let title = match selected.and(chosen) {
         Some(app) => format!("{} · {} admin", app.name, shell.name),
@@ -102,9 +102,9 @@ appos deploy</code></pre>
 
 /// The rules every app runs under, before there is one: the limits of a
 /// request, the automatic rollback and the risk levels.
-fn guardrails(risk: &Risk) -> String {
-    let grants: String = CAPABILITIES.iter().map(|g| grant_label(g, risk.of(g))).collect();
-    let levels = match CAPABILITIES.iter().any(|g| risk.of(g).is_some()) {
+fn guardrails(risk: &Risk, names: &[String]) -> String {
+    let grants: String = names.iter().map(|g| grant_label(g, risk.of(g))).collect();
+    let levels = match names.iter().any(|g| risk.of(g).is_some()) {
         true => "Levels come from the platform's risk file; an app can't change them.",
         false => "No grant has a level yet: start the shell with <code>--risk</code> and a risk file.",
     };

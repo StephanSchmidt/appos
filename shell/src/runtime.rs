@@ -24,22 +24,20 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::access::Access;
 use crate::bundle::Checked;
-use crate::manifest::{Grant, Manifest};
+use crate::kit::Kits;
+use crate::manifest::Manifest;
 use crate::platform::Outcome;
 use crate::tx::{Db, Tx};
 
 wasmtime::component::bindgen!({
     world: "app",
     path: "../wit",
-    imports: {
-        "appos:framework/kv.get": async | trappable,
-        "appos:framework/kv.scan": async | trappable,
-        default: trappable,
-    },
+    // kv is a kit, linked by kit.rs.
+    imports: { default: trappable },
     exports: { default: async },
 });
 
-use appos::framework::{kv, log, page, registry, types};
+use appos::framework::{log, page, registry, types};
 pub use types::Request;
 
 /// Instructions one request may execute.
@@ -221,7 +219,7 @@ pub struct Ctx {
     access: Access,
     /// The grant a host call needed and the policy denied; it ended the
     /// request.
-    denied: Option<Grant>,
+    denied: Option<String>,
 }
 
 /// Track allocations across all memories/tables in the store. Wasmtime
@@ -332,19 +330,25 @@ pub(crate) fn imports(engine: &Engine, component: &Component) -> Vec<(String, Ve
         .collect()
 }
 
-/// Refuses imports the manifest doesn't grant.
-fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest) -> anyhow::Result<()> {
+/// Refuses grants no kit offers, and imports the manifest doesn't grant.
+fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -> anyhow::Result<()> {
+    let unknown: Vec<&String> = m.capabilities.grant.iter().filter(|g| kits.grant(g).is_none()).collect();
+    if let Some(g) = unknown.first() {
+        bail!("unknown capability {g:?}; known: {}", kits.names().join(", "));
+    }
     let mut problems = Vec::new();
     for (import, functions) in imports {
-        if let Some(cap) = import.strip_prefix(FRAMEWORK) {
-            if cap == "kv" {
-                for f in functions {
-                    let grant = Grant::of_kv(f);
-                    if !m.grants(grant) {
-                        problems.push(format!("uses kv::{f}, which needs {grant} (add it to [capabilities] grant in app.toml)"));
-                    }
+        let short = import.rsplit('/').next().unwrap_or(import);
+        if kits.offers(import) {
+            for f in functions {
+                match kits.grant_for(import, f) {
+                    Some(g) if m.grants(&g.name) => {}
+                    Some(g) => problems.push(format!("uses {short}::{f}, which needs {} (add it to [capabilities] grant in app.toml)", g.name)),
+                    None => problems.push(format!("uses {short}::{f}, which no grant allows")),
                 }
-            } else if !ALWAYS.contains(&cap) {
+            }
+        } else if let Some(cap) = import.strip_prefix(FRAMEWORK) {
+            if !ALWAYS.contains(&cap) {
                 problems.push(format!("uses {cap}, which no grant allows"));
             }
         } else if !ALLOWED_WASI.iter().any(|w| import.starts_with(w)) {
@@ -354,9 +358,9 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest) -> anyhow::Res
     if problems.is_empty() { Ok(()) } else { bail!("{}", problems.join("; ")) }
 }
 
-/// Compiles an app, checks its imports, links only granted interfaces and
+/// Compiles an app, checks its imports, links only granted functions and
 /// runs its `init`, within the app's time limit.
-pub async fn load(engine: &Engine, db: Db, app: &Checked) -> anyhow::Result<LoadedApp> {
+pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow::Result<LoadedApp> {
     // Compiling takes a while; keep it off the threads serving requests.
     let (e, bundle) = (engine.clone(), app.bundle.clone());
     let component = tokio::task::spawn_blocking(move || Component::new(&e, &bundle.wasm))
@@ -364,7 +368,7 @@ pub async fn load(engine: &Engine, db: Db, app: &Checked) -> anyhow::Result<Load
         .map_err(anyhow::Error::from)
         .context("not a valid WebAssembly component")?;
     let manifest = app.manifest.clone();
-    check_imports(&imports(engine, &component), &manifest)?;
+    check_imports(&imports(engine, &component), &manifest, kits)?;
 
     let mut linker: Linker<Ctx> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
@@ -372,10 +376,8 @@ pub async fn load(engine: &Engine, db: Db, app: &Checked) -> anyhow::Result<Load
     registry::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     log::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     page::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
-    // The import check made sure the app calls only the kv functions it's granted.
-    if manifest.grants(Grant::KvRead) || manifest.grants(Grant::KvWrite) {
-        kv::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
-    }
+    // The import check made sure the app calls only the functions it's granted.
+    kits.link(&mut linker, &manifest.capabilities.grant)?;
     let pre = AppPre::new(linker.instantiate_pre(&component)?)?;
 
     let budget = Budget::of(&manifest, AdminLimits::default());
@@ -511,7 +513,7 @@ async fn run_once(app: &LoadedApp, handler: &str, req: &Request, deadline: Insta
     let mut ctx = store.into_data();
     let Phase::Start { page, done } = std::mem::replace(&mut ctx.phase, Phase::Init { routes: vec![], menu: vec![] }) else { unreachable!() };
     // Denied ends the request, whatever the app did after.
-    if let Some(grant) = ctx.denied {
+    if let Some(grant) = ctx.denied.take() {
         return (Err(Failed::new(Outcome::Denied, anyhow::anyhow!("denied {grant}"))), ctx, fuel);
     }
     let result = match ran {
@@ -590,14 +592,15 @@ impl Ctx {
         }
     }
 
-    /// A host call in a request that needs `grant`: the policy must let
-    /// this person use it (the app holds it, check_imports saw to that).
-    fn in_request(&mut self, what: &str, grant: Grant, cost: u32) -> wasmtime::Result<()> {
+    /// A kit call in a request that needs `grant`, the app's grant number
+    /// `bit`: the policy must let this person use it (the app holds it,
+    /// check_imports saw to that).
+    pub(crate) fn in_request(&mut self, what: &str, grant: &str, bit: u32, cost: u32) -> wasmtime::Result<()> {
         if matches!(self.phase, Phase::Init { .. }) {
             return Err(wasmtime::format_err!("{what} can only be called while handling a request"));
         }
-        if !self.access.allows(grant) {
-            self.denied = Some(grant);
+        if !self.access.allows(bit) {
+            self.denied = Some(grant.to_string());
             return Err(wasmtime::format_err!("denied {grant}: {what}"));
         }
         self.io_used += cost;
@@ -734,15 +737,18 @@ impl log::Host for Ctx {
     }
 }
 
-impl kv::Host for Ctx {
-    async fn get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
-        self.in_request("kv::get", Grant::KvRead, READ)?;
+/// kv's functions, for the kv kit (kit.rs), which checked the call.
+impl Ctx {
+    pub(crate) fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    pub(crate) async fn kv_get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
         check_key("kv::get", &key)?;
         self.database(move |tx, db, id| tx.get(db, id, &key)).await
     }
 
-    fn set(&mut self, key: String, value: String) -> wasmtime::Result<()> {
-        self.in_request("kv::set", Grant::KvWrite, WRITE)?;
+    pub(crate) fn kv_set(&mut self, key: String, value: String) -> wasmtime::Result<()> {
         check_key("kv::set", &key)?;
         if value.len() > MAX_VALUE {
             return Err(wasmtime::format_err!("kv::set({key:?}): the value is {} bytes, more than {MAX_VALUE}", value.len()));
@@ -751,15 +757,13 @@ impl kv::Host for Ctx {
         Ok(())
     }
 
-    fn delete(&mut self, key: String) -> wasmtime::Result<()> {
-        self.in_request("kv::delete", Grant::KvWrite, WRITE)?;
+    pub(crate) fn kv_delete(&mut self, key: String) -> wasmtime::Result<()> {
         check_key("kv::delete", &key)?;
         self.tx.delete(key);
         Ok(())
     }
 
-    async fn scan(&mut self, prefix: String, after: Option<String>, limit: u32, reverse: bool) -> wasmtime::Result<Vec<(String, String)>> {
-        self.in_request("kv::scan", Grant::KvRead, READ)?;
+    pub(crate) async fn kv_scan(&mut self, prefix: String, after: Option<String>, limit: u32, reverse: bool) -> wasmtime::Result<Vec<(String, String)>> {
         check_key("kv::scan", &prefix)?;
         self.database(move |tx, db, id| tx.scan(db, id, &prefix, after.as_deref(), limit, reverse)).await
     }
@@ -782,7 +786,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
         });
         entered.recv().unwrap();
-        let result = tokio::time::timeout(Duration::from_millis(20), async { kv::Host::get(store.data_mut(), "blocked".into()).await }).await;
+        let result = tokio::time::timeout(Duration::from_millis(20), async { store.data_mut().kv_get("blocked".into()).await }).await;
         other.join().unwrap();
         assert!(result.is_err(), "the host call blocked the timer until the database lock was released");
     }
@@ -793,16 +797,16 @@ mod tests {
         let mut store = store(&engine);
         store.data_mut().phase = Phase::Start { page: Page { status: 200, redirect: None, head: vec![], html: vec![] }, done: false };
         let ctx = store.data_mut();
-        kv::Host::set(ctx, "count".into(), "one".into()).unwrap();
-        assert_eq!(kv::Host::get(ctx, "count".into()).await.unwrap().as_deref(), Some("one"));
-        assert_eq!(kv::Host::scan(ctx, "".into(), None, 10, false).await.unwrap(), [("count".into(), "one".into())]);
+        ctx.kv_set("count".into(), "one".into()).unwrap();
+        assert_eq!(ctx.kv_get("count".into()).await.unwrap().as_deref(), Some("one"));
+        assert_eq!(ctx.kv_scan("".into(), None, 10, false).await.unwrap(), [("count".into(), "one".into())]);
         assert!(ctx.database(|tx, db, id| tx.commit(db, id)).await.unwrap());
         ctx.tx = Tx::default();
-        assert_eq!(kv::Host::get(ctx, "count".into()).await.unwrap().as_deref(), Some("one"));
+        assert_eq!(ctx.kv_get("count".into()).await.unwrap().as_deref(), Some("one"));
         let mut other = Tx::default();
         other.set("count".into(), "two".into());
         assert!(other.commit(&ctx.db, &ctx.app_id).unwrap());
-        kv::Host::set(ctx, "count".into(), "three".into()).unwrap();
+        ctx.kv_set("count".into(), "three".into()).unwrap();
         assert!(!ctx.database(|tx, db, id| tx.commit(db, id)).await.unwrap());
         assert_eq!(Tx::default().get(&ctx.db, &ctx.app_id, "count").unwrap().as_deref(), Some("two"));
     }

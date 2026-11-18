@@ -137,8 +137,9 @@ fn may(shell: &Shell, apps: &[App], app: &str, what: &str) -> String {
     if what == ADMIN {
         return "Use the admin screen".to_string();
     }
-    let grants: String = grants_of(what).iter().map(|g| grant_label(g, shell.risk.of(g))).collect();
-    let pattern = if grants_of(what) == [what] { String::new() } else { format!(r#" <span class="quiet">({})</span>"#, escape(what)) };
+    let names = shell.kits.names();
+    let grants: String = grants_of(what, &names).iter().map(|g| grant_label(g, shell.risk.of(g))).collect();
+    let pattern = if grants_of(what, &names) == [what] { String::new() } else { format!(r#" <span class="quiet">({})</span>"#, escape(what)) };
     let place = match app {
         "*" => "every app".to_string(),
         _ => match app.strip_prefix("apps:") {

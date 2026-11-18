@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::manifest::Grant;
 pub use crate::platform::{Actor, Kind, Outcome, Severity, Version, VersionStatus};
 
 /// The limits apps run within, as the shell enforces them.
