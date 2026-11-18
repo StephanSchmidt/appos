@@ -10,6 +10,10 @@
 //!
 //! Scans are not checked at commit: a request that lists keys while another
 //! adds one would otherwise run again every time.
+//!
+//! Commands to kits (kit.rs) wait in the transaction too, and the commit
+//! writes them to the outbox with the kv writes: no commit, no message
+//! (outbox.rs delivers them).
 
 use std::collections::BTreeMap;
 use std::mem::DropGuard;
@@ -30,6 +34,7 @@ pub const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
 const GET: &str = "SELECT value FROM kv WHERE app = ?1 AND key = ?2";
 const SET: &str = "INSERT INTO kv (app, key, value) VALUES (?1, ?2, ?3) ON CONFLICT (app, key) DO UPDATE SET value = ?3";
 const DELETE: &str = "DELETE FROM kv WHERE app = ?1 AND key = ?2";
+const SEND: &str = "INSERT INTO outbox (id, kit, function, app, args, at, due) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)";
 
 #[derive(Default)]
 pub struct Tx {
@@ -38,6 +43,19 @@ pub struct Tx {
     reads: BTreeMap<String, Option<String>>,
     /// Writes not yet applied: Some sets the key, None deletes it.
     writes: BTreeMap<String, Option<String>>,
+    /// Commands to kits, in the order sent.
+    messages: Vec<Outgoing>,
+}
+
+/// A command to a kit, until the commit puts it in the outbox.
+pub struct Outgoing {
+    pub id: String,
+    /// The kit's WIT package, like "acme:crm".
+    pub kit: String,
+    /// Like "acme:crm/customers#new-customer".
+    pub function: String,
+    /// The arguments, as JSON.
+    pub args: String,
 }
 
 fn deadline_error() -> rusqlite::Error {
@@ -101,6 +119,15 @@ impl Tx {
 
     pub fn delete(&mut self, key: String) {
         self.writes.insert(key, None);
+    }
+
+    pub fn send(&mut self, message: Outgoing) {
+        self.messages.push(message);
+    }
+
+    /// Commands sent so far.
+    pub fn sent(&self) -> usize {
+        self.messages.len()
     }
 
     /// Keys starting with `prefix` past `after`, in key order (or reverse),
@@ -176,11 +203,12 @@ impl Tx {
         Ok(out)
     }
 
-    /// Applies the writes at once, if every key read with get still holds
-    /// what was read. false: something changed, nothing was written.
+    /// Applies the writes and puts the messages in the outbox at once, if
+    /// every key read with get still holds what was read. false: something
+    /// changed, nothing was written or sent.
     pub fn commit(&self, db: &Db, app: &str) -> rusqlite::Result<bool> {
         check_deadline(self.deadline)?;
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.messages.is_empty() {
             return Ok(true);
         }
         let mut conn = self.access(db)?;
@@ -198,6 +226,11 @@ impl Tx {
                 Some(v) => tx.execute(SET, params![app, key, v])?,
                 None => tx.execute(DELETE, params![app, key])?,
             };
+        }
+        let at = crate::platform::now_ms();
+        for m in &self.messages {
+            before_statement(&tx, self.deadline)?;
+            tx.execute(SEND, params![m.id, m.kit, m.function, app, m.args, at])?;
         }
         before_statement(&tx, self.deadline)?;
         tx.commit()?;
@@ -245,7 +278,12 @@ pub fn open_db(path: &std::path::Path) -> anyhow::Result<Db> {
 fn create(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS kv (app TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (app, key));
-         CREATE TABLE IF NOT EXISTS examples (app TEXT NOT NULL, handler TEXT NOT NULL, request TEXT NOT NULL, PRIMARY KEY (app, handler));",
+         CREATE TABLE IF NOT EXISTS examples (app TEXT NOT NULL, handler TEXT NOT NULL, request TEXT NOT NULL, PRIMARY KEY (app, handler));
+         -- Commands waiting for their kit. due: when to try (next); none once
+         -- delivery gave up, until an admin retries.
+         CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kit TEXT NOT NULL, function TEXT NOT NULL, app TEXT NOT NULL, args TEXT NOT NULL,
+             at INTEGER NOT NULL, due INTEGER, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
+         CREATE INDEX IF NOT EXISTS outbox_due ON outbox (kit, due);",
     )?;
     Ok(())
 }
@@ -268,6 +306,79 @@ pub fn entries(db: &Db, app: &str) -> rusqlite::Result<Vec<(String, String)>> {
     let conn = db.lock();
     let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE app = ?1 ORDER BY key")?;
     stmt.query_map([app], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+}
+
+/// A message in the outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    pub id: String,
+    pub kit: String,
+    pub function: String,
+    /// The app that sent it.
+    pub app: String,
+    pub args: String,
+    /// When it was sent (unix ms).
+    pub at: i64,
+    /// When delivery tries next; none once it gave up.
+    pub due: Option<i64>,
+    pub attempts: u32,
+    /// Why the last try failed.
+    pub error: Option<String>,
+}
+
+const WAITING: &str = "SELECT id, kit, function, app, args, at, due, attempts, error FROM outbox";
+
+fn waiting(r: &rusqlite::Row) -> rusqlite::Result<Waiting> {
+    Ok(Waiting {
+        id: r.get(0)?,
+        kit: r.get(1)?,
+        function: r.get(2)?,
+        app: r.get(3)?,
+        args: r.get(4)?,
+        at: r.get(5)?,
+        due: r.get(6)?,
+        attempts: r.get(7)?,
+        error: r.get(8)?,
+    })
+}
+
+/// The kit's messages due by `now`, in the order sent, at most `limit`.
+pub fn due(db: &Db, kit: &str, now: i64, limit: u32) -> rusqlite::Result<Vec<Waiting>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(&format!("{WAITING} WHERE kit = ?1 AND due <= ?2 ORDER BY rowid LIMIT ?3"))?;
+    stmt.query_map(params![kit, now, limit], waiting)?.collect()
+}
+
+/// When the kit's next message is due; none while it has none to try.
+pub fn next_due(db: &Db, kit: &str) -> rusqlite::Result<Option<i64>> {
+    db.lock().query_row("SELECT MIN(due) FROM outbox WHERE kit = ?1", [kit], |r| r.get(0))
+}
+
+/// The kit ran it: it leaves the outbox.
+pub fn delivered(db: &Db, id: &str) -> rusqlite::Result<()> {
+    db.lock().execute("DELETE FROM outbox WHERE id = ?1", [id]).map(|_| ())
+}
+
+/// The kit failed it: try again at `due`, or never (none) until an admin
+/// retries.
+pub fn failed(db: &Db, id: &str, attempts: u32, due: Option<i64>, error: &str) -> rusqlite::Result<()> {
+    db.lock().execute("UPDATE outbox SET attempts = ?2, due = ?3, error = ?4 WHERE id = ?1", params![id, attempts, due, error]).map(|_| ())
+}
+
+/// An admin asks for another try, now, of a message that waits for one:
+/// it gets its tries again. None: no such message, or it isn't waiting.
+pub fn retry(db: &Db, id: &str, now: i64) -> rusqlite::Result<Option<Waiting>> {
+    let conn = db.lock();
+    let Some(w) = conn.query_row(&format!("{WAITING} WHERE id = ?1 AND due IS NULL"), [id], waiting).optional()? else { return Ok(None) };
+    conn.execute("UPDATE outbox SET due = ?2, attempts = 0 WHERE id = ?1", params![id, now])?;
+    Ok(Some(w))
+}
+
+/// Every message in the outbox, in the order sent.
+pub fn outbox(db: &Db) -> rusqlite::Result<Vec<Waiting>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(&format!("{WAITING} ORDER BY rowid"))?;
+    stmt.query_map([], waiting)?.collect()
 }
 
 pub(crate) fn in_memory() -> Db {
@@ -385,6 +496,47 @@ mod tests {
                 assert_eq!(Tx::default().scan(&db, APP, prefix, None, 100, reverse).unwrap(), wanted, "prefix {prefix:?}, reverse {reverse}");
             }
         }
+    }
+
+    fn message(id: &str) -> Outgoing {
+        Outgoing { id: id.into(), kit: "acme:crm".into(), function: "acme:crm/leads#add-lead".into(), args: r#"["web"]"#.into() }
+    }
+
+    #[test]
+    fn messages_go_out_with_the_writes_or_not_at_all() {
+        let db = db();
+        let mut tx = Tx::default();
+        assert_eq!(tx.get(&db, APP, "n").unwrap(), None);
+        tx.set("n".into(), "1".into());
+        tx.send(message("m1"));
+        put(&db, &[("n", "theirs")]);
+        assert!(!tx.commit(&db, APP).unwrap(), "what it read changed");
+        assert!(outbox(&db).unwrap().is_empty());
+
+        let mut tx = Tx::default();
+        tx.get(&db, APP, "n").unwrap();
+        tx.set("n".into(), "2".into());
+        tx.send(message("m2"));
+        assert!(tx.commit(&db, APP).unwrap());
+        assert_eq!(outbox(&db).unwrap().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["m2"]);
+        assert_eq!(Tx::default().get(&db, APP, "n").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn a_request_that_only_sends_commits_and_its_kit_finds_it() {
+        let db = db();
+        let mut tx = Tx::default();
+        tx.send(message("m1"));
+        assert!(tx.commit(&db, APP).unwrap());
+        let m = outbox(&db).unwrap().remove(0);
+        assert_eq!((m.app.as_str(), m.attempts, m.due), (APP, 0, Some(m.at)));
+        assert_eq!(due(&db, "acme:crm", m.at, 10).unwrap(), std::slice::from_ref(&m));
+        assert!(due(&db, "acme:crm", m.at - 1, 10).unwrap().is_empty());
+        assert!(due(&db, "acme:other", m.at, 10).unwrap().is_empty());
+        assert_eq!(next_due(&db, "acme:crm").unwrap(), Some(m.at));
+        delivered(&db, "m1").unwrap();
+        assert!(outbox(&db).unwrap().is_empty());
+        assert_eq!(next_due(&db, "acme:crm").unwrap(), None);
     }
 
     fn put(db: &Db, pairs: &[(&str, &str)]) {

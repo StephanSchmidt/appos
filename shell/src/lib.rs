@@ -14,6 +14,7 @@ pub mod deps;
 pub mod kit;
 mod log_filter;
 mod manifest;
+mod outbox;
 mod platform;
 pub mod review;
 mod runtime;

@@ -917,6 +917,9 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
     let started = Instant::now();
     let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access).await;
     drop(permit);
+    if cost.sent > 0 {
+        shell.outbox.wake();
+    }
     usage.wall_us = started.elapsed().as_micros() as u64;
     (usage.fuel, usage.io, usage.runs) = (cost.fuel, cost.io, cost.runs);
 

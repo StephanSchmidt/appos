@@ -162,6 +162,8 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Frozen => "Deploys frozen",
         Kind::Unfrozen => "Deploys unfrozen",
         Kind::LimitsSet => "Limits set",
+        Kind::MessageFailed => "Message failed",
+        Kind::MessageRetried => "Message retried",
     }
 }
 

@@ -179,6 +179,8 @@ pub struct Cost {
     pub fuel: u64,
     pub io: u32,
     pub runs: u32,
+    /// Commands it sent to kits, once committed.
+    pub sent: usize,
 }
 
 enum Phase {
@@ -480,6 +482,7 @@ pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget,
         match timeout_at(deadline, ctx.database(|tx, db, id| tx.commit(db, id))).await {
             Ok(Ok(true)) => {
                 print_logs(&ctx);
+                cost.sent = ctx.tx.sent();
                 return (Ok(page), cost);
             }
             Ok(Ok(false)) => {}
@@ -746,6 +749,11 @@ impl Ctx {
     pub(crate) async fn kv_get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
         check_key("kv::get", &key)?;
         self.database(move |tx, db, id| tx.get(db, id, &key)).await
+    }
+
+    /// A command to a kit (kit.rs), sent when the request commits.
+    pub(crate) fn send(&mut self, kit: String, function: String, args: String) {
+        self.tx.send(crate::tx::Outgoing { id: crate::auth::session::random(16), kit, function, args });
     }
 
     pub(crate) fn kv_set(&mut self, key: String, value: String) -> wasmtime::Result<()> {

@@ -29,6 +29,7 @@ mod console;
 mod format;
 mod kpis;
 mod log;
+mod messages;
 mod model;
 mod overview;
 mod policy;
@@ -64,6 +65,8 @@ pub fn router() -> Router<Arc<Shell>> {
         .route("/admin", get(overview::overview))
         .route("/admin/log", get(log::log_page))
         .route("/admin/policy", get(policy::policy_page))
+        .route("/admin/messages", get(messages::messages_page))
+        .route("/admin/messages/{id}/retry", post(messages::retry))
         .route("/admin/token", get(token::token_page).post(token::make))
         .route("/admin/apps/{id}", get(app::app_page))
         .route("/admin/apps/{id}/rollback", post(actions::make_live))
@@ -242,7 +245,7 @@ impl Scheme {
 }
 
 /// The sections in the header.
-const NAV: &[(&str, &str)] = &[("Overview", "/admin"), ("Log", "/admin/log"), ("Policy", "/admin/policy")];
+const NAV: &[(&str, &str)] = &[("Overview", "/admin"), ("Log", "/admin/log"), ("Messages", "/admin/messages"), ("Policy", "/admin/policy")];
 
 /// The pick from the cookie.
 /// This platform's URL as the browser reached it, for `appos login`.

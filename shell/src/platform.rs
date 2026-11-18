@@ -211,6 +211,12 @@ names! {
         /// An admin changed an app's limits per request (`message` says
         /// from what to what).
         LimitsSet = "limits-set",
+        /// A command an app sent failed at its kit every try (`message`
+        /// names it, `reason` says the last error): it waits in the outbox
+        /// for an admin (outbox.rs).
+        MessageFailed = "message-failed",
+        /// An admin had a failed command tried again.
+        MessageRetried = "message-retried",
     }
 }
 
@@ -231,9 +237,9 @@ impl Severity {
     pub fn of(kind: Kind, risk: Option<u8>) -> Self {
         let base = match kind {
             Kind::Deployed | Kind::TurnedOn | Kind::Seen | Kind::Unfrozen => Severity::Info,
-            Kind::RolledBack | Kind::RiskChanged | Kind::PolicyChanged | Kind::LimitsSet => Severity::Low,
+            Kind::RolledBack | Kind::RiskChanged | Kind::PolicyChanged | Kind::LimitsSet | Kind::MessageRetried => Severity::Low,
             Kind::Refused | Kind::LimitHit | Kind::Held | Kind::TurnedOff | Kind::Frozen => Severity::Medium,
-            Kind::AutoRolledBack | Kind::PolicyRefused => Severity::High,
+            Kind::AutoRolledBack | Kind::PolicyRefused | Kind::MessageFailed => Severity::High,
         };
         if risk.is_some_and(|r| Band::of(r) >= Band::High) { base.up() } else { base }
     }

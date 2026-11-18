@@ -8,6 +8,7 @@ use crate::access::Policies;
 use crate::auth::Auth;
 use crate::kit::Kits;
 use crate::manifest::Risk;
+use crate::outbox::Outbox;
 use crate::platform::PlatformDb;
 use crate::state::State;
 use crate::tx::Db;
@@ -29,6 +30,8 @@ pub struct Shell {
     pub risk: Risk,
     /// What apps call besides the page: kv and the platform's kits.
     pub kits: Kits,
+    /// Delivers the commands to the kits (outbox.rs).
+    pub outbox: Outbox,
     /// Keep each route's last request that worked, for `appos review`.
     pub keep_examples: bool,
     /// What runs; every change goes through it.
@@ -59,10 +62,11 @@ pub struct Parts {
 }
 
 impl Shell {
-    /// Reads the state platform.db keeps and starts the usage writer; in a
-    /// Tokio runtime.
+    /// Reads the state platform.db keeps and starts the usage writer and
+    /// the kits' deliveries; in a Tokio runtime.
     pub fn new(p: Parts) -> anyhow::Result<Arc<Shell>> {
         let state = State::open(p.platform.clone(), p.risk.clone())?;
+        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits);
         Ok(Arc::new(Shell {
             origin: p.origin,
             name: p.name,
@@ -73,6 +77,7 @@ impl Shell {
             usage: crate::usage::start(p.platform.clone()),
             platform: p.platform,
             risk: p.risk,
+            outbox,
             kits: p.kits,
             keep_examples: p.keep_examples,
             auth: p.auth,

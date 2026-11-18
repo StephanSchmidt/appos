@@ -173,6 +173,8 @@ impl Tone {
             Kind::Seen => Tone::Neutral,
             Kind::Frozen => Tone::Caution,
             Kind::Unfrozen => Tone::Success,
+            Kind::MessageFailed => Tone::Warning,
+            Kind::MessageRetried => Tone::Info,
             Kind::LimitsSet => Tone::Info,
         }
     }
@@ -469,6 +471,8 @@ pub(super) fn word(e: &Event) -> &'static str {
         Kind::Frozen => "Deploys frozen",
         Kind::Unfrozen => "Deploys unfrozen",
         Kind::LimitsSet => "Limits set",
+        Kind::MessageFailed => "Message failed",
+        Kind::MessageRetried => "Message retried",
     }
 }
 
@@ -485,6 +489,8 @@ pub(super) fn icon(e: &Event) -> &'static str {
         Kind::TurnedOff | Kind::TurnedOn => POWER_PATH,
         Kind::Seen => SEEN_PATH,
         Kind::Frozen | Kind::Unfrozen => FROZEN_PATH,
+        Kind::MessageFailed => REFUSED_PATH,
+        Kind::MessageRetried => ROLLBACK_PATH,
     }
 }
 
@@ -512,7 +518,14 @@ pub(super) fn sentence(e: &Event, name: Option<&str>) -> String {
     // Who, where it isn't the shell on its own; after a comma when the
     // message has one ("made live, replacing 0.2.0, by an admin").
     let who = match e.kind {
-        Kind::AutoRolledBack | Kind::LimitHit | Kind::RiskChanged | Kind::PolicyChanged | Kind::PolicyRefused | Kind::Refused | Kind::Held => String::new(),
+        Kind::AutoRolledBack
+        | Kind::LimitHit
+        | Kind::RiskChanged
+        | Kind::PolicyChanged
+        | Kind::PolicyRefused
+        | Kind::Refused
+        | Kind::Held
+        | Kind::MessageFailed => String::new(),
         Kind::Deployed if e.actor != Actor::Admin => String::new(),
         _ if message.contains(',') => format!(", {}", by(e)),
         _ => format!(" {}", by(e)),

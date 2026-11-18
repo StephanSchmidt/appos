@@ -13,16 +13,24 @@
 //! and the policy, and charges the request's I/O budget, before the kit's
 //! code runs: kits never check permissions themselves, and they never see
 //! the linker they could get around it with.
+//!
+//! A function is a query or a command. A query answers now and only reads
+//! (`KitLinker::func`). A command returns nothing and runs after the
+//! request commits (`KitLinker::command`): the commit puts it in the
+//! outbox, and `Kit::run` gets it from there (outbox.rs). One kit is one
+//! WIT package.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 
-use crate::runtime::{Ctx, FRAMEWORK, READ, WRITE};
+use crate::runtime::{Ctx, FRAMEWORK, MAX_VALUE, READ, WRITE};
 
 /// What kit functions take and return: tuples of these, and records that
 /// derive them.
@@ -31,6 +39,8 @@ pub use wasmtime::{Error, Result};
 
 /// What a kit function returns: a future borrowing the call.
 pub type Answer<'a, R> = Pin<Box<dyn Future<Output = Result<R>> + Send + 'a>>;
+/// What running a command returns.
+pub type Run<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
 /// The grants kv offers.
 pub const KV_READ: &str = "kv-read";
@@ -67,6 +77,38 @@ pub trait Kit: Send + Sync + 'static {
     /// Links its functions for one app. AppOS checks the grant and the
     /// policy before a call reaches them.
     fn link(&self, linker: &mut KitLinker<'_>) -> anyhow::Result<()>;
+    /// Runs one command after the sender's commit. An error tries it again
+    /// later; the message's id is the same on every try, so a retry can be
+    /// harmless.
+    fn run(&self, msg: Message) -> Run<'_> {
+        Box::pin(async move { anyhow::bail!("{} is no command of this kit", msg.function) })
+    }
+}
+
+/// A command, delivered to its kit after the sender's commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// The same on every try: a kit that did it already can skip it.
+    pub id: String,
+    /// The app that sent it.
+    pub app: String,
+    /// Like "acme:crm/leads#add-lead".
+    pub function: String,
+    /// Tries that failed before this one.
+    pub attempts: u32,
+    args: String,
+}
+
+impl Message {
+    /// The arguments, as the function takes them: a tuple, like
+    /// `(String,)`.
+    pub fn args<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
+        Ok(serde_json::from_str(&self.args)?)
+    }
+
+    pub(crate) fn of(w: crate::tx::Waiting) -> Message {
+        Message { id: w.id, app: w.app, function: w.function, attempts: w.attempts, args: w.args }
+    }
 }
 
 struct Registered {
@@ -100,6 +142,7 @@ impl Kits {
 
     fn checked(self) -> anyhow::Result<Kits> {
         let (mut names, mut functions, mut files) = (HashSet::new(), HashSet::new(), HashSet::from(["appos.wit".to_string()]));
+        let mut packages = HashSet::new();
         for (i, r) in self.0.iter().enumerate() {
             for (file, _) in r.kit.wit() {
                 anyhow::ensure!(
@@ -122,6 +165,11 @@ impl Kits {
                     anyhow::ensure!(i == 0 || !interface.starts_with(FRAMEWORK), "grant {}: {interface} is the shell's own", g.name);
                     anyhow::ensure!(functions.insert(f.as_str()), "two grants allow {f}");
                 }
+            }
+            let mine: BTreeSet<&str> = r.grants.iter().flat_map(|g| &g.functions).map(|f| package(f)).collect();
+            anyhow::ensure!(mine.len() <= 1, "a kit is one WIT package, not {}", mine.into_iter().collect::<Vec<_>>().join(" and "));
+            if let Some(p) = mine.into_iter().next() {
+                anyhow::ensure!(packages.insert(p), "two kits offer {p}");
             }
         }
         Ok(self)
@@ -163,6 +211,12 @@ impl Kits {
         self.0.iter().flat_map(|r| r.kit.wit()).collect()
     }
 
+    /// Each kit with functions, by its WIT package: where commands go.
+    pub(crate) fn packages(&self) -> Vec<(String, Arc<dyn Kit>)> {
+        let first = |r: &Registered| r.grants.iter().flat_map(|g| &g.functions).next().map(|f| package(f).to_string());
+        self.0.iter().filter_map(|r| Some((first(r)?, r.kit.clone()))).collect()
+    }
+
     /// Links the functions the app's grants allow, kit by kit. `held` is
     /// the app's grants as app.toml lists them: a grant's place there is
     /// its bit in the request's `Access`.
@@ -186,7 +240,22 @@ pub struct KitLinker<'a> {
 }
 
 impl KitLinker<'_> {
-    /// Links a function that answers now, like a query. `interface` is as
+    /// What AppOS checks on a call of the function; none if the app may
+    /// not call it at all.
+    fn checked(&self, interface: &str, function: &str) -> anyhow::Result<Option<Checked>> {
+        let unversioned = interface.split('@').next().unwrap_or(interface);
+        let name = format!("{unversioned}#{function}");
+        let Some(grant) = self.grants.iter().find(|g| g.functions.contains(&name)) else {
+            anyhow::bail!("{name}: none of the kit's grants allows it");
+        };
+        // The app doesn't hold the grant: it may not import the function
+        // (runtime::check_imports), so there is nothing to link.
+        let Some(bit) = self.held.iter().position(|g| *g == grant.name) else { return Ok(None) };
+        let short = unversioned.rsplit('/').next().unwrap_or(unversioned);
+        Ok(Some(Checked { what: format!("{short}::{function}"), grant: grant.name.clone(), bit: bit as u32, cost: grant.cost, name }))
+    }
+
+    /// Links a query: it answers now and only reads. `interface` is as
     /// apps import it, with its version: "acme:crm/leads@1.0.0". AppOS
     /// checks the grant, the policy and the budget, then calls `f`.
     pub fn func<P, R, F>(&mut self, interface: &str, function: &str, f: F) -> anyhow::Result<()>
@@ -195,16 +264,8 @@ impl KitLinker<'_> {
         R: ComponentNamedList + Lower + Send + 'static,
         F: for<'b> Fn(Call<'b>, P) -> Answer<'b, R> + Send + Sync + 'static,
     {
-        let unversioned = interface.split('@').next().unwrap_or(interface);
-        let name = format!("{unversioned}#{function}");
-        let Some(grant) = self.grants.iter().find(|g| g.functions.contains(&name)) else {
-            anyhow::bail!("{name}: none of the kit's grants allows it");
-        };
-        // The app doesn't hold the grant: it may not import the function
-        // (runtime::check_imports), so there is nothing to link.
-        let Some(bit) = self.held.iter().position(|g| *g == grant.name) else { return Ok(()) };
-        let short = unversioned.rsplit('/').next().unwrap_or(unversioned);
-        let checked = Arc::new(Checked { what: format!("{short}::{function}"), grant: grant.name.clone(), bit: bit as u32, cost: grant.cost });
+        let Some(checked) = self.checked(interface, function)? else { return Ok(()) };
+        let checked = Arc::new(checked);
         let f = Arc::new(f);
         self.linker.instance(interface)?.func_wrap_async(function, move |mut store: StoreContextMut<'_, Ctx>, params: P| {
             let (checked, f) = (checked.clone(), f.clone());
@@ -215,6 +276,35 @@ impl KitLinker<'_> {
         })?;
         Ok(())
     }
+
+    /// Links a command: it returns nothing and runs after the request
+    /// commits. AppOS checks the grant, the policy and the budget, and
+    /// keeps the arguments (as JSON) in the request's transaction; the
+    /// kit's `run` gets them after the commit. A request that fails, or
+    /// runs again, sends nothing.
+    pub fn command<P>(&mut self, interface: &str, function: &str) -> anyhow::Result<()>
+    where
+        P: ComponentNamedList + Lift + Serialize + Send + Sync + 'static,
+    {
+        let Some(checked) = self.checked(interface, function)? else { return Ok(()) };
+        let kit = package(&checked.name).to_string();
+        self.linker.instance(interface)?.func_wrap(function, move |mut store: StoreContextMut<'_, Ctx>, params: P| {
+            let ctx = store.data_mut();
+            ctx.in_request(&checked.what, &checked.grant, checked.bit, checked.cost)?;
+            let args = serde_json::to_string(&params).map_err(|e| wasmtime::format_err!("{}: {e}", checked.what))?;
+            if args.len() > MAX_VALUE {
+                return Err(wasmtime::format_err!("{}: the arguments are {} bytes, more than {MAX_VALUE}", checked.what, args.len()));
+            }
+            ctx.send(kit.clone(), checked.name.clone(), args);
+            Ok(())
+        })?;
+        Ok(())
+    }
+}
+
+/// The WIT package of a function: "acme:crm" of "acme:crm/leads#count-leads".
+fn package(function: &str) -> &str {
+    function.split('/').next().unwrap_or(function)
 }
 
 /// What AppOS checks before a call reaches the kit.
@@ -224,6 +314,8 @@ struct Checked {
     grant: String,
     bit: u32,
     cost: u32,
+    /// Like "acme:crm/leads#count-leads".
+    name: String,
 }
 
 /// One call of a kit function, by an app handling a request.
@@ -280,15 +372,19 @@ mod tests {
     use crate::runtime::{self, AdminLimits, Budget, Request};
 
     /// acme:crm with one query, count-leads, that answers 7 and keeps who
-    /// asked what.
+    /// asked what; and one command, add-lead, that keeps who added what.
     #[derive(Clone, Default)]
     struct Crm {
         asked: Arc<Mutex<Vec<(String, String)>>>,
+        added: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl Kit for Crm {
         fn wit(&self) -> Vec<(String, String)> {
-            vec![("crm.wit".into(), "package acme:crm@1.0.0;\ninterface leads { count-leads: func(source: string) -> u32; }\n".into())]
+            vec![(
+                "crm.wit".into(),
+                "package acme:crm@1.0.0;\ninterface leads { count-leads: func(source: string) -> u32; add-lead: func(source: string); }\n".into(),
+            )]
         }
 
         fn grants(&self) -> Vec<Grant> {
@@ -306,6 +402,16 @@ mod tests {
                     asked.lock().push((call.app().to_string(), source));
                     Ok((7u32,))
                 })
+            })?;
+            linker.command::<(String,)>("acme:crm/leads@1.0.0", "add-lead")
+        }
+
+        fn run(&self, msg: Message) -> Run<'_> {
+            Box::pin(async move {
+                anyhow::ensure!(msg.function == "acme:crm/leads#add-lead", "no command {}", msg.function);
+                let (source,): (String,) = msg.args()?;
+                self.added.lock().push((msg.app, source));
+                Ok(())
             })
         }
     }
@@ -315,16 +421,24 @@ mod tests {
     }
 
     async fn load(kits: &Kits, grants: &str) -> anyhow::Result<runtime::LoadedApp> {
+        load_wat(kits, grants, include_bytes!("testing-kit.wat"), crate::tx::in_memory()).await
+    }
+
+    async fn load_wat(kits: &Kits, grants: &str, wat: &[u8], db: crate::tx::Db) -> anyhow::Result<runtime::LoadedApp> {
         let bundle = Bundle {
             manifest: format!("[app]\nid = 'test'\nname = 'Test'\nversion = '1'\nowner = 'Tests'\ngroup = 'Tests'\n[capabilities]\ngrant = [{grants}]\n"),
-            wasm: include_bytes!("testing-kit.wat").to_vec(),
+            wasm: wat.to_vec(),
             icon: None,
             deps: None,
         };
-        runtime::load(&runtime::engine()?, crate::tx::in_memory(), kits, &bundle.checked()?).await
+        runtime::load(&runtime::engine()?, db, kits, &bundle.checked()?).await
     }
 
     async fn get(app: &runtime::LoadedApp, access: Access) -> Result<runtime::Page, runtime::Failed> {
+        run(app, "read", access).await.0
+    }
+
+    async fn run(app: &runtime::LoadedApp, handler: &str, access: Access) -> (Result<runtime::Page, runtime::Failed>, runtime::Cost) {
         let req = Request {
             method: "GET".into(),
             path: "/".into(),
@@ -336,7 +450,7 @@ mod tests {
             htmx: false,
             now: "2026-11-18T12:00:00Z".into(),
         };
-        runtime::call(app, "read", &req, Budget::of(&app.manifest, AdminLimits::default()), access).await.0
+        runtime::call(app, handler, &req, Budget::of(&app.manifest, AdminLimits::default()), access).await
     }
 
     #[tokio::test]
@@ -359,6 +473,46 @@ mod tests {
             assert_eq!(failed.error.to_string(), "denied leads-read");
         }
         assert!(crm.asked.lock().is_empty(), "the kit never saw the call");
+    }
+
+    #[tokio::test]
+    async fn commands_run_after_the_commit() {
+        let crm = Crm::default();
+        let kits = kits(&crm);
+        let db = crate::tx::in_memory();
+        let app = load_wat(&kits, "'leads-write'", include_bytes!("testing-command.wat"), db.clone()).await.unwrap();
+        let (page, cost) = run(&app, "send", Access::ALL).await;
+        assert_eq!(page.unwrap_or_else(|f| panic!("{:#}", f.error)).html, [("page".to_string(), "sent".to_string())]);
+        assert_eq!(cost.sent, 2);
+        assert!(crm.added.lock().is_empty(), "nothing runs before delivery");
+        let sent = crate::tx::outbox(&db).unwrap();
+        assert_eq!(
+            sent.iter().map(|m| (m.app.as_str(), m.function.as_str(), m.args.as_str())).collect::<Vec<_>>(),
+            [("test", "acme:crm/leads#add-lead", r#"["web"]"#), ("test", "acme:crm/leads#add-lead", r#"["ads"]"#)]
+        );
+
+        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), &kits).wake();
+        for _ in 0..200 {
+            if crate::tx::outbox(&db).unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let test = |s: &str| ("test".to_string(), s.to_string());
+        assert_eq!(*crm.added.lock(), [test("web"), test("ads")]);
+        assert!(crate::tx::outbox(&db).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_that_fails_or_is_denied_sends_nothing() {
+        let crm = Crm::default();
+        let db = crate::tx::in_memory();
+        let app = load_wat(&kits(&crm), "'leads-write'", include_bytes!("testing-command.wat"), db.clone()).await.unwrap();
+        let (page, cost) = run(&app, "crash", Access::ALL).await;
+        assert!(page.is_err() && cost.sent == 0);
+        let (page, _) = run(&app, "send", Access::NONE).await;
+        assert_eq!(page.err().unwrap().error.to_string(), "denied leads-write");
+        assert!(crate::tx::outbox(&db).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -415,10 +569,14 @@ mod tests {
             (Grant::new("deals-read", "", &["acme:crm/deals@1.0.0#list"], 1), "without a version"),
             (Grant::new("admin", "", &["acme:crm/deals#list"], 1), "admin screen"),
             (Grant::new("Deals", "", &["acme:crm/deals#list"], 1), "lowercase"),
+            (Grant::new("deals-read", "", &["acme:crm/deals#list"], 1), "two kits offer acme:crm"),
         ] {
             let err = kits.clone().with(Bad(vec![grant])).err().unwrap().to_string();
             assert!(err.contains(why), "{err}");
         }
+        let two = Bad(vec![Grant::new("a-read", "", &["acme:a/x#f"], 1), Grant::new("b-read", "", &["acme:b/x#f"], 1)]);
+        let err = kits.clone().with(two).err().unwrap().to_string();
+        assert!(err.contains("a kit is one WIT package, not acme:a and acme:b"), "{err}");
     }
 
     #[test]
