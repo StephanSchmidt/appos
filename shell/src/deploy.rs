@@ -21,8 +21,9 @@
 //! unfreezes them. Stop all turns every running app off at once; Start all
 //! turns those back on.
 //!
-//! The platform API takes a token from `appos login` and the policy's
-//! `admin` (web.rs, `api_only`); with `--no-auth`, whoever reaches it can
+//! The platform API takes a token from `appos login`, and admin-read from
+//! the policy to look, admin-write to change (web.rs, `api_only`); with
+//! `--no-auth`, whoever reaches it can
 //! deploy, roll back and turn apps off.
 //!
 //! A Wasm kit is deployed the same way, as kit.zip, and held like an app:

@@ -4,10 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::State;
-use axum::response::{Html, IntoResponse, Response};
-
-use crate::access::{ADMIN, grants_of};
+use crate::access::{ADMIN_PREFIX, grants_of};
 use crate::auth::{ANYONE, SIGNED_IN};
 use crate::platform::now_ms;
 use crate::shell::Shell;
@@ -16,14 +13,16 @@ use crate::web::escape;
 use super::format::{clock, plural};
 use super::model::{App, Tone, load, name_of, state};
 use super::style::{grant_label, tone_icon};
-use super::{S, Viewer, page, read};
+use super::{Ask, Viewer, page, read};
+use crate::kit::Reply;
 
 /// `GET /admin/policy`.
-pub(super) async fn policy_page(State(shell): S, viewer: Viewer) -> Response {
+pub(super) async fn policy_page(ask: Ask) -> Reply {
+    let Ask { shell, viewer, .. } = ask;
     read(shell, move |shell| policy_html(shell, &viewer)).await
 }
 
-fn policy_html(shell: &Shell, viewer: &Viewer) -> Response {
+fn policy_html(shell: &Shell, viewer: &Viewer) -> Reply {
     let (apps, _) = load(shell, now_ms());
     let head = r#"<div class="cardhead"><h2 id="policy-h">Policy <small>· who may use the apps' grants, and the admin screen</small></h2></div>"#;
     let body = match &shell.policy {
@@ -63,7 +62,7 @@ fn policy_html(shell: &Shell, viewer: &Viewer) -> Response {
             r#"<section class="card logcard policy" aria-labelledby="policy-h">{head}<p class="empty">The shell runs with <code>--no-auth</code>: no sign-in and no policy, so anyone may use every grant an app holds, and this screen. Start it with <code>--auth auth.toml --policy policy.csv</code> to say who may do what.</p></section>"#
         ),
     };
-    Html(page(shell, viewer, state(&apps), "/admin/policy", &format!("Policy · {} admin", shell.name), &body, None)).into_response()
+    Reply::document(page(shell, viewer, state(&apps), "/admin/policy", &format!("Policy · {} admin", shell.name), &body, None))
 }
 
 /// What the file says about one subject.
@@ -134,9 +133,6 @@ fn subject(who: &str, a: &About) -> String {
 
 /// One rule as a sentence: the grants (with their risk) and where.
 fn may(shell: &Shell, apps: &[App], app: &str, what: &str) -> String {
-    if what == ADMIN {
-        return "Use the admin screen".to_string();
-    }
     let names = shell.kits.now().names();
     let offered = grants_of(what, &names);
     // A Wasm kit's grant, while the kit isn't deployed, or a typo.
@@ -146,6 +142,8 @@ fn may(shell: &Shell, apps: &[App], app: &str, what: &str) -> String {
     };
     let pattern = if offered.is_empty() || offered == [what] { String::new() } else { format!(r#" <span class="quiet">({})</span>"#, escape(what)) };
     let place = match app {
+        // admin-read, admin-write: the platform's.
+        "*" if !offered.is_empty() && offered.iter().all(|g| g.starts_with(ADMIN_PREFIX)) => "the admin screen and the platform API".to_string(),
         "*" => "every app".to_string(),
         _ => match app.strip_prefix("apps:") {
             Some(group) => format!("the apps of group <b>{}</b>", escape(group)),

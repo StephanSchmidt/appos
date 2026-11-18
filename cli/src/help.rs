@@ -563,9 +563,10 @@ Connects to an AppOS shell's platform API at <url>, saves it (in
 platform. Not needed for local development.
 
 A shell with sign-in takes a token: make one on its admin screen at
-<url>/admin/token, signed in as an admin, and paste it when asked, or
-pipe it in (echo \"$TOKEN\" | appos login <url>). It acts as you, while the
-shell's policy makes you an admin, for 30 days. A token kept from before
+<url>/admin/token, signed in, and paste it when asked, or pipe it in
+(echo \"$TOKEN\" | appos login <url>). It acts as you for 30 days, with
+what the shell's policy gives you: admin-read to look, admin-write to
+deploy and change. A token kept from before
 is used again while it works.
 ";
 

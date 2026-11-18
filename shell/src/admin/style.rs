@@ -500,6 +500,8 @@ button.primary, .button.primary { background: var(--accent-9); color: var(--acce
 button.primary:hover, .button.primary:hover { background: var(--accent-10); }
 .user { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); }
 .user form { display: contents; }
+.looks { padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+form[inert] > * { opacity: .4; }
 .user button { min-height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font: inherit; cursor: pointer; }
 .user button:hover { color: var(--ink); }
 .scheme { display: flex; gap: 2px; padding: 2px; background: var(--gray-3); border-radius: 8px; }

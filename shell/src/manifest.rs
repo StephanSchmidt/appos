@@ -82,9 +82,6 @@ pub fn validate_grant_name(name: &str) -> Result<(), String> {
     if !ok {
         return Err(format!("grant {name:?} must be up to {MAX_GRANT_NAME} lowercase letters, digits and dashes, starting with a letter"));
     }
-    if name == crate::access::ADMIN {
-        return Err("admin is the admin screen's, not a grant".into());
-    }
     Ok(())
 }
 
@@ -293,6 +290,9 @@ impl Manifest {
         // Which grants exist, the kits say when the app loads (runtime.rs).
         for cap in &self.capabilities.grant {
             validate_grant_name(cap)?;
+            if cap.starts_with(crate::access::ADMIN_PREFIX) {
+                return Err(format!("[capabilities] {cap} is for people, in policy.csv: the admin- grants are the admin screen's"));
+            }
         }
         if self.capabilities.grant.len() > MAX_GRANTS {
             return Err(format!("[capabilities] grant: at most {MAX_GRANTS} grants"));
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn grants_are_names() {
         assert!(Manifest::parse("[app]\nid = 'a'\nname = 'A'\nversion = '1'\n[capabilities]\ngrant = ['leads-read']").is_ok(), "the kits say which exist");
-        for bad in ["Kv-Read", "kv read", "kv-*", "", "admin", "1kv"] {
+        for bad in ["Kv-Read", "kv read", "kv-*", "", "admin-read", "1kv"] {
             assert!(Manifest::parse(&format!("[app]\nid = 'a'\nname = 'A'\nversion = '1'\n[capabilities]\ngrant = ['{bad}']")).is_err(), "{bad:?}");
         }
     }

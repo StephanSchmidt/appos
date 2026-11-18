@@ -4,11 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, State};
-use axum::response::{Html, IntoResponse, Response};
-
-use crate::auth::Who;
-use crate::kit::Sent;
+use crate::kit::{Reply, Sent};
 use crate::outbox::MAX_ATTEMPTS;
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::shell::Shell;
@@ -19,14 +15,15 @@ use crate::web::escape;
 use super::actions::back;
 use super::format::{clock, plural};
 use super::model::{App, load, name_of, state};
-use super::{S, Viewer, page, read};
+use super::{Ask, Viewer, page, read};
 
 /// `GET /admin/messages`.
-pub(super) async fn messages_page(State(shell): S, viewer: Viewer) -> Response {
+pub(super) async fn messages_page(ask: Ask) -> Reply {
+    let Ask { shell, viewer, .. } = ask;
     read(shell, move |shell| messages_html(shell, &viewer)).await
 }
 
-fn messages_html(shell: &Shell, viewer: &Viewer) -> Response {
+fn messages_html(shell: &Shell, viewer: &Viewer) -> Reply {
     let now = now_ms();
     let (apps, _) = load(shell, now);
     let head = r#"<div class="cardhead"><h2 id="messages-h">Messages <small>· commands on their way from apps to kits</small></h2></div>"#;
@@ -39,7 +36,7 @@ fn messages_html(shell: &Shell, viewer: &Viewer) -> Response {
         "An app's command waits here from the app's commit until its kit ran it. A failed one is tried again after 1 s, 2 s, 4 s and so on up to 5 minutes; after {MAX_ATTEMPTS} tries it waits for you."
     );
     let body = format!(r#"<section class="card logcard policy" aria-labelledby="messages-h">{head}{list}<p class="foot">{foot}</p></section>"#);
-    Html(page(shell, viewer, state(&apps), "/admin/messages", &format!("Messages · {} admin", shell.name), &body, None)).into_response()
+    Reply::document(page(shell, viewer, state(&apps), "/admin/messages", &format!("Messages · {} admin", shell.name), &body, None))
 }
 
 fn table(apps: &[App], waiting: &[Waiting], now: i64) -> String {
@@ -87,9 +84,9 @@ fn row(apps: &[App], w: &Waiting, now: i64) -> String {
 
 /// `POST /admin/messages/{id}/retry`: a failed command gets its tries
 /// again, now.
-pub(super) async fn retry(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): axum::Form<BTreeMap<String, String>>) -> Response {
-    let done = retry_now(&shell, id, who.person()).await;
-    back(&form, "/admin/messages", done)
+pub(super) async fn retry(ask: Ask) -> Reply {
+    let done = retry_now(&ask.shell, ask.id(), ask.viewer.who.person()).await;
+    back(&ask.form(), "/admin/messages", done)
 }
 
 async fn retry_now(shell: &Shell, id: String, person: Option<String>) -> super::actions::Done {

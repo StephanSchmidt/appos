@@ -391,7 +391,7 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -
     let unknown: Vec<&String> = m.capabilities.grant.iter().filter(|g| kits.grant(g).is_none()).collect();
     if let Some(g) = unknown.first() {
         let kit = if m.is_kit() { "" } else { "; a Wasm kit's grants come once it is deployed" };
-        bail!("unknown capability {g:?}; known: {}{kit}", kits.names().join(", "));
+        bail!("unknown capability {g:?}; known: {}{kit}", kits.for_apps().join(", "));
     }
     let (file, who) = (m.file(), if m.is_kit() { "kits" } else { "apps" });
     let mut problems = Vec::new();
@@ -585,6 +585,7 @@ pub async fn call(
         deadline: deadline.into_std(),
         may: held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect(),
         live,
+        own: None,
     });
     let timeout = || timed_out(budget);
     let mut cost = Cost::default();
@@ -1068,7 +1069,7 @@ mod tests {
         let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, |_| {});
         let ctx = store.data_mut();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default() }));
+        ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default(), own: None }));
         ctx.depth = MAX_DEPTH - 1;
         assert_eq!(ctx.kit_call().unwrap().1.depth, MAX_DEPTH);
         ctx.depth = MAX_DEPTH;

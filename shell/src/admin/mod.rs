@@ -1,4 +1,7 @@
-//! The admin screen, at /admin next to the platform API. The overview: the
+//! The admin screen, at /admin next to the platform API: AdminKit's pages,
+//! a kit built into the shell. Looking needs admin-read from policy.csv,
+//! changing admin-write; a page shows its changes to those without it, but
+//! they don't act. The overview: the
 //! console (what needs you, every app on a screen, knobs and keys to look
 //! and change, Freeze and Stop all), the last hour in numbers and charts,
 //! one app in detail (its routes, versions with "Make live" and last
@@ -42,16 +45,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::Router;
-use axum::extract::{FromRequestParts, Path, RawQuery, State};
-use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{RawQuery, State};
 use axum::response::sse::{self, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
 use futures_util::{Stream, StreamExt};
 
 use crate::auth::Who;
+use crate::kit::{ADMIN_READ, ADMIN_WRITE, Context, Grant, Kit, KitLinker, KitRequest, KitRoute, Reply, Respond};
 use crate::platform::{Newest, now_ms};
 use crate::shell::Shell;
 use crate::web::{HTMX, escape};
@@ -60,33 +59,102 @@ use model::Tone;
 
 type S = State<Arc<Shell>>;
 
-pub fn router() -> Router<Arc<Shell>> {
-    Router::new()
-        .route("/admin", get(overview::overview))
-        .route("/admin/log", get(log::log_page))
-        .route("/admin/policy", get(policy::policy_page))
-        .route("/admin/messages", get(messages::messages_page))
-        .route("/admin/messages/{id}/retry", post(messages::retry))
-        .route("/admin/token", get(token::token_page).post(token::make))
-        .route("/admin/apps/{id}", get(app::app_page))
-        .route("/admin/apps/{id}/rollback", post(actions::make_live))
-        .route("/admin/apps/{id}/off", post(actions::turn_off))
-        .route("/admin/apps/{id}/on", post(actions::turn_on))
-        .route("/admin/apps/{id}/seen", post(actions::seen))
-        .route("/admin/apps/{id}/limits", post(actions::limits))
-        .route("/admin/freeze", post(actions::freeze))
-        .route("/admin/stop-all", post(actions::stop_all))
-        .route("/admin/start-all", post(actions::start_all))
-        .route("/admin/undo", post(actions::undo))
-        .route("/admin/icons/{id}", get(icon))
-        .route("/admin/scheme", post(set_scheme))
-        .route("/admin/stream", get(stream))
-        .route("/admin/assets/{file}", get(asset))
-        .route("/admin/{*rest}", get(not_found))
+/// The admin screen as a kit: its pages are its routes, on the platform's
+/// listener; its grants are what policy.csv gives the people running the
+/// platform.
+pub struct AdminKit;
+
+impl Kit for AdminKit {
+    fn wit(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+
+    fn grants(&self) -> Vec<Grant> {
+        vec![
+            Grant::new(ADMIN_READ, "Look at the admin screen and read the platform API: apps, the log, messages, the policy", &[], 0),
+            Grant::new(ADMIN_WRITE, "Change apps and the platform: deploy, make a version live, turn apps off and on, limits, Freeze, Stop all, Undo", &[], 0),
+        ]
+    }
+
+    fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn routes(&self) -> Vec<KitRoute> {
+        let (look, change) = (ADMIN_READ, ADMIN_WRITE);
+        vec![
+            route("GET", "/admin", look, overview::overview),
+            route("GET", "/admin/log", look, log::log_page),
+            route("GET", "/admin/policy", look, policy::policy_page),
+            route("GET", "/admin/messages", look, messages::messages_page),
+            route("POST", "/admin/messages/:id/retry", change, messages::retry),
+            route("GET", "/admin/token", look, token::token_page),
+            // A token acts as its maker, with what policy.csv gives them.
+            route("POST", "/admin/token", look, token::make),
+            route("GET", "/admin/apps/:id", look, app::app_page),
+            route("POST", "/admin/apps/:id/rollback", change, actions::make_live),
+            route("POST", "/admin/apps/:id/off", change, actions::turn_off),
+            route("POST", "/admin/apps/:id/on", change, actions::turn_on),
+            route("POST", "/admin/apps/:id/seen", change, actions::seen),
+            route("POST", "/admin/apps/:id/limits", change, actions::limits),
+            route("POST", "/admin/freeze", change, actions::freeze),
+            route("POST", "/admin/stop-all", change, actions::stop_all),
+            route("POST", "/admin/start-all", change, actions::start_all),
+            route("POST", "/admin/undo", change, actions::undo),
+            route("GET", "/admin/icons/:id", look, icon),
+            // Light or dark is the viewer's own.
+            route("POST", "/admin/scheme", look, set_scheme),
+            route("GET", "/admin/assets/:file", look, asset),
+            route("GET", "/admin/*rest", look, not_found),
+        ]
+    }
+}
+
+/// What an admin page gets: the shell, who looks, and the request.
+pub(super) struct Ask {
+    shell: Arc<Shell>,
+    viewer: Viewer,
+    req: KitRequest,
+}
+
+impl Ask {
+    /// This platform's URL as the browser reached it, for `appos login`.
+    fn platform_url(&self) -> String {
+        crate::web::url_of(self.req.header("host"), self.req.header("x-forwarded-proto"))
+    }
+
+    /// The path's `:id`.
+    fn id(&self) -> String {
+        self.req.param("id").unwrap_or_default().to_string()
+    }
+
+    /// The form, a value per name (the last).
+    fn form(&self) -> BTreeMap<String, String> {
+        self.req.form.iter().cloned().collect()
+    }
+}
+
+/// One of AdminKit's pages, on the platform's listener: `page` answers an
+/// `Ask`.
+fn route<F, Fut>(method: &str, path: &str, grant: &str, page: F) -> KitRoute
+where
+    F: Fn(Ask) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Reply> + Send + 'static,
+{
+    let answer = move |cx: Context, req: KitRequest| -> Respond {
+        let Some((shell, who)) = cx.own() else { return Box::pin(async { anyhow::bail!("the admin screen is the shell's own") }) };
+        let scheme = req.cookie(SCHEME_COOKIE).and_then(Scheme::parse).unwrap_or(Scheme::System);
+        let viewer = Viewer { who: who.clone(), scheme, changes: cx.may(ADMIN_WRITE) };
+        let reply = page(Ask { shell, viewer, req });
+        Box::pin(async move { Ok(reply.await) })
+    };
+    let route = if method == "POST" { KitRoute::post(path, grant, answer) } else { KitRoute::get(path, grant, answer) };
+    route.platform()
 }
 
 /// Any other admin address: a page that says so, with the way back.
-async fn not_found(State(shell): S, viewer: Viewer) -> Response {
+async fn not_found(ask: Ask) -> Reply {
+    let Ask { shell, viewer, .. } = ask;
     read(shell, move |shell| {
         let (apps, _) = model::load(shell, now_ms());
         missing(shell, &viewer, model::state(&apps), "No such page.")
@@ -95,21 +163,26 @@ async fn not_found(State(shell): S, viewer: Viewer) -> Response {
 }
 
 /// A page saying `what` isn't there, with the way back to the overview.
-fn missing(shell: &Shell, viewer: &Viewer, state: Tone, what: &str) -> Response {
+fn missing(shell: &Shell, viewer: &Viewer, state: Tone, what: &str) -> Reply {
     let body = format!(
         r#"<div class="card summary tone-caution"><span class="sign" aria-hidden="true">{}</span><p>{} <a href="/admin"><u>Back to the overview</u></a></p></div>"#,
         style::tone_icon(Tone::Caution, 20),
         escape(what)
     );
-    (StatusCode::NOT_FOUND, Html(page(shell, viewer, state, "/admin", &format!("Not found · {} admin", shell.name), &body, None))).into_response()
+    Reply::document(page(shell, viewer, state, "/admin", &format!("Not found · {} admin", shell.name), &body, None)).status(404)
+}
+
+/// Plain text, for a request the screen's own forms never send.
+fn plain(status: u16, text: impl Into<String>) -> Reply {
+    Reply::file("text/plain; charset=utf-8", text.into()).status(status)
 }
 
 /// Draws a page off the async workers: pages read platform.db, whose lock
 /// and disk can wait, and requests to the apps go on meanwhile.
-async fn read(shell: Arc<Shell>, draw: impl FnOnce(&Shell) -> Response + Send + 'static) -> Response {
+async fn read(shell: Arc<Shell>, draw: impl FnOnce(&Shell) -> Reply + Send + 'static) -> Reply {
     match tokio::task::spawn_blocking(move || draw(&shell)).await {
         Ok(page) => page,
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("The page could not be drawn: {e}")).into_response(),
+        Err(e) => plain(500, format!("The page could not be drawn: {e}")),
     }
 }
 
@@ -145,17 +218,21 @@ const MODULES: [(&str, &str); 9] = [
     ("keys.js", include_str!("../../assets/keys.js")),
 ];
 
-async fn asset(Path(file): Path<String>) -> Response {
-    let (body, cache) = match file.as_str() {
+async fn asset(ask: Ask) -> Reply {
+    script(ask.req.param("file").unwrap_or_default())
+}
+
+fn script(file: &str) -> Reply {
+    let (body, cache) = match file {
         "htmx-2.0.4.min.js" => (HTMX, "public, max-age=31536000, immutable"),
         "htmx-ext-sse-2.2.2.js" => (SSE_JS, "public, max-age=31536000, immutable"),
         // Changes with the shell; small enough to fetch with each page.
         name => match MODULES.iter().find(|(n, _)| *n == name) {
             Some((_, body)) => (*body, "no-cache"),
-            None => return StatusCode::NOT_FOUND.into_response(),
+            None => return plain(404, "No such file."),
         },
     };
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, cache)], body).into_response()
+    Reply::file("text/javascript; charset=utf-8", body).header("cache-control", cache)
 }
 
 /// How often the stream looks for news, and at least how often it says
@@ -169,8 +246,9 @@ const RECONNECT: Duration = Duration::from_secs(2);
 /// should fetch itself again: within a second of an event or deploy, every
 /// 5 s while requests come in, every 15 s anyway. `since` is what the page
 /// showed, so nothing between drawing it and connecting is missed, and a
-/// reconnect catches up at once.
-async fn stream(State(shell): S, RawQuery(query): RawQuery) -> Sse<impl Stream<Item = Result<sse::Event, !>>> {
+/// reconnect catches up at once. Not one of AdminKit's pages, which answer
+/// once: web.rs serves it, for admin-read too.
+pub(crate) async fn stream(State(shell): S, RawQuery(query): RawQuery) -> Sse<impl Stream<Item = Result<sse::Event, !>>> {
     let asked = query.as_deref().and_then(|q| form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "since")).and_then(|(_, v)| Newest::parse(&v));
     let since = match asked {
         Some(since) => since,
@@ -247,59 +325,29 @@ impl Scheme {
 /// The sections in the header.
 const NAV: &[(&str, &str)] = &[("Overview", "/admin"), ("Log", "/admin/log"), ("Messages", "/admin/messages"), ("Policy", "/admin/policy")];
 
-/// The pick from the cookie.
-/// This platform's URL as the browser reached it, for `appos login`.
-struct PlatformUrl(String);
-
-impl FromRequestParts<Arc<Shell>> for PlatformUrl {
-    type Rejection = !;
-
-    async fn from_request_parts(parts: &mut Parts, _: &Arc<Shell>) -> Result<Self, !> {
-        Ok(PlatformUrl(crate::web::platform_url(&parts.headers)))
-    }
-}
-
-impl FromRequestParts<Arc<Shell>> for Scheme {
-    type Rejection = !;
-
-    async fn from_request_parts(parts: &mut Parts, _: &Arc<Shell>) -> Result<Self, !> {
-        let cookies = parts.headers.get_all(header::COOKIE).into_iter().filter_map(|v| v.to_str().ok());
-        let picked = cookies.flat_map(|c| c.split(';')).find_map(|c| c.trim().strip_prefix(SCHEME_COOKIE)?.strip_prefix('='));
-        Ok(picked.and_then(Scheme::parse).unwrap_or(Scheme::System))
-    }
-}
-
-/// Who looks at a page, and in which scheme.
+/// Who looks at a page, in which scheme, and whether they may change
+/// what it shows (admin-write).
 pub(super) struct Viewer {
     who: Who,
     scheme: Scheme,
-}
-
-impl FromRequestParts<Arc<Shell>> for Viewer {
-    type Rejection = !;
-
-    async fn from_request_parts(parts: &mut Parts, shell: &Arc<Shell>) -> Result<Self, !> {
-        let Ok(who) = Who::from_request_parts(parts, shell).await;
-        let Ok(scheme) = Scheme::from_request_parts(parts, shell).await;
-        Ok(Viewer { who, scheme })
-    }
+    changes: bool,
 }
 
 /// The switch: keeps the pick in a cookie for a year (or forgets it for
 /// System) and goes back to the page it was on.
-async fn set_scheme(headers: HeaderMap, axum::Form(form): axum::Form<BTreeMap<String, String>>) -> Response {
-    let Some(scheme) = form.get("scheme").and_then(|s| Scheme::parse(s)) else {
-        return (StatusCode::BAD_REQUEST, "scheme must be system, light or dark").into_response();
+async fn set_scheme(ask: Ask) -> Reply {
+    let Some(scheme) = ask.req.form_value("scheme").and_then(Scheme::parse) else {
+        return plain(400, "scheme must be system, light or dark");
     };
     let age = if scheme == Scheme::System { 0 } else { 365 * 24 * 3600 };
     let cookie = format!("{SCHEME_COOKIE}={}; Path=/admin; Max-Age={age}; SameSite=Lax; HttpOnly", scheme.name());
-    (StatusCode::SEE_OTHER, [(header::SET_COOKIE, cookie), (header::LOCATION, back(&headers))]).into_response()
+    Reply::redirect(&back(ask.req.header("referer"))).header("set-cookie", cookie)
 }
 
 /// The admin page a form was sent from (the Referer; the platform sends
 /// it same-origin only), without its query, or the overview.
-fn back(headers: &HeaderMap) -> String {
-    let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok()).unwrap_or("");
+fn back(referer: Option<&str>) -> String {
+    let referer = referer.unwrap_or("");
     let path = referer.split_once("://").and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..])).unwrap_or("");
     admin_path(path.split(['?', '#']).next().unwrap_or("")).unwrap_or("/admin").to_string()
 }
@@ -333,15 +381,20 @@ fn page(shell: &Shell, viewer: &Viewer, state: Tone, here: &str, title: &str, bo
             format!(r#"<a href="{path}"{current}>{label}</a>"#)
         })
         .collect();
-    // Who is signed in, and the way out.
+    // Who is signed in, and the way out; looking only, it says so.
+    let looks = match viewer.changes {
+        true => "",
+        false => r#"<span class="looks" title="policy.csv gives you admin-read, not admin-write: the controls show, they don't act">Look only</span>"#,
+    };
     let user = match viewer.who.identity() {
         Some(id) => format!(
-            r#"<span class="user"><span title="{}">{}</span><form method="post" action="/_auth/sign-out"><button>Sign out</button></form></span>"#,
+            r#"<span class="user">{looks}<span title="{}">{}</span><form method="post" action="/_auth/sign-out"><button>Sign out</button></form></span>"#,
             escape(&id.email),
             escape(&id.name)
         ),
-        None => String::new(),
+        None => looks.to_string(),
     };
+    let body = if viewer.changes { body.to_string() } else { look_only(body) };
     let now = chrono::Local::now();
     let icon = style::favicon(state);
     // Live: the scripts, the stream on <body> (never swapped, so it stays
@@ -394,22 +447,38 @@ fn page(shell: &Shell, viewer: &Viewer, state: Tone, here: &str, title: &str, bo
     )
 }
 
-async fn icon(State(shell): S, Path(id): Path<String>) -> Response {
-    let icon = shell.state.app(&id).and_then(|a| a.icon.clone());
-    match icon {
-        Some(svg) => ([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+/// The page for someone who may look, not change: every form that changes
+/// something is inert. The light or dark switch and the token are theirs.
+fn look_only(body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 256);
+    let mut rest = body;
+    while let Some(at) = rest.find("<form ") {
+        let (before, form) = rest.split_at(at);
+        let tag = &form[..form.find('>').map_or(form.len(), |end| end + 1)];
+        let action = tag.split_once(r#"action=""#).and_then(|(_, a)| a.split('"').next()).unwrap_or("");
+        let changes = tag.contains(r#"method="post""#) && action.starts_with("/admin/") && !["/admin/scheme", "/admin/token"].contains(&action);
+        out.push_str(before);
+        out.push_str(if changes { "<form inert " } else { "<form " });
+        rest = &form["<form ".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+async fn icon(ask: Ask) -> Reply {
+    match ask.shell.state.app(&ask.id()).and_then(|a| a.icon.clone()) {
+        Some(svg) => Reply::file("image/svg+xml", svg),
+        None => plain(404, "No such icon."),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{StatusCode, header};
 
     fn from(referer: &str) -> String {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::REFERER, referer.parse().unwrap());
-        back(&headers)
+        back(Some(referer))
     }
 
     /// Every module admin.js imports, directly or not, is served as
@@ -421,11 +490,11 @@ mod tests {
                 let file = line.rsplit_once("\"./").and_then(|(_, f)| f.strip_suffix("\";")).unwrap_or_else(|| panic!("{name}: {line}"));
                 assert!(MODULES.iter().any(|(n, _)| *n == file), "{name} imports {file}, which isn't served");
             }
-            let r = asset(Path(name.to_string())).await;
-            assert_eq!(r.status(), StatusCode::OK);
-            assert_eq!(r.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
+            let r = script(name);
+            assert_eq!(r.status, 200);
+            assert_eq!(r.file.unwrap().0, "text/javascript; charset=utf-8");
         }
-        assert_eq!(asset(Path("../admin.js".to_string())).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(script("../admin.js").status, 404);
     }
 
     /// The page around the console has what the script swaps and names:
@@ -476,7 +545,7 @@ mod tests {
         assert_eq!(from("https://ops.example.com//evil.example/admin"), "/admin");
         assert_eq!(from("https://evil.example"), "/admin");
         assert_eq!(from("https://ops.example.com/admin/../x"), "/admin");
-        assert_eq!(back(&HeaderMap::new()), "/admin");
+        assert_eq!(back(None), "/admin");
     }
 
     #[test]

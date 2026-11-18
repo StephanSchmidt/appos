@@ -3,10 +3,7 @@
 //! Turn off, Turn on and Make live act at once; the console's toast says
 //! what happened and offers Undo.
 
-use axum::extract::{Path, RawQuery, State};
-use axum::response::Response;
-
-use crate::kit::{Kits, Offer};
+use crate::kit::{Kits, Offer, Reply};
 use crate::log_filter::{PLATFORM, Pick};
 use crate::manifest::Band;
 use crate::platform::{Kind, Request, Version, VersionStatus, now_ms};
@@ -20,16 +17,17 @@ use super::log::{from_event, of_app, of_app_kinds};
 use super::model::{App, Tone, VERSIONS, by, kind_label, risk_changes, risk_of, stats};
 use super::overview::{Selected, dashboard};
 use super::style::{POWER_PATH, badge, grant_chip, icon_html, owner_html, path_icon, tone_icon};
-use super::{PlatformUrl, S, Viewer, read};
-use crate::web::pairs;
+use super::{Ask, read};
 
 /// Versions shown before "All versions".
 const SHOWN: usize = 10;
 
 /// The same page, with this app in detail. `?versions=all` shows every
 /// version; the rest is the console's view and its toast.
-pub(super) async fn app_page(State(shell): S, viewer: Viewer, PlatformUrl(url): PlatformUrl, Path(id): Path<String>, RawQuery(query): RawQuery) -> Response {
-    let query = pairs(query.as_deref());
+pub(super) async fn app_page(ask: Ask) -> Reply {
+    let (url, id) = (ask.platform_url(), ask.id());
+    let Ask { shell, viewer, req } = ask;
+    let query = req.query;
     let all_versions = query.iter().any(|(k, v)| k == "versions" && v == "all");
     read(shell, move |shell| dashboard(shell, &viewer, &url, Some(Selected { id: &id, all_versions }), &query)).await
 }

@@ -453,7 +453,7 @@ pub(crate) mod tests {
     // ---- the admin screen ---------------------------------------------------
 
     /// Platform admins, and anyone may read the test app.
-    const ADMINS: &str = "p, group:platform, *, admin\np, anyone, test, kv-read\n";
+    const ADMINS: &str = "p, group:platform, *, admin-*\np, anyone, test, kv-read\n";
 
     /// The site and the admin on one listener, as without --platform-addr.
     fn both(shell: &Arc<Shell>) -> Router {
@@ -513,7 +513,7 @@ pub(crate) mod tests {
         assert_eq!((e.kind, e.actor, e.person.as_deref()), (crate::platform::Kind::TurnedOff, crate::platform::Actor::Cli, Some("ann@acme.com")));
 
         // Out of the policy, her token stops at once.
-        std::fs::write(dir.path().join("policy.csv"), "p, group:ops, *, admin\n").unwrap();
+        std::fs::write(dir.path().join("policy.csv"), "p, group:ops, *, admin-*\n").unwrap();
         crate::access::check(&shell).await;
         let (status, _, body) = send(&app, api("GET", "/_platform/log", &token)).await;
         assert!(status == StatusCode::FORBIDDEN && body.contains("ann@acme.com may not use the platform API"), "{body}");
@@ -553,7 +553,7 @@ pub(crate) mod tests {
         let bob = sign_in(&app, "email=bob%40acme.com&groups=sales").await;
         let (status, _, body) = send(&app, get("/admin", &bob)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(body.contains("policy.csv says who they are"), "{body}");
+        assert!(body.contains("This needs admin-read, and policy.csv doesn&#39;t give it to you."), "{body}");
         assert_eq!(send(&app, get("/admin/stream", &bob)).await.0, StatusCode::FORBIDDEN);
         assert_eq!(send(&app, post("/admin/apps/test/off", &bob, "")).await.0, StatusCode::FORBIDDEN);
         assert!(!shell.state.is_off("test"));
@@ -567,12 +567,41 @@ pub(crate) mod tests {
         assert_eq!(send(&app, get("/_platform/log", &ann)).await.0, StatusCode::UNAUTHORIZED);
     }
 
+    /// admin-read without admin-write: the screen, its controls inert, and
+    /// a change refused; the API reads and doesn't change.
+    #[tokio::test]
+    async fn admin_read_looks_and_changes_nothing() {
+        let csv = "p, group:support, *, admin-read\np, anyone, test, kv-read\n";
+        let (_dir, shell) = crate::testing::shell_with_policy("provider = \"dev\"", csv).await;
+        let app = both(&shell);
+        let sue = sign_in(&app, "email=sue%40acme.com&groups=support").await;
+        for path in ["/admin", "/admin/apps/test", "/admin/log", "/admin/messages", "/admin/policy", "/admin/token"] {
+            let (status, _, body) = send(&app, get(path, &sue)).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert!(body.contains(r#"<span class="looks""#), "{path}");
+        }
+        let (_, _, body) = send(&app, get("/admin/apps/test", &sue)).await;
+        assert!(body.contains(r#"<form inert class="c-apwr" method="post""#), "{body}");
+        assert!(body.contains(r#"<form class="scheme" method="post" action="/admin/scheme""#), "the switch is hers: {body}");
+        assert!(!body.contains(r#"<form class="c-apwr""#), "{body}");
+        let (status, _, body) = send(&app, post("/admin/apps/test/off", &sue, "")).await;
+        assert!(status == StatusCode::FORBIDDEN && body.contains("This needs admin-write"), "{body}");
+        assert!(!shell.state.is_off("test"));
+        // The scheme and a token are hers.
+        assert_eq!(send(&app, post("/admin/scheme", &sue, "scheme=dark")).await.0, StatusCode::SEE_OTHER);
+        let token = make_token(&app, &sue).await;
+        assert_eq!(send(&app, api("GET", "/_platform/log", &token)).await.0, StatusCode::OK);
+        let (status, _, body) = send(&app, api("POST", "/_platform/apps/test/off", &token)).await;
+        assert!(status == StatusCode::FORBIDDEN && body.contains("it needs admin-write"), "{body}");
+        assert!(!shell.state.is_off("test"));
+    }
+
     #[tokio::test]
     async fn without_sign_in_only_a_policy_naming_anyone_lets_in() {
         let (_dir, shell) = crate::testing::shell_with_policy("", ADMINS).await;
         let (status, _, _) = send(&both(&shell), get("/admin", "")).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "no one to sign in as");
-        let (_dir, shell) = crate::testing::shell_with_policy("", "p, anyone, *, admin\n").await;
+        let (_dir, shell) = crate::testing::shell_with_policy("", "p, anyone, *, admin-*\n").await;
         assert_eq!(send(&both(&shell), get("/admin", "")).await.0, StatusCode::OK);
     }
 
@@ -604,7 +633,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn the_policy_page_reads_the_rules_and_says_when_a_change_is_refused() {
-        let csv = "p, group:platform, *, admin\np, anyone, test, kv-*\np, signed-in, apps:Tests, kv-write\np, anyone, tset, kv-read\np, anyone, *, score-read\ng, ann@acme.com, group:platform\n";
+        let csv = "p, group:platform, *, admin-*\np, anyone, test, kv-*\np, signed-in, apps:Tests, kv-write\np, anyone, tset, kv-read\np, anyone, *, score-read\ng, ann@acme.com, group:platform\n";
         let (dir, shell) = crate::testing::shell_with_policy("provider = \"dev\"", csv).await;
         let app = both(&shell);
         // Ann is an admin by the file's g line alone.
@@ -616,7 +645,8 @@ pub(crate) mod tests {
             "Everyone signed in",
             "Group, with ann@acme.com",
             "In platform",
-            "Use the admin screen",
+            "the admin screen and the platform API",
+            ">admin-write<",
             ">kv-read<",
             "(kv-*)",
             r#"href="/admin/apps/test">Test</a>"#,
@@ -629,14 +659,14 @@ pub(crate) mod tests {
         }
         assert!(!body.contains("not taken"));
         // A mistake: the rules stay, and the page and the console say so.
-        std::fs::write(dir.path().join("policy.csv"), "p, group:platform, *, admin\np, nobody, test, kv-read\n").unwrap();
+        std::fs::write(dir.path().join("policy.csv"), "p, group:platform, *, admin-*\np, nobody, test, kv-read\n").unwrap();
         crate::access::check(&shell).await;
         let (_, _, body) = send(&app, get("/admin/policy", &ann)).await;
-        assert!(body.contains("policy.csv not taken") && body.contains("nobody") && body.contains("Use the admin screen"), "{body}");
+        assert!(body.contains("policy.csv not taken") && body.contains("nobody") && body.contains("the admin screen and the platform API"), "{body}");
         let (_, _, body) = send(&app, get("/admin", &ann)).await;
         assert!(body.contains(r#"href="/admin/policy""#) && body.contains("Policy refused"), "{body}");
         // Fixed: the problem goes.
-        std::fs::write(dir.path().join("policy.csv"), "p, group:platform, *, admin\n").unwrap();
+        std::fs::write(dir.path().join("policy.csv"), "p, group:platform, *, admin-*\n").unwrap();
         crate::access::check(&shell).await;
         let (_, _, body) = send(&app, get("/admin", &ann)).await;
         assert!(!body.contains("Policy refused"), "{body}");

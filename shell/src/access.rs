@@ -9,14 +9,17 @@
 //! p, anyone, webinars, kv-*
 //! p, group:sales, discounts, kv-*
 //! p, group:marketing, apps:Marketing, kv-read
-//! p, group:platform, *, admin
+//! p, group:platform, *, admin-*
+//! p, group:support, *, admin-read
 //! g, bob@acme.com, group:platform
 //! ```
 //!
 //! `p, who, where, what`. Who: an email, `group:<name>` (from the identity
 //! provider, or given with `g`), `signed-in` or `anyone`. Where: an app id,
-//! `apps:<group>` (the group in app.toml) or `*`. What: a grant, a pattern
-//! like `kv-*`, or `admin` (the admin screen, with `*` as where).
+//! `apps:<group>` (the group in app.toml) or `*`. What: a grant, or a
+//! pattern like `kv-*`. AdminKit's grants are the admin screen and the
+//! platform API: admin-read to look, admin-write to change, with `*` as
+//! where.
 //! `g, who, group:<name>` puts someone in a group. What no line allows is
 //! denied; with `--no-auth` there is no policy and everything is allowed.
 //!
@@ -56,8 +59,8 @@ e = some(where (p.eft == allow))
 m = g(r.sub, p.sub) && (p.app == "*" || p.app == r.app || p.app == r.group) && keyMatch(r.act, p.act)
 "#;
 
-/// The admin screen, and everything on it.
-pub const ADMIN: &str = "admin";
+/// AdminKit's grants start so: the admin screen's.
+pub const ADMIN_PREFIX: &str = "admin-";
 /// How often the file is checked for changes.
 const POLL: Duration = Duration::from_secs(2);
 /// Requests worked out and kept, per policy. A cache this full starts over.
@@ -204,7 +207,8 @@ impl Policy {
         subjects.iter().filter_map(|s| s.strip_prefix("group:")).map(str::to_string).collect()
     }
 
-    /// Whether someone may do a platform act (`admin`).
+    /// Whether someone may use a grant of the platform's, one that `*`
+    /// gives: admin-read, admin-write.
     pub fn may(&self, who: &Who, act: &str) -> bool {
         who.subjects().iter().any(|s| self.allows(s, "", "", act))
     }
@@ -218,10 +222,11 @@ impl Policy {
     }
 }
 
-/// `p, who, app, what`. `what` is a grant, a pattern or admin; a grant no
-/// kit offers now is fine unless it looks like a misspelt one of
-/// `grants`, the platform's own (manifest.rs `misspelt`). A built-in
-/// policy may give `*`, admin with it.
+/// `p, who, app, what`. `what` is a grant or a pattern; a grant no kit
+/// offers now is fine unless it looks like a misspelt one of `grants`, the
+/// platform's own (manifest.rs `misspelt`). The admin- grants go with `*`
+/// as the app, and by name: a pattern like `*` gives them only in a
+/// built-in policy.
 fn rule(who: &str, app: &str, what: &str, grants: &[String], built_in: bool) -> Result<Vec<String>, String> {
     let who = subject(who)?;
     match app {
@@ -233,16 +238,19 @@ fn rule(who: &str, app: &str, what: &str, grants: &[String], built_in: bool) -> 
         }
         _ => validate_app_id(app).map_err(|e| format!("{app:?} is no app: {e}; give an app id, apps:<group> or *"))?,
     }
-    if what == ADMIN {
+    let admin: Vec<&str> = grants_of(what, grants).into_iter().filter(|g| g.starts_with(ADMIN_PREFIX)).collect();
+    if what.starts_with(ADMIN_PREFIX) {
         if app != "*" {
-            return Err("admin is the whole admin screen: give * as the app".into());
+            return Err(format!("{what} is the admin screen's, for the whole platform: give * as the app"));
         }
-    } else if key_match(ADMIN, what) && !built_in {
-        return Err(format!("{what:?} would also give admin: name the grants (kv-*), and admin on a line of its own"));
-    } else if grants_of(what, grants).is_empty()
+    } else if !admin.is_empty() && !built_in {
+        let given = admin.join(" and ");
+        return Err(format!("{what:?} would also give {given}: name the grants (kv-*), and admin-* on a line of its own"));
+    }
+    if grants_of(what, grants).is_empty()
         && let Some(why) = crate::manifest::misspelt(what, grants).filter(|_| !built_in)
     {
-        return Err(format!("{why}; or admin"));
+        return Err(why);
     }
     Ok(vec![who, app.to_string(), what.to_string()])
 }
@@ -485,24 +493,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_is_its_own_act() {
-        let p = Policy::parse("p, group:platform, *, admin\np, group:ops, *, kv-*\ng, bob@acme.com, group:platform\n", &kv()).await.unwrap();
-        assert!(p.may(&person("bob@acme.com", &[]), ADMIN));
-        assert!(p.may(&person("x@acme.com", &["platform"]), ADMIN));
-        assert!(!p.may(&person("o@acme.com", &["ops"]), ADMIN), "all grants is not admin");
-        assert!(!p.may(&Who::default(), ADMIN));
-        assert_eq!(may(&p, &person("bob@acme.com", &[]), "webinars", "Marketing"), (false, false), "admin is no grant");
+    async fn the_admin_grants_go_by_name_for_the_platform() {
+        use crate::kit::{ADMIN_READ, ADMIN_WRITE};
+        let csv = "p, group:platform, *, admin-*\np, group:support, *, admin-read\np, group:ops, *, kv-*\ng, bob@acme.com, group:platform\n";
+        let p = Policy::parse(csv, &kv()).await.unwrap();
+        let (bob, support, ops) = (person("bob@acme.com", &[]), person("s@acme.com", &["support"]), person("o@acme.com", &["ops"]));
+        assert!(p.may(&bob, ADMIN_READ) && p.may(&bob, ADMIN_WRITE));
+        assert!(p.may(&support, ADMIN_READ) && !p.may(&support, ADMIN_WRITE), "looks, doesn't change");
+        assert!(!p.may(&ops, ADMIN_READ), "every kv grant is no admin grant");
+        assert!(!p.may(&Who::default(), ADMIN_READ));
+        assert_eq!(may(&p, &bob, "webinars", "Marketing"), (false, false), "admin-* gives no app's grant");
     }
 
     #[tokio::test]
     async fn mistakes_refuse_the_file_with_the_line() {
         let err = |text: &'static str| async move { Policy::parse(text, &kv()).await.err().map(|e| e.to_string()).unwrap_or_default() };
         assert!(err("p, anyone, webinars, kv-read\np, anyone, webinars, kv-fly").await.contains("line 2"));
-        assert!(err("p, anyone, webinars, kv-fly").await.contains("\"kv-fly\" is no grant; the kv- grants are kv-read, kv-write; or admin"));
+        assert!(err("p, anyone, webinars, kv-fly").await.contains("\"kv-fly\" is no grant; the kv- grants are kv-read, kv-write"));
         assert!(err("p, anyone, webinars, Kv_Read").await.contains("is no grant: lowercase letters, digits and dashes"));
         assert!(err("p, anyone, webinars, score-read\np, anyone, *, crm-*").await.is_empty(), "a Wasm kit's grants may come later");
-        assert!(err("p, anyone, webinars, *").await.contains("would also give admin"));
-        assert!(err("p, anyone, webinars, admin").await.contains("give * as the app"));
+        assert!(err("p, anyone, webinars, *").await.contains("would also give admin-read and admin-write"));
+        assert!(err("p, anyone, *, a*").await.contains("admin-* on a line of its own"));
+        assert!(err("p, anyone, webinars, admin-read").await.contains("give * as the app"));
+        assert!(err("p, anyone, *, admin").await.contains("the admin- grants are admin-read, admin-write"));
+        assert!(err("p, anyone, *, admin-rad").await.contains("the admin- grants are admin-read, admin-write"));
         assert!(err("p, bob, webinars, kv-read").await.contains("is no one"));
         assert!(err("p, anyone, Web Inars, kv-read").await.contains("is no app"));
         assert!(err("p, anyone, apps:, kv-read").await.contains("needs the group"));

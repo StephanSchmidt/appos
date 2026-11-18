@@ -157,8 +157,9 @@ An automatic rollback or a limit hit lists the failed requests behind it
 with their errors, so a builder or their agent can see why the app failed.
 Scripts get the same as JSON from `/_platform/log?app=<app-id>`.
 
-The admin screen and the platform API are for those the policy makes
-admins (see Who may do what); the API takes a token (see Platforms).
+The admin screen and the platform API are for those the policy gives
+admin-read, to look, and admin-write, to change (see Who may do what); the
+API takes a token (see Platforms).
 The shell answers only under its own names: the host of `--origin`, of the
 platform listener, localhost and IP addresses, so a web page can't reach
 a shell on your machine under a name of its own (DNS rebinding). Behind a
@@ -304,16 +305,19 @@ p, signed-in, webinars, kv-write
 p, group:sales, discounts, kv-*
 p, group:marketing, apps:Marketing, kv-read
 p, alice@acme.com, pricing, kv-read
-# the admin screen
-p, group:platform, *, admin
+# the admin screen and the platform API: admin-read looks, admin-write changes
+p, group:platform, *, admin-*
+p, group:support, *, admin-read
 # g, who, group: puts someone in a group
 g, bob@acme.com, group:platform
 ```
 
 Who: an email, `group:<name>` (from the sign-in, or given with `g`),
 `signed-in` or `anyone`. Where: an app id, `apps:<group>` (the group in
-app.toml) or `*`. What: a grant, a pattern like `kv-*`, or `admin`. What no
-line allows is denied. The rules
+app.toml) or `*`. What: a grant or a pattern like `kv-*`. The admin
+screen's grants, admin-read and admin-write, go with `*` and by name: a
+pattern like `*` that would also give them is refused. What no line
+allows is denied. The rules
 are [casbin](https://casbin.org)'s, with a model built into the shell.
 
 A host call the policy denies ends the request and drops its writes. A
@@ -325,8 +329,12 @@ The shell checks the file every 2 s and reads it again when it changes; the
 admin log shows each change. A file with a mistake is refused, with the
 line, and the policy stays as it was; at startup it stops the shell.
 
-The admin screen is for those with `admin`; anyone else is sent to sign in
-or gets "Not allowed". It shows who is signed in, logs each change with
+The admin screen is AdminKit's pages, a kit built into the shell: those
+with admin-read look, those with admin-write also change (with admin-read
+alone the controls show and don't act, and the header says "Look only");
+anyone else is sent to sign in or gets "Not allowed". The platform API
+asks the same of a token: admin-read for a GET, admin-write for a deploy
+or another change. It shows who is signed in, logs each change with
 their email ("Admin screen, ann@acme.com"), and lists the policy under
 Policy, as sentences by who, with a file that was refused and why. With
 `--platform-addr`, sign-in for the admin screen runs on that address: an

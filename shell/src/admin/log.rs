@@ -3,22 +3,19 @@
 //! and for a limit hit to the requests behind it. Filters are a GET form,
 //! so a narrowed log is a link.
 
-use axum::extract::{RawQuery, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
 use chrono::NaiveDate;
 
+use crate::kit::Reply;
 use crate::log_filter::{Filters, PLATFORM, Pick};
 use crate::platform::{Actor, Event, Kind, Severity, now_ms};
 use crate::shell::Shell;
 use crate::usage::{self, KEEP};
 use crate::web::escape;
-use crate::web::pairs;
 
 use super::format::{FULL, capitalize, duration, first_line, local, plural, span, thousands};
 use super::model::{App, Tone, by, icon, kind_label, load, message, state, word};
 use super::style::{badge, icon_html, path_icon, risk_chip};
-use super::{S, Viewer, page, read};
+use super::{Ask, Viewer, page, plain, read};
 
 /// Events on a page; older ones are a link away.
 const PAGE: u32 = 100;
@@ -27,15 +24,16 @@ const BEHIND: u32 = 20;
 
 /// `GET /admin/log`: `?q=&app=&kind=&severity=&by=&from=&to=` narrow it,
 /// `before=<id>` pages back.
-pub(super) async fn log_page(State(shell): S, viewer: Viewer, RawQuery(query): RawQuery) -> Response {
-    let (filters, before) = match Filters::parse(&pairs(query.as_deref())) {
+pub(super) async fn log_page(ask: Ask) -> Reply {
+    let (filters, before) = match Filters::parse(&ask.req.query) {
         Ok(parsed) => parsed,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => return plain(400, e),
     };
+    let Ask { shell, viewer, .. } = ask;
     read(shell, move |shell| log_html(shell, &viewer, &filters, before)).await
 }
 
-fn log_html(shell: &Shell, viewer: &Viewer, filters: &Filters, before: Option<i64>) -> Response {
+fn log_html(shell: &Shell, viewer: &Viewer, filters: &Filters, before: Option<i64>) -> Reply {
     let now = now_ms();
     let (apps, _) = load(shell, now);
     let mut events = shell.platform.log(&filters.query(before), PAGE + 1).unwrap_or_default();
@@ -64,7 +62,7 @@ fn log_html(shell: &Shell, viewer: &Viewer, filters: &Filters, before: Option<i6
     let body = format!(
         r#"<section class="card logcard" aria-labelledby="log-h"><div class="cardhead"><h2 id="log-h">Log <small>· every deploy, refusal, rollback, limit hit and switch, newest first, kept for good</small></h2></div>{form}{list}{pages}</section>"#
     );
-    Html(page(shell, viewer, state(&apps), "/admin/log", &format!("Log · {} admin", shell.name), &body, None)).into_response()
+    Reply::document(page(shell, viewer, state(&apps), "/admin/log", &format!("Log · {} admin", shell.name), &body, None))
 }
 
 /// The log of one app.
@@ -352,8 +350,10 @@ mod tests {
     /// Links keep the filters and drop what is empty.
     #[test]
     fn links_into_the_log() {
-        let (f, before) =
-            Filters::parse(&pairs(Some("q=+consent+&app=_platform&kind=failures&severity=medium&by=admin&from=2026-11-01&to=2026-11-13&before=42"))).unwrap();
+        let (f, before) = Filters::parse(&crate::web::pairs(Some(
+            "q=+consent+&app=_platform&kind=failures&severity=medium&by=admin&from=2026-11-01&to=2026-11-13&before=42",
+        )))
+        .unwrap();
         assert_eq!(href(&f, before), "/admin/log?q=consent&app=_platform&kind=failures&severity=medium&by=admin&from=2026-11-01&to=2026-11-13&before=42");
         assert_eq!(href(&Filters::default(), None), "/admin/log");
         assert_eq!(from_event(93, Some("leads")), "/admin/log?app=leads&before=94#event-93");

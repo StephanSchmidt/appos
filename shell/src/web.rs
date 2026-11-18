@@ -9,9 +9,10 @@
 //!
 //! A host call the policy denies ends the request (access.rs, `denied`);
 //! with `--no-auth` there is no policy and every route is public. The admin
-//! screen is for those the policy makes admins (`admin_only`), and so is the
-//! platform API, with a token from `appos login` (`api_only`). Both answer
-//! only under their own names (`own_host`).
+//! screen is AdminKit's pages (`platform_page`): admin-read to look,
+//! admin-write to change, from the policy; so is the platform API, with a
+//! token from `appos login` (`api_only`). Both answer only under their own
+//! names (`own_host`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,13 +23,13 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, RawQuery, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use serde::Serialize;
 
 use crate::api;
 use crate::auth::Who;
 use crate::deploy::Ask;
-use crate::kit::{About, Context, Grant, KitRequest, KitRoute};
+use crate::kit::{ADMIN_READ, ADMIN_WRITE, About, Context, Grant, KitRequest, KitRoute};
 use crate::log_filter;
 use crate::platform::{Actor, Kind, Outcome, Usage, now_ms};
 use crate::runtime::{self, LoadedApp, QUEUE_WAIT};
@@ -317,13 +318,17 @@ pub fn platform_router(shell: Arc<Shell>, own: Option<&str>) -> Router {
         .route("/_platform/apps/{id}/off", post(turn_off))
         .route("/_platform/apps/{id}/on", post(turn_on))
         .route_layer(axum::middleware::from_fn_with_state(shell.clone(), api_only));
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/_platform/spec", get(spec))
         .route("/_platform/fakes", get(fakes))
         .route("/_platform/install", get(install))
         .route("/_platform/logout", post(logout))
         .merge(api)
-        .merge(crate::admin::router().route_layer(axum::middleware::from_fn_with_state(shell.clone(), admin_only)));
+        .route("/admin/stream", get(crate::admin::stream).route_layer(axum::middleware::from_fn_with_state(shell.clone(), admin_reads)));
+    // The kits' pages for the people who run the platform: AdminKit's.
+    for name in shell.kits.fixed().platform_names() {
+        router = router.route(&format!("/{name}"), any(platform_page)).route(&format!("/{name}/{{*rest}}"), any(platform_page));
+    }
     let router = match own {
         // Its home is the admin screen, where signing out lands too.
         Some(origin) => router.route("/", get(|| async { go("/admin", false) })).merge(crate::auth::router(origin)),
@@ -361,9 +366,11 @@ async fn api_only(State(shell): S, mut req: Request, next: axum::middleware::Nex
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("could not check the token: {e:#}")),
     };
     let who = Who::signed_in(identity);
-    if !policies.current().may(&who, crate::access::ADMIN) {
+    // Looking needs admin-read; a deploy or another change, admin-write.
+    let grant = if matches!(*req.method(), Method::GET | Method::HEAD) { ADMIN_READ } else { ADMIN_WRITE };
+    if !policies.current().may(&who, grant) {
         let email = who.person().unwrap_or_default();
-        return refuse(StatusCode::FORBIDDEN, format!("{email} may not use the platform API: the policy gives it to admins"));
+        return refuse(StatusCode::FORBIDDEN, format!("{email} may not use the platform API for this: it needs {grant}, which policy.csv doesn't give them"));
     }
     req.extensions_mut().insert(who);
     next.run(req).await
@@ -389,25 +396,21 @@ async fn logout(State(shell): S, headers: HeaderMap) -> Response {
     }
 }
 
-/// The admin screen (pages, changes, the stream, its assets) is for those
-/// policy.csv gives `admin`; without a policy, for whoever reaches the
-/// platform listener. The platform API under `/_platform` has its own
-/// gate, with a token instead of a cookie (`api_only`).
-async fn admin_only(State(shell): S, who: Who, req: Request, next: axum::middleware::Next) -> Response {
+/// The admin screen's stream, which isn't one of AdminKit's pages (a
+/// page answers, it doesn't stream): for those policy.csv gives
+/// admin-read, as its pages are. The platform API under `/_platform` has
+/// its own gate, with a token instead of a cookie (`api_only`).
+async fn admin_reads(State(shell): S, who: Who, req: Request, next: axum::middleware::Next) -> Response {
     let Some(policies) = &shell.policy else { return next.run(req).await };
-    if policies.current().may(&who, crate::access::ADMIN) {
+    if policies.current().may(&who, ADMIN_READ) {
         return next.run(req).await;
     }
-    let htmx = req.headers().contains_key("hx-request");
-    if shell.auth.is_some() && who.identity().is_none() {
-        let back = match *req.method() {
-            Method::GET | Method::HEAD => req.uri().path_and_query().map_or("/admin", |p| p.as_str()),
-            _ => "/admin",
-        };
+    if who.identity().is_none() && shell.auth.is_some() {
+        let back = req.uri().path_and_query().map_or("/admin", |p| p.as_str());
         let to: String = form_urlencoded::byte_serialize(back.as_bytes()).collect();
-        return go(&format!("/_auth/sign-in?to={to}"), htmx);
+        return go(&format!("/_auth/sign-in?to={to}"), false);
     }
-    message(&shell, &who, StatusCode::FORBIDDEN, "Not allowed", "The admin screen is for admins, and policy.csv says who they are.")
+    StatusCode::FORBIDDEN.into_response()
 }
 
 /// Local/internal listeners are still reachable through a visitor's
@@ -709,7 +712,7 @@ async fn spec(State(shell): S) -> Response {
         name: shell.name.clone(),
         origin: shell.origin.clone(),
         framework: framework().to_string(),
-        capabilities: shell.kits.now().names(),
+        capabilities: shell.kits.now().for_apps(),
         risk: shell.risk.levels().clone(),
         apps,
         git: shell.git.clone(),
@@ -722,9 +725,14 @@ async fn spec(State(shell): S) -> Response {
 
 /// This platform's URL as the client reached it: what `appos login` takes.
 pub fn platform_url(headers: &HeaderMap) -> String {
-    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("127.0.0.1:8080");
-    let scheme = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).filter(|s| matches!(*s, "http" | "https")).unwrap_or("http");
-    format!("{scheme}://{host}")
+    let header = |name: &str| headers.get(name).and_then(|h| h.to_str().ok());
+    url_of(header("host"), header("x-forwarded-proto"))
+}
+
+/// The same from Host and X-Forwarded-Proto.
+pub(crate) fn url_of(host: Option<&str>, proto: Option<&str>) -> String {
+    let scheme = proto.filter(|s| matches!(*s, "http" | "https")).unwrap_or("http");
+    format!("{scheme}://{}", host.unwrap_or("127.0.0.1:8080"))
 }
 
 /// `curl -fsSL http://<platform>/_platform/install | sh` connects the local
@@ -780,12 +788,35 @@ async fn dispatch(State(shell): S, who: Who, req: Request) -> Response {
     response
 }
 
-/// A request to an app, read: its path below the app, query and form.
+/// A request to an app, read: its path below the app, query and form,
+/// and for a kit's page its headers.
 struct AppRequest {
     method: Method,
     path: String,
     query: Vec<(String, String)>,
     form: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+}
+
+/// The headers a kit's page gets: not Authorization, and no cookie of
+/// sign-in's.
+fn kit_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    let ours = |c: &str| [crate::auth::session::SESSION, crate::auth::session::SIGN_IN].iter().any(|n| c.trim().split('=').next() == Some(*n));
+    let mut out = vec![];
+    for (name, value) in headers {
+        let Ok(value) = value.to_str() else { continue };
+        match name.as_str() {
+            "authorization" => {}
+            "cookie" => {
+                let kept: Vec<&str> = value.split(';').filter(|c| !ours(c)).map(str::trim).collect();
+                if !kept.is_empty() {
+                    out.push((name.to_string(), kept.join("; ")));
+                }
+            }
+            _ => out.push((name.to_string(), value.to_string())),
+        }
+    }
+    out
 }
 
 async fn dispatch_app(shell: Arc<Shell>, who: Who, req: Request, htmx: bool) -> Response {
@@ -897,6 +928,7 @@ async fn read_request(shell: &Arc<Shell>, req: Request) -> Result<AppRequest, (S
     let method = if req.method() == Method::HEAD { Method::GET } else { req.method().clone() };
     let path = req.uri().path().to_string();
     let query = pairs(req.uri().query());
+    let headers = kit_headers(req.headers());
     let body = axum::body::Bytes::from_request(req, shell).await.map_err(|e| (e.status(), e.body_text()))?;
     let form = if method == Method::GET {
         vec![]
@@ -904,7 +936,7 @@ async fn read_request(shell: &Arc<Shell>, req: Request) -> Result<AppRequest, (S
         let text = std::str::from_utf8(&body).map_err(|_| (StatusCode::BAD_REQUEST, "form body is not UTF-8".to_string()))?;
         pairs(Some(text))
     };
-    Ok(AppRequest { method, path, query, form })
+    Ok(AppRequest { method, path, query, form, headers })
 }
 
 fn turned_off(shell: &Shell, who: &Who, app: &LoadedApp) -> Response {
@@ -1037,6 +1069,10 @@ async fn kit_page(
     if !may.iter().any(|g| g == route.grant()) {
         let whom = if who.identity().is_some() { "signed in" } else { "not signed in" };
         println!("[{name}] {}: denied {} ({whom})", route.pattern(), route.grant());
+        if route.on_platform() && (who.identity().is_some() || shell.auth.is_none()) {
+            let text = format!("This needs {}, and policy.csv doesn't give it to you.", route.grant());
+            return message(shell, who, StatusCode::FORBIDDEN, "Not allowed", &text);
+        }
         return denied(shell, who, None, back, htmx);
     }
     let below = req.path.strip_prefix(&format!("/{name}")).filter(|p| !p.is_empty()).unwrap_or("/");
@@ -1047,17 +1083,23 @@ async fn kit_page(
         deadline: Instant::now() + KIT_PAGE_TIME,
         may,
         live: shell.live(),
+        own: Some(crate::kit::Own { shell: Arc::downgrade(shell), who: who.clone() }),
     });
-    let request =
-        KitRequest { method: req.method.to_string(), path: req.path.clone(), params, query: req.query, form: req.form, origin: shell.origin.clone(), htmx };
+    let request = KitRequest {
+        method: req.method.to_string(),
+        path: req.path.clone(),
+        params,
+        query: req.query,
+        form: req.form,
+        origin: shell.origin.clone(),
+        htmx,
+        headers: req.headers,
+    };
     // In a task of its own: a kit that panics fails its page, not the shell.
     let answer = tokio::spawn(route.respond(cx, request));
     let abort = answer.abort_handle();
     let failed = match tokio::time::timeout(KIT_PAGE_TIME, answer).await {
-        Ok(Ok(Ok(reply))) => {
-            let page = runtime::Page { status: reply.status, redirect: reply.redirect, head: reply.head, html: reply.html };
-            return render(shell, who, &name, &reply.title, &req.path, htmx, page);
-        }
+        Ok(Ok(Ok(reply))) => return reply_of(shell, who, &name, &req.path, htmx, reply),
         Ok(Ok(Err(e))) => format!("{e:#}"),
         Ok(Err(e)) => format!("the kit crashed: {e}"),
         Err(_) => {
@@ -1067,6 +1109,53 @@ async fn kit_page(
     };
     eprintln!("[{name}] {}: {failed}", route.pattern());
     message(shell, who, StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This page is unavailable right now. The rest of the site works.")
+}
+
+/// A kit page's reply in HTTP: a file, a document of its own, or a page
+/// in the layout (`render`); with the headers it asked for.
+fn reply_of(shell: &Shell, who: &Who, name: &str, path: &str, htmx: bool, reply: crate::kit::Reply) -> Response {
+    let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut resp = match (reply.file, reply.document, reply.redirect) {
+        (Some((kind, body)), ..) => match HeaderValue::try_from(kind) {
+            Ok(kind) => (status, [(header::CONTENT_TYPE, kind)], body).into_response(),
+            Err(_) => return message(shell, who, StatusCode::INTERNAL_SERVER_ERROR, "Kit error", "The kit sent a file of no type."),
+        },
+        (None, true, None) => (status, Html(reply.html.into_iter().map(|(_, h)| h).collect::<String>())).into_response(),
+        (None, _, redirect) => {
+            let page = runtime::Page { status: reply.status, redirect, head: reply.head, html: reply.html };
+            render(shell, who, name, &reply.title, path, htmx, page)
+        }
+    };
+    for (k, v) in reply.headers {
+        match (HeaderName::try_from(k.as_str()), HeaderValue::try_from(v)) {
+            (Ok(k), Ok(v)) => {
+                resp.headers_mut().append(k, v);
+            }
+            _ => eprintln!("[{name}] the header {k:?} is not valid"),
+        }
+    }
+    resp
+}
+
+/// A kit's page on the platform's listener (`KitRoute::platform`), like
+/// the admin screen's: as on the site, the policy first.
+async fn platform_page(State(shell): S, who: Who, req: Request) -> Response {
+    let htmx = req.headers().get("hx-request").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"true"));
+    let back = match *req.method() {
+        Method::GET | Method::HEAD => req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string(),
+        _ => req.uri().path().split('/').nth(1).map_or("/".into(), |name| format!("/{name}")),
+    };
+    let req = match read_request(&shell, req).await {
+        Ok(req) => req,
+        Err(e) => return e.into_response(),
+    };
+    let decoded: Vec<String> = req.path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+    let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    let kits = shell.kits.fixed().clone();
+    match kits.platform_page(req.method.as_str(), &segments) {
+        Some((route, params, grants)) => kit_page(&shell, &who, route, params, grants, req, htmx, &back).await,
+        None => message(&shell, &who, StatusCode::NOT_FOUND, "Not found", "No such page."),
+    }
 }
 
 fn percent_decode(s: &str) -> String {

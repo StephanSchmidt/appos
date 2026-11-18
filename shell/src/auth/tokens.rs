@@ -1,9 +1,10 @@
 //! Tokens for the platform API: what `appos login` keeps and the CLI sends
-//! as `Authorization: Bearer`. A signed-in admin makes one on the admin
+//! as `Authorization: Bearer`. Someone signed in makes one on the admin
 //! screen (/admin/token) and pastes it into the CLI.
 //!
-//! A token acts as the person who made it: every call needs the policy's
-//! `admin` for them, as the policy is now, so taking someone out of the
+//! A token acts as the person who made it: every call needs admin-read
+//! from the policy for them (a change admin-write), as the policy is now,
+//! so taking someone out of the
 //! policy stops their tokens at once. Their groups are those of the sign-in
 //! that made it. Only a hash is kept; a token lasts 30 days, and `appos
 //! logout` ends it sooner.

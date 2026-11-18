@@ -26,8 +26,11 @@
 //! swapped as a whole.
 //!
 //! Kits have pages too, like apps (`Kit::routes`): below names of their
-//! own, in the shell's layout. Each names the grant the person needs, and
-//! AppOS checks the policy before the page's code runs.
+//! own, in the shell's layout or in a look of their own. Each names the
+//! grant the person needs, and AppOS checks the policy before the page's
+//! code runs. A page for the people running the platform is on the
+//! platform's listener instead (`KitRoute::platform`): the admin screen is
+//! AdminKit's pages (admin/mod.rs).
 //!
 //! Every function, page and `run` gets a `Context`, like Go's
 //! context.Context: the app, the signed-in user, the page and the
@@ -49,7 +52,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
@@ -79,6 +82,10 @@ pub type Run<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>
 pub const KV_READ: &str = "kv-read";
 pub const KV_WRITE: &str = "kv-write";
 pub const USER_READ: &str = "user-read";
+/// AdminKit's: the admin screen to look at, and to change apps and the
+/// platform with (and the platform API's reads and changes).
+pub const ADMIN_READ: &str = "admin-read";
+pub const ADMIN_WRITE: &str = "admin-write";
 
 /// What AppOS tells a kit about a call, like Go's context.Context. AppOS
 /// builds it, never the caller. Cheap to clone.
@@ -95,6 +102,16 @@ pub(crate) struct About {
     /// for a command, at the commit).
     pub may: Vec<String>,
     pub live: Live,
+    /// For a page: what the pages of the shell's own kits read.
+    pub own: Option<Own>,
+}
+
+/// The shell, and who asked as the sign-in says (not as the policy adds
+/// to it): for the pages of the shell's own kits, AdminKit's.
+#[derive(Debug, Clone)]
+pub(crate) struct Own {
+    pub shell: Weak<crate::shell::Shell>,
+    pub who: crate::auth::Who,
 }
 
 impl Context {
@@ -147,13 +164,27 @@ impl Context {
         self.0.live.serves(app)
     }
 
+    /// The shell and who asked, for the pages of its own kits (AdminKit).
+    pub(crate) fn own(&self) -> Option<(Arc<crate::shell::Shell>, &crate::auth::Who)> {
+        let own = self.0.own.as_ref()?;
+        Some((own.shell.upgrade()?, &own.who))
+    }
+
     /// The context a Wasm kit called with this one gets: the same user,
     /// page and deadline, with `name` as the caller and the grants of
     /// `held` the policy lets this user use there.
     pub(crate) fn to_kit(&self, name: &str, held: &[String]) -> (Context, Access) {
         let access = self.0.live.access(self.user(), name, held);
         let may = held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect();
-        let about = About { app: name.into(), user: self.0.user.clone(), page: self.0.page.clone(), deadline: self.0.deadline, may, live: self.0.live.clone() };
+        let about = About {
+            app: name.into(),
+            user: self.0.user.clone(),
+            page: self.0.page.clone(),
+            deadline: self.0.deadline,
+            may,
+            live: self.0.live.clone(),
+            own: None,
+        };
         (Context::new(about), access)
     }
 }
@@ -290,11 +321,13 @@ pub struct KitRoute {
     segments: Vec<String>,
     grant: String,
     handler: Handler,
+    platform: bool,
 }
 
 impl KitRoute {
     /// GET `path`, like "/booking/:draft", where ":draft" takes any one
-    /// segment. The person needs `grant`, one of the kit's.
+    /// segment; a last "*rest" takes the rest, one segment or more. The
+    /// person needs `grant`, one of the kit's.
     pub fn get(path: &str, grant: &str, f: impl Fn(Context, KitRequest) -> Respond + Send + Sync + 'static) -> KitRoute {
         KitRoute::new("GET", path, grant, Arc::new(f))
     }
@@ -306,7 +339,19 @@ impl KitRoute {
 
     fn new(method: &str, path: &str, grant: &str, handler: Handler) -> KitRoute {
         let segments = path.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect();
-        KitRoute { method: method.into(), path: path.into(), segments, grant: grant.into(), handler }
+        KitRoute { method: method.into(), path: path.into(), segments, grant: grant.into(), handler, platform: false }
+    }
+
+    /// On the platform's listener, with the admin screen and the platform
+    /// API, not on the site: a page for the people who run the platform,
+    /// which `--platform-addr` keeps off the site's address.
+    pub fn platform(mut self) -> KitRoute {
+        self.platform = true;
+        self
+    }
+
+    pub(crate) fn on_platform(&self) -> bool {
+        self.platform
     }
 
     /// The grant the person needs.
@@ -330,16 +375,22 @@ impl KitRoute {
 
     /// Its params, if it takes this path.
     fn matches(&self, method: &str, path: &[&str]) -> Option<Params> {
-        if self.method != method || self.segments.len() != path.len() {
+        let rest = self.segments.last().and_then(|s| s.strip_prefix('*'));
+        let fixed = self.segments.len() - usize::from(rest.is_some());
+        let fits = if rest.is_some() { path.len() > fixed } else { path.len() == fixed };
+        if self.method != method || !fits {
             return None;
         }
         let mut params = Vec::new();
-        for (pattern, actual) in self.segments.iter().zip(path) {
+        for (pattern, actual) in self.segments.iter().zip(path).take(fixed) {
             match pattern.strip_prefix(':') {
                 Some(name) => params.push((name.to_string(), actual.to_string())),
                 None if pattern == actual => {}
                 None => return None,
             }
+        }
+        if let Some(name) = rest {
+            params.push((name.to_string(), path[fixed..].join("/")));
         }
         Some(params)
     }
@@ -359,6 +410,9 @@ pub struct KitRequest {
     pub origin: String,
     /// Sent by htmx: answer with what it swaps.
     pub htmx: bool,
+    /// Its headers, names in lower case, without Authorization and the
+    /// shell's own cookies.
+    pub headers: Vec<(String, String)>,
 }
 
 impl KitRequest {
@@ -376,15 +430,26 @@ impl KitRequest {
     pub fn form_value(&self, name: &str) -> Option<&str> {
         first(&self.form, name)
     }
+
+    /// A header, by its name in any case: "Referer".
+    pub fn header(&self, name: &str) -> Option<&str> {
+        first(&self.headers, &name.to_ascii_lowercase())
+    }
+
+    /// A cookie the browser sent.
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        let cookies = self.headers.iter().filter(|(n, _)| n == "cookie").flat_map(|(_, v)| v.split(';'));
+        cookies.map(str::trim).find_map(|c| c.strip_prefix(name)?.strip_prefix('='))
+    }
 }
 
 fn first<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     pairs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
 }
 
-/// What a kit's page answers: a page in the shell's layout, or where the
-/// browser goes next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a kit's page answers: a page in the shell's layout or a document
+/// of its own, a file, or where the browser goes next.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Reply {
     pub(crate) status: u16,
     pub(crate) title: String,
@@ -392,19 +457,41 @@ pub struct Reply {
     /// (name, html); "page" is the whole page.
     pub(crate) html: Vec<(String, String)>,
     pub(crate) redirect: Option<String>,
+    /// "page" is the whole document, not in the layout.
+    pub(crate) document: bool,
+    /// Not a page: its type and bytes.
+    pub(crate) file: Option<(String, Vec<u8>)>,
+    pub(crate) headers: Vec<(String, String)>,
 }
 
 impl Reply {
     /// `html` in the shell's layout, titled `title`. HTML from an Askama
     /// template, as apps make theirs: it escapes what people typed.
     pub fn page(title: &str, html: impl Into<String>) -> Reply {
-        Reply { status: 200, title: title.into(), head: vec![], html: vec![("page".into(), html.into())], redirect: None }
+        Reply { status: 200, title: title.into(), html: vec![("page".into(), html.into())], ..Reply::default() }
+    }
+
+    /// A whole HTML document, `<!doctype html>` on: a kit with a look of
+    /// its own, like the admin screen. htmx gets it whole too.
+    pub fn document(html: impl Into<String>) -> Reply {
+        Reply { document: true, ..Reply::page("", html) }
+    }
+
+    /// Not a page: a script, a picture, data, as `content_type`.
+    pub fn file(content_type: &str, body: impl Into<Vec<u8>>) -> Reply {
+        Reply { status: 200, file: Some((content_type.into(), body.into())), ..Reply::default() }
     }
 
     /// Sends the browser to `to`, a path on this site: a 303, which htmx
     /// follows too.
     pub fn redirect(to: &str) -> Reply {
-        Reply { status: 303, title: String::new(), head: vec![], html: vec![], redirect: Some(to.into()) }
+        Reply { status: 303, redirect: Some(to.into()), ..Reply::default() }
+    }
+
+    /// A header to send as well, like Cache-Control or Set-Cookie.
+    pub fn header(mut self, name: &str, value: impl Into<String>) -> Reply {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     /// Another status than 200: 422 for a form with mistakes, which htmx
@@ -454,7 +541,7 @@ impl Message {
     /// The message and its context, `time` to run.
     pub(crate) fn of(w: crate::tx::Waiting, time: Duration, live: Live) -> (Context, Message) {
         let sent: Sent = serde_json::from_str(&w.about).unwrap_or_default();
-        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may, live };
+        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may, live, own: None };
         (Context::new(about), Message { id: w.id, function: w.function, attempts: w.attempts, args: w.args })
     }
 }
@@ -576,12 +663,24 @@ fn check_routes(all: &[Registered]) -> anyhow::Result<()> {
             let pattern = route.pattern();
             let name = route.name();
             anyhow::ensure!(route.path.starts_with('/'), "page {pattern}: the path starts with /");
-            crate::manifest::validate_app_id(name).map_err(|e| anyhow::anyhow!("page {pattern}: it must start with a name: {e}"))?;
+            // The platform's listener has no apps: the shell's own kits may
+            // take the names reserved for it there, like "admin".
+            anyhow::ensure!(!route.platform || r.builtin, "page {pattern}: only the shell's own kits have pages on the platform's listener");
+            if !route.platform {
+                crate::manifest::validate_app_id(name).map_err(|e| anyhow::anyhow!("page {pattern}: it must start with a name: {e}"))?;
+            }
             anyhow::ensure!(r.grants.iter().any(|g| g.name == route.grant), "page {pattern}: {} is none of the kit's grants", route.grant);
-            anyhow::ensure!(
-                seen.insert((route.method.as_str(), route.segments.iter().map(|s| if s.starts_with(':') { ":" } else { s }).collect::<Vec<_>>())),
-                "page {pattern} twice"
-            );
+            anyhow::ensure!(route.segments.iter().rev().skip(1).all(|s| !s.starts_with('*')), "page {pattern}: *name goes last");
+            let shape = |s: &String| {
+                if s.starts_with(':') {
+                    ":".to_string()
+                } else if s.starts_with('*') {
+                    "*".to_string()
+                } else {
+                    s.clone()
+                }
+            };
+            anyhow::ensure!(seen.insert((route.method.as_str(), route.segments.iter().map(shape).collect::<Vec<_>>())), "page {pattern} twice");
             anyhow::ensure!(*names.entry(name).or_insert(n) == n, "two kits have pages at /{name}");
         }
     }
@@ -625,9 +724,11 @@ fn check_callers(all: &[Registered]) -> anyhow::Result<()> {
 }
 
 impl Kits {
-    /// The kits every platform has: the shell's own, kv and the user.
+    /// The kits every platform has: the shell's own, kv, the user and the
+    /// admin screen.
     pub fn builtin() -> Kits {
-        Kits::checked(vec![Registered::new(Arc::new(Kv), true), Registered::new(Arc::new(Users), true)]).expect("the built-in kits are valid")
+        let own: [Arc<dyn Kit>; 3] = [Arc::new(Kv), Arc::new(Users), Arc::new(crate::admin::AdminKit)];
+        Kits::checked(own.into_iter().map(|kit| Registered::new(kit, true)).collect()).expect("the built-in kits are valid")
     }
 
     /// With one kit more. Grant names, functions, interfaces and the names
@@ -688,6 +789,7 @@ impl Kits {
             for g in &r.grants {
                 crate::manifest::validate_grant_name(&g.name).map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(names.insert(g.name.as_str()), "two kits offer the grant {}", g.name);
+                anyhow::ensure!(r.builtin || !g.name.starts_with(crate::access::ADMIN_PREFIX), "grant {}: the admin- grants are the admin screen's", g.name);
                 for f in &g.functions {
                     let Some((interface, function)) = f.split_once('#') else {
                         anyhow::bail!("grant {}: {f:?} must be <package>/<interface>#<function>", g.name);
@@ -720,9 +822,9 @@ impl Kits {
         Ok(Kits(Arc::new(all)))
     }
 
-    /// The names the kits' pages are at, like "booking".
+    /// The names the kits' pages on the site are at, like "booking".
     pub fn page_names(&self) -> BTreeSet<&str> {
-        self.0.iter().flat_map(|r| &r.routes).map(KitRoute::name).collect()
+        self.0.iter().flat_map(|r| &r.routes).filter(|r| !r.platform).map(KitRoute::name).collect()
     }
 
     /// The kits' names, those of their pages and of those that call other
@@ -802,7 +904,24 @@ impl Kits {
     /// The kit's page for a request: the route, what its params took and
     /// the kit's grants. `path` is split at '/', decoded.
     pub(crate) fn page(&self, method: &str, path: &[&str]) -> Option<(&KitRoute, Params, &[Grant])> {
-        self.0.iter().find_map(|r| r.routes.iter().find_map(|route| Some((route, route.matches(method, path)?, r.grants.as_slice()))))
+        self.find_page(method, path, false)
+    }
+
+    /// The same, for the platform's listener (`KitRoute::platform`).
+    pub(crate) fn platform_page(&self, method: &str, path: &[&str]) -> Option<(&KitRoute, Params, &[Grant])> {
+        self.find_page(method, path, true)
+    }
+
+    fn find_page(&self, method: &str, path: &[&str], platform: bool) -> Option<(&KitRoute, Params, &[Grant])> {
+        self.0.iter().find_map(|r| {
+            let mut routes = r.routes.iter().filter(|route| route.platform == platform);
+            routes.find_map(|route| Some((route, route.matches(method, path)?, r.grants.as_slice())))
+        })
+    }
+
+    /// The names the platform's pages are at: "admin".
+    pub(crate) fn platform_names(&self) -> BTreeSet<&str> {
+        self.0.iter().flat_map(|r| &r.routes).filter(|r| r.platform).map(KitRoute::name).collect()
     }
 
     /// Every grant, in the order the kits offer them.
@@ -813,6 +932,12 @@ impl Kits {
     /// Every grant's name.
     pub fn names(&self) -> Vec<String> {
         self.grants().map(|g| g.name.clone()).collect()
+    }
+
+    /// The grants an app can hold: not the admin screen's, which are for
+    /// people.
+    pub fn for_apps(&self) -> Vec<String> {
+        self.grants().filter(|g| !g.name.starts_with(crate::access::ADMIN_PREFIX)).map(|g| g.name.clone()).collect()
     }
 
     pub fn grant(&self, name: &str) -> Option<&Grant> {
@@ -1382,7 +1507,7 @@ mod tests {
     fn grants_and_functions_are_each_one_kits() {
         let crm = Crm::default();
         let kits = kits(&crm);
-        assert_eq!(kits.names(), ["kv-read", "kv-write", "user-read", "leads-read", "leads-write"]);
+        assert_eq!(kits.names(), ["kv-read", "kv-write", "user-read", "admin-read", "admin-write", "leads-read", "leads-write"]);
         assert_eq!(kits.grant_for("acme:crm/leads", "count-leads").map(|g| g.name.as_str()), Some("leads-read"));
         assert!(kits.offers("acme:crm/leads") && kits.offers("appos:framework/kv") && !kits.offers("acme:crm/deals"));
         struct Wit(&'static str);
@@ -1418,7 +1543,7 @@ mod tests {
             (Grant::new("deals-read", "", &["acme:crm/leads#count-leads"], 1), "two grants allow acme:crm/leads#count-leads"),
             (Grant::new("own-kv", "", &["appos:framework/kv#get"], 1), "the shell's own"),
             (Grant::new("deals-read", "", &["acme:crm/deals@1.0.0#list"], 1), "without a version"),
-            (Grant::new("admin", "", &["acme:crm/deals#list"], 1), "admin screen"),
+            (Grant::new("admin-deals", "", &["acme:crm/deals#list"], 1), "the admin- grants are the admin screen's"),
             (Grant::new("Deals", "", &["acme:crm/deals#list"], 1), "lowercase"),
             (Grant::new("deals-read", "", &["acme:crm/leads#list-deals"], 1), "two kits offer acme:crm/leads"),
         ] {

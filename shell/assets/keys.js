@@ -15,7 +15,7 @@ const SLIDES = /^(ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDow
 
 function press(sel) {
   const el = $(sel);
-  if (!el) return false;
+  if (!el || el.closest("[inert]")) return false;
   el.classList.add("down");
   setTimeout(() => el.classList.remove("down"), 120);
   el.click();

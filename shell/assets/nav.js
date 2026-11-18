@@ -150,6 +150,8 @@ export function go(url, how, opts = {}) {
 // Sends a change; the page it comes back on swaps in. A slide in its
 // form moves at once and back if the change got no answer.
 export function send(action, body, form) {
+  // Look only: the page made it inert.
+  if (form && form.closest("[inert]")) return Promise.resolve(false);
   const key = action + "?" + body;
   if (sending.has(key)) return Promise.resolve(false);
   sending.add(key);

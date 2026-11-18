@@ -2,9 +2,6 @@
 //! one app in detail, the inventory, and what was refused, rolled back or
 //! turned off.
 
-use axum::extract::{RawQuery, State};
-use axum::response::{Html, IntoResponse, Response};
-
 use crate::deploy::{FAILURE_WINDOW, FAILURES_BEFORE_ROLLBACK};
 use crate::log_filter::Pick;
 use crate::manifest::{MAX_RISK, MAX_SECONDS, Risk, SECONDS};
@@ -22,11 +19,13 @@ use super::kpis::{Month, kpis};
 use super::log::{from_event, of_app_kinds};
 use super::model::{App, MINUTE, Tone, icon, load, name_of, sentence, state, word};
 use super::style::{grant_label, icon_html, owner_html, path_icon, risk_label, risk_legend};
-use super::{PlatformUrl, S, Viewer, missing, page, read};
+use super::{Ask, Viewer, missing, page, read};
+use crate::kit::Reply;
 
-pub(super) async fn overview(State(shell): S, viewer: Viewer, PlatformUrl(url): PlatformUrl, RawQuery(query): RawQuery) -> Response {
-    let query = crate::web::pairs(query.as_deref());
-    read(shell, move |shell| dashboard(shell, &viewer, &url, None, &query)).await
+pub(super) async fn overview(ask: Ask) -> Reply {
+    let url = ask.platform_url();
+    let Ask { shell, viewer, req } = ask;
+    read(shell, move |shell| dashboard(shell, &viewer, &url, None, &req.query)).await
 }
 
 /// The app shown in detail, and what was asked about it.
@@ -37,7 +36,7 @@ pub(super) struct Selected<'a> {
 
 /// The page, with the selected app in detail or else the console's first;
 /// `query` is the page's, the console's view and what an action said.
-pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Option<Selected>, query: &[(String, String)]) -> Response {
+pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Option<Selected>, query: &[(String, String)]) -> Reply {
     // This page's URL, which it fetches again when something changed.
     let path = match &selected {
         None => "/admin".to_string(),
@@ -78,13 +77,13 @@ pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Opt
     } else {
         // Nothing to report yet: how the first app gets here, and the rules
         // it will run under.
-        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk, &shell.kits.now().names()));
+        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk, &shell.kits.now().for_apps()));
     }
     let title = match selected.and(chosen) {
         Some(app) => format!("{} · {} admin", app.name, shell.name),
         None => format!("{} admin", shell.name),
     };
-    Html(page(shell, viewer, state, "/admin", &title, &body, Some(&here))).into_response()
+    Reply::document(page(shell, viewer, state, "/admin", &title, &body, Some(&here)))
 }
 
 /// The first visit: how the first app gets here, with this platform's URL.

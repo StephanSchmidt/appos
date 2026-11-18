@@ -7,23 +7,20 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
-
-use crate::auth::Who;
 use crate::deploy::Ask;
+use crate::kit::Reply;
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::runtime::{AdminLimits, Budget};
 use crate::shell::Shell;
 use crate::terminal_logln as println;
 
+use super::admin_path;
 use super::format::{capitalize, fuel, plural};
 use super::model::{ProblemKind, seen_message};
 use super::undo::{Reverse, reverse};
-use super::{S, admin_path};
 
-type Form = axum::Form<BTreeMap<String, String>>;
+/// What a change gets.
+type Change = super::Ask;
 
 /// What a change did: the toast's message and the event Undo reverses; or
 /// why it didn't happen.
@@ -31,7 +28,7 @@ pub(super) type Done = Result<(String, Option<i64>), String>;
 
 /// Back after a change: to the admin page the form names in `then`, else
 /// `fallback`, at the console with the toast.
-pub(super) fn back(form: &BTreeMap<String, String>, fallback: &str, done: Done) -> Response {
+pub(super) fn back(form: &BTreeMap<String, String>, fallback: &str, done: Done) -> Reply {
     let to = form.get("then").and_then(|t| admin_path(t)).unwrap_or(fallback);
     let mut q = form_urlencoded::Serializer::new(String::new());
     q.append_pair("done", &now_ms().to_string());
@@ -48,7 +45,7 @@ pub(super) fn back(form: &BTreeMap<String, String>, fallback: &str, done: Done) 
         }
     }
     let sep = if to.contains('?') { '&' } else { '?' };
-    (StatusCode::SEE_OTHER, [(header::LOCATION, format!("{to}{sep}{}#console", q.finish()))]).into_response()
+    Reply::redirect(&format!("{to}{sep}{}#console", q.finish()))
 }
 
 /// The app's page, where a change without `then` goes back to.
@@ -70,14 +67,16 @@ async fn app_of(shell: &Shell, id: &str) -> Result<(String, String), String> {
 }
 
 /// `POST /admin/apps/{id}/off`: visitors get the "turned off" page.
-pub(super) async fn turn_off(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): Form) -> Response {
-    let done = turn(&shell, &id, false, who.person()).await;
+pub(super) async fn turn_off(ask: Change) -> Reply {
+    let (shell, who, id, form) = (&ask.shell, &ask.viewer.who, ask.id(), ask.form());
+    let done = turn(shell, &id, false, who.person()).await;
     back(&form, &page_of(&id), done)
 }
 
 /// `POST /admin/apps/{id}/on`.
-pub(super) async fn turn_on(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): Form) -> Response {
-    let done = turn(&shell, &id, true, who.person()).await;
+pub(super) async fn turn_on(ask: Change) -> Reply {
+    let (shell, who, id, form) = (&ask.shell, &ask.viewer.who, ask.id(), ask.form());
+    let done = turn(shell, &id, true, who.person()).await;
     back(&form, &page_of(&id), done)
 }
 
@@ -95,8 +94,9 @@ async fn turn(shell: &Shell, id: &str, on: bool, person: Option<String>) -> Done
 
 /// `POST /admin/apps/{id}/rollback`: the version `label` goes live, an
 /// earlier one again or one held for an admin.
-pub(super) async fn make_live(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): Form) -> Response {
-    let done = make_live_now(&shell, &id, form.get("label").map(String::as_str), who.person()).await;
+pub(super) async fn make_live(ask: Change) -> Reply {
+    let (shell, who, id, form) = (&ask.shell, &ask.viewer.who, ask.id(), ask.form());
+    let done = make_live_now(shell, &id, form.get("label").map(String::as_str), who.person()).await;
     back(&form, &page_of(&id), done)
 }
 
@@ -113,9 +113,10 @@ async fn make_live_now(shell: &Shell, id: &str, label: Option<&str>, person: Opt
 /// `POST /admin/apps/{id}/seen`: the problems named in `kinds`
 /// ("failing,busy") leave the inbox until something new happens. None
 /// named: they come back.
-pub(super) async fn seen(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): Form) -> Response {
+pub(super) async fn seen(ask: Change) -> Reply {
+    let (shell, who, id, form) = (&ask.shell, &ask.viewer.who, ask.id(), ask.form());
     let kinds: Vec<ProblemKind> = form.get("kinds").map_or_else(Vec::new, |k| k.split(',').filter_map(|k| ProblemKind::parse(k.trim())).collect());
-    let done = mark_seen(&shell, &id, &kinds, who.person()).await;
+    let done = mark_seen(shell, &id, &kinds, who.person()).await;
     back(&form, &page_of(&id), done)
 }
 
@@ -134,8 +135,9 @@ async fn mark_seen(shell: &Shell, id: &str, kinds: &[ProblemKind], person: Optio
 
 /// `POST /admin/freeze`: `frozen=1` holds every new deploy for an admin,
 /// `frozen=0` lets them go live again.
-pub(super) async fn freeze(State(shell): S, who: Who, axum::Form(form): Form) -> Response {
-    let done = freeze_now(&shell, form.get("frozen").map(String::as_str) != Some("0"), who.person()).await;
+pub(super) async fn freeze(ask: Change) -> Reply {
+    let (shell, who, form) = (&ask.shell, &ask.viewer.who, ask.form());
+    let done = freeze_now(shell, form.get("frozen").map(String::as_str) != Some("0"), who.person()).await;
     back(&form, "/admin", done)
 }
 
@@ -151,7 +153,8 @@ async fn freeze_now(shell: &Shell, frozen: bool, person: Option<String>) -> Done
 }
 
 /// `POST /admin/stop-all`: turns every running app off.
-pub(super) async fn stop_all(State(shell): S, who: Who, axum::Form(form): Form) -> Response {
+pub(super) async fn stop_all(ask: Change) -> Reply {
+    let (shell, who, form) = (&ask.shell, &ask.viewer.who, ask.form());
     let done = match shell.state.stop_all(who.person()).await {
         Ok(ids) => {
             println!("stop all: turned off {}", plural(ids.len(), "app"));
@@ -169,8 +172,9 @@ pub(super) async fn stop_all(State(shell): S, who: Who, axum::Form(form): Form) 
 }
 
 /// `POST /admin/start-all`: turns on what Stop all turned off.
-pub(super) async fn start_all(State(shell): S, who: Who, axum::Form(form): Form) -> Response {
-    let done = start_all_now(&shell, who.person()).await;
+pub(super) async fn start_all(ask: Change) -> Reply {
+    let (shell, who, form) = (&ask.shell, &ask.viewer.who, ask.form());
+    let done = start_all_now(shell, who.person()).await;
     back(&form, "/admin", done)
 }
 
@@ -185,8 +189,9 @@ async fn start_all_now(shell: &Shell, person: Option<String>) -> Done {
 }
 
 /// `POST /admin/apps/{id}/limits`: what one request of the app may use.
-pub(super) async fn limits(State(shell): S, who: Who, Path(id): Path<String>, axum::Form(form): Form) -> Response {
-    let done = set_limits(&shell, &id, who.person(), |old| from_form(&form, old)).await;
+pub(super) async fn limits(ask: Change) -> Reply {
+    let (shell, who, id, form) = (&ask.shell, &ask.viewer.who, ask.id(), ask.form());
+    let done = set_limits(shell, &id, who.person(), |old| from_form(&form, old)).await;
     back(&form, &page_of(&id), done)
 }
 
@@ -245,8 +250,9 @@ async fn set_limits(shell: &Shell, id: &str, person: Option<String>, to: impl Fn
 
 /// `POST /admin/undo`: reverses `event`, an admin's change of the last ten
 /// minutes, if nothing changed the same thing since.
-pub(super) async fn undo(State(shell): S, who: Who, axum::Form(form): Form) -> Response {
-    let done = undo_now(&shell, form.get("event").and_then(|e| e.parse().ok()), who.person()).await;
+pub(super) async fn undo(ask: Change) -> Reply {
+    let (shell, who, form) = (&ask.shell, &ask.viewer.who, ask.form());
+    let done = undo_now(shell, form.get("event").and_then(|e| e.parse().ok()), who.person()).await;
     back(&form, "/admin", done)
 }
 
@@ -282,8 +288,8 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
-    fn location(r: &Response) -> &str {
-        r.headers()[header::LOCATION].to_str().unwrap()
+    fn location(r: &Reply) -> &str {
+        r.redirect.as_deref().unwrap()
     }
 
     #[tokio::test]

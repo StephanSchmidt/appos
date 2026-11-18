@@ -74,7 +74,7 @@ mod tests {
 
     use super::super::routes::tests::{cookies, get, post, send};
     use super::*;
-    use crate::access::ADMIN;
+    use crate::kit::{ADMIN_READ, ADMIN_WRITE};
 
     fn session(headers: &axum::http::HeaderMap) -> Option<String> {
         cookies(headers).split("; ").find(|c| c.starts_with("appos-session=") && c.len() > "appos-session=".len()).map(str::to_string)
@@ -118,12 +118,12 @@ mod tests {
         let p = crate::access::Policies::built_in(&policy(), grants.clone()).await.unwrap().current();
         grants.push("scoring-read".into());
         let admin = super::super::Who::signed_in(Identity::new("token", EMAIL, "Admin", []).unwrap());
-        assert!(p.may(&admin, ADMIN));
+        assert!(p.may(&admin, ADMIN_READ) && p.may(&admin, ADMIN_WRITE));
         for g in grants {
             assert!(p.access(&admin, "any", "Any", std::slice::from_ref(&g)).allows(0), "{g}");
             assert!(!p.access(&super::super::Who::default(), "any", "Any", std::slice::from_ref(&g)).allows(0), "{g}");
         }
-        assert!(!p.may(&super::super::Who::default(), ADMIN));
+        assert!(!p.may(&super::super::Who::default(), ADMIN_READ));
         assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", "abcd"));
     }
 }
