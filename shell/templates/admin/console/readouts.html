@@ -1,0 +1,5 @@
+<div class="c-readouts">
+{%- for (label, value, sub, ink) in items -%}
+<div class="c-readout {{ ink.class() }}"><span class="c-rl">{{ label }}</span><b>{{ value }}</b><span class="c-rl">{{ sub }}</span></div>
+{%- endfor -%}
+</div>

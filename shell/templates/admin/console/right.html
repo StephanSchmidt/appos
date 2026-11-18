@@ -1,0 +1,9 @@
+<div class="c-right"><div class="c-grp"><span class="c-silk">This app</span></div><span class="c-val c-this">{{ name }}</span>
+<div class="c-col">{{ story|safe }}{{ requests|safe }}{{ versions|safe }}</div>
+{% if let Some(action) = action -%}
+<form{% if !changes %} inert{% endif %} class="c-apwr" method="post" action="{{ action }}"><input type="hidden" name="then" value="{{ then }}">{{ power|safe }}</form>
+{%- else -%}
+<div class="c-apwr">{{ power|safe }}</div>
+{%- endif %}
+<div class="c-grp c-group"><span class="c-silk">Limits</span><span class="c-silk dim">per request</span></div>
+{{ faders|safe }}</div>

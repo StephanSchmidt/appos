@@ -1,0 +1,23 @@
+{#- A version against the live one: what to know first, then grants, risk, routes, owner and group, its requests this hour, and the data. -#}
+<div class="c-box">
+{%- if failed -%}
+<div class="a">{{ version }} was rolled back because it kept failing: make it live again only if what made it fail is fixed elsewhere.</div>
+{%- endif -%}
+{%- if let Some((app, at)) = paused -%}
+<div class="a">This ends the pause: {{ app }} rolled itself back at {{ at }}, so deploys wait; once a version is live here, they go live again.</div>
+{%- endif -%}
+{%- if let Some(l) = live -%}
+<div class="d">{{ version }} compared with live {{ l.version }}</div><div{% if l.gains %} class="a"{% endif %}>{{ l.grants }} · risk {{ l.risk.0 }} → {{ l.risk.1 }}</div>
+{%- if let Some(routes) = l.routes -%}
+<div>Routes: {{ routes }}{% if l.dropped %}; dropped routes answer 404{% endif %}</div>
+{%- endif -%}
+{%- for (what, was, becomes) in l.changed -%}
+<div class="a">{{ what }}: {{ was }} → {{ becomes }}</div>
+{%- endfor -%}
+{%- else -%}
+<div class="d">{{ version }} · nothing is live</div>
+{%- endif -%}
+{%- if let Some((requests, slowest, failed)) = hour -%}
+<div>This hour: {{ requests }} · slowest {{ slowest }} s · {{ failed }} failed</div>
+{%- endif -%}
+<div class="d">The data stays: it belongs to the app, not the version.</div></div>

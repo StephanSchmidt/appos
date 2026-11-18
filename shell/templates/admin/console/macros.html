@@ -1,0 +1,16 @@
+{#- What the console's templates share. -#}
+
+{#- A key's keyboard letter, as attributes that bind it; nothing without one. -#}
+{%- macro shortcut(letter) -%}
+{%- if !letter.is_empty() %} data-key="{{ letter }}" aria-keyshortcuts="{{ self::aria_key(letter) }}"{% endif -%}
+{%- endmacro -%}
+
+{#- A key's letter in its corner; nothing without one. -#}
+{%- macro corner(letter) -%}
+{%- if !letter.is_empty() %}<span class="c-kh" aria-hidden="true">{{ self::key_name(letter) }}</span>{% endif -%}
+{%- endmacro -%}
+
+{#- The app's name, group and owner for a page's first line. -#}
+{%- macro who(name, group, owner) -%}
+<span class="c-clock">{{ name }}</span>{% if !group.is_empty() %}<span class="b">{{ group }}</span>{% endif %}{% if !owner.is_empty() %}<span class="d">{{ owner }}</span>{% endif %}
+{%- endmacro -%}

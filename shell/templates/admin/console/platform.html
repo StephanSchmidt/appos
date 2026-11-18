@@ -1,0 +1,4 @@
+<div class="c-plat"><div class="c-grp"><span class="c-silk">Platform</span></div><div class="c-plat-row">
+<form{% if !changes %} inert{% endif %} class="c-ctl" method="post" action="{{ action }}"><input type="hidden" name="then" value="{{ then }}"><button class="c-power {{ power }}" data-hint="{{ hint }}" aria-label="{{ label }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v8"></path><path d="M6.6 7a7.5 7.5 0 1 0 10.8 0"></path></svg></button><span class="c-silk">Power</span></form>
+<form{% if !changes %} inert{% endif %} class="c-ctl" method="post" action="/admin/freeze"><input type="hidden" name="frozen" value="{{ flip }}"><input type="hidden" name="then" value="{{ then }}">{{ freeze|safe }}<span class="c-silk">Freeze</span></form>
+</div></div>

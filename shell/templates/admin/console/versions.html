@@ -1,0 +1,26 @@
+{% extends "admin/console/screen.html" %}
+{% import "admin/console/macros.html" as m %}
+
+{% block tag %}Versions{% endblock %}
+
+{% block left %}{% call m::who(name, group, owner) %}{% endcall %}<span>{{ kept }} kept</span>{% endblock %}
+
+{% block right %}{% if let Some(version) = live %}<span class="c">{{ version }} live</span>{% endif %}{% endblock %}
+
+{% block body -%}
+<div class="c-list c-vers">
+{%- for x in rows -%}
+<a class="c-row c-ver{% if x.picked %} sel{% endif %}" href="{{ x.href }}" data-open="{{ x.open }}"{% if x.picked %} aria-current="true"{% endif %} data-hint="{{ x.version }} · click = what changes if it goes live"><span class="{{ x.tone }}">{{ x.version }}</span><span class="b">{{ x.at }}</span><span class="{{ x.tone }}">{{ x.note }}</span></a>
+{%- endfor -%}
+</div>
+{%- match pick -%}
+{%- when Pick::Refused with { version, reason } -%}
+<div class="c-box"><div class="d">{{ version }} was refused: it was never stored, so it can't go live.</div><div>{{ reason }}</div></div>
+{%- when Pick::Live with (version) -%}
+<div class="c-box"><div>{{ version }} is live. Click another version to roll back to it or make it live.</div></div>
+{%- when Pick::Other with (compare) -%}
+{{ compare|safe }}
+{%- when Pick::Nothing -%}
+<div class="c-box">No versions kept.</div>
+{%- endmatch -%}
+{%- endblock %}

@@ -1,0 +1,6 @@
+{#- The strip beside the list: every app on it, problems marked, the part on screen boxed (admin.js moves the box as the list scrolls). -#}
+<svg class="c-mini" viewBox="0 0 12 {{ n }}" preserveAspectRatio="none" aria-label="Where the screen is among all {{ n }} apps"><rect class="c-track" x="3" y="0" width="6" height="{{ n }}"></rect>
+{%- for (i, ink) in marks -%}
+<rect class="{{ ink.class() }}" x="1" y="{{ i }}" width="10" height="1"></rect>
+{%- endfor -%}
+<rect class="c-win" x="0.5" y="{{ first }}" width="11" height="{{ shown }}"></rect></svg>

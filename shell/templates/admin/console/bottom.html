@@ -1,0 +1,10 @@
+{#- The pins live in the browser; admin.js fills in data-set and data-pinned: {i} the pin, {name} its app; in data-jump {id} is the app's id in a path. -#}
+<div class="c-lower"><div class="c-well"><div class="c-pins" data-jump="{{ jump }}" data-set="Pin {i}: {name} · click jumps to it ({i}) · hold keeps the selected app here instead" data-pinned="Pinned {name} to {i}"><div class="c-grp"><span class="c-silk dim">Pins · click = jump · hold = keep the selected app here</span></div><div class="c-pinkeys">
+{%- for i in 1..=8 -%}
+<button type="button" class="c-key c-pin" data-pin="{{ i }}" aria-keyshortcuts="{{ i }}" data-hint="Pin {{ i }}: empty; hold it to keep the selected app here"><span class="c-pinrow"><span class="c-led"></span><span class="c-pinno">{{ i }}</span></span><span class="c-pinname"></span></button>
+{%- endfor -%}
+</div></div><div class="c-grp"><span class="c-silk dim">{{ ago }}</span><span class="c-silk dim">click = that {{ unit }}'s requests</span></div><div class="c-steps">
+{%- for s in steps -%}
+<div class="c-step"><span class="c-led{% if s.shown %} orange{% endif %}"></span><a class="c-key flat{% if s.shown %} down{% endif %}" href="{{ s.href }}"{% if s.shown %} aria-current="true"{% endif %} data-hint="{{ s.hint }} · click = its requests">{{ s.label }}</a></div>
+{%- endfor -%}
+</div></div>{{ platform|safe }}</div>

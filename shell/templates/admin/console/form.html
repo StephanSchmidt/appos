@@ -1,0 +1,6 @@
+{#- A change on the screen: a button that says what it does, and Cancel. -#}
+<form{% if !changes %} inert{% endif %} class="c-act" method="post" action="{{ action }}">
+{%- for (name, value) in fields -%}
+<input type="hidden" name="{{ name }}" value="{{ value }}">
+{%- endfor -%}
+<div class="c-actrow"><button class="c-btn" data-hint="{{ button }}: happens at once, logged as admin, undo for 10 min">{{ button }}</button><a class="c-cancel" href="{{ cancel }}" data-hint="Cancel: back to the list, nothing changes (Esc)">Cancel</a><span class="c-grow"></span><span class="d">Logged as admin · undo for 10 min</span></div></form>

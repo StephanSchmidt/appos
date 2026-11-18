@@ -1,0 +1,5 @@
+<div class="c-faders">
+{%- for f in faders -%}
+<form{% if !changes %} inert{% endif %} class="c-fdrf" method="post" action="{{ action }}"><input type="hidden" name="then" value="{{ then }}">{{ f|safe }}</form>
+{%- endfor -%}
+</div>

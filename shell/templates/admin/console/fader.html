@@ -1,0 +1,8 @@
+<div class="c-fdr{% if f.set %} set{% endif %}" role="slider" tabindex="0" data-fader="{{ f.name }}" data-at="{{ at }}" aria-label="{{ f.what }} per request" aria-valuemin="0" aria-valuemax="{{ max }}" aria-valuenow="{{ at }}" aria-valuetext="{{ value }}" data-labels="{{ labels }}" data-hints="{{ hints }}" data-hint="{{ hint }}"><span class="c-silk">{{ f.label }}</span><span class="c-slot" style="--p: {{ p }}%">
+{%- for (k, x) in zones -%}
+<button name="{{ f.name }}" value="{{ x }}" tabindex="-1" aria-hidden="true" data-i="{{ k }}"></button>
+{%- endfor -%}
+{%- for (def, y) in ticks -%}
+<i class="{% if def %}def{% endif %}" style="--y: {{ y }}%"></i>
+{%- endfor -%}
+<span class="c-cap"></span></span><span class="c-val">{{ value }}</span></div>

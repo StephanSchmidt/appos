@@ -1,0 +1,13 @@
+<section class="console" id="console" aria-label="Platform console" data-app="{{ app.id }}" data-name="{{ app.name }}" data-page="{{ page }}" data-failed="✗ No answer from the shell: the screen shows what it had · try again">
+{{ ticker|safe }}
+<div class="c-device">
+<span class="c-screw tl"></span><span class="c-screw tr"></span><span class="c-screw bl"></span><span class="c-screw br"></span>
+<div class="c-top"><span class="c-model">APPOS-1</span><span class="c-silk dim">Platform console · {{ platform }}</span><span class="c-grow"></span><span class="c-silk dim c-wide">Hover anything: the screen's last line explains it</span></div>
+<div class="c-body">
+{{ left|safe }}
+<div class="c-mid"><div class="c-bezel"><div class="c-lcd">{{ screen|safe }}</div></div><div class="c-foot"><span class="c-silk dim">{{ about }}</span><span class="c-silk dim">{{ keys }}</span></div></div>
+{{ right|safe }}
+</div>
+{{ bottom|safe }}
+</div>
+</section>

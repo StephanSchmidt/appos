@@ -1,0 +1,28 @@
+<div class="c-ticker">
+<a class="c-key flat c-arrow" href="{{ prev }}" data-key="p" data-hint="Previous that needs you (P)" aria-label="Previous that needs you">◀</a><a class="c-key flat c-arrow" href="{{ next }}" data-key="n" data-hint="Next that needs you (N)" aria-label="Next that needs you">▶</a>
+<div class="c-tick" role="status"><span class="c-led {{ led }}"></span>
+{%- if let Some(i) = item -%}
+<span class="c-idx">{{ i.at }}/{{ i.of }}</span><b>{{ i.name }}</b>{% if !i.group.is_empty() %}<span class="c-idx">{{ i.group }}</span>{% endif %}<span class="c-said">{{ i.said }}{% if i.more > 0 %} · {{ i.more }} more{% endif %}</span>
+{%- else -%}
+<span class="c-said">Nothing needs you · {{ apps }} · {{ running }} running</span>
+{%- endif -%}
+</div>
+<span class="c-tacts">
+{%- if let Some(i) = item -%}
+{{ i.open|safe }}{{ i.seen|safe }}
+{%- else -%}
+<span class="c-key flat off">Open</span><span class="c-key flat off">Seen</span>
+{%- endif -%}
+</span>
+{% if let Some(since) = frozen -%}
+<span class="c-frozen" data-hint="Deploys frozen since {{ since }}: new deploys wait for an admin; the Freeze switch, bottom right, lets them go live">Frozen</span>
+{%- endif -%}
+{%- if let Some(at) = policy -%}
+<a class="c-frozen" href="/admin/policy" data-hint="policy.csv changed at {{ at }} but has a mistake; the policy stays as it was">Policy refused</a>
+{%- endif -%}
+<span class="c-load" data-hint="Load: {{ cur }} requests in the last minute; the busiest minute this hour had {{ max }}"><span class="c-silk dim">Load</span><span class="c-leds">
+{%- for i in 0..8 -%}
+<i class="c-led sq{% if i < lit %} blue{% endif %}"></i>
+{%- endfor -%}
+</span></span>
+</div>

@@ -1,0 +1,2 @@
+{%- import "admin/console/macros.html" as m -%}
+<form{% if !changes %} inert{% endif %} class="c-keyform" method="post" action="{{ action }}">{% for (name, value) in fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}<button class="c-key flat"{% call m::shortcut(letter) %}{% endcall %} data-hint="{{ hint }}">{% call m::corner(letter) %}{% endcall %}{{ label }}</button></form>

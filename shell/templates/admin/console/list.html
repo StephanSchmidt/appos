@@ -1,0 +1,40 @@
+{% extends "admin/console/screen.html" %}
+
+{#- A column's head: a click sorts by it. -#}
+{%- macro sort(s) -%}
+<a class="{{ s.class }}" href="{{ s.href }}"{% if s.on %} aria-current="true"{% endif %} data-hint="Sort by {{ s.label }}">{{ s.text }}{% if s.on %} ▾{% endif %}</a>
+{%- endmacro -%}
+
+{% block tag %}List{% endblock %}
+
+{% block left -%}
+<span class="c-clock">{{ clock }}</span><span class="c">Live</span>
+{%- if narrowed %}<span class="b">{{ filter }}</span>{% else %}<span>{{ filter }}</span>{% endif -%}
+{%- if needs == 0 %}<span class="d">Nothing needs you</span>{% else if needs == 1 %}<span class="a">1 needs you</span>{% else %}<span class="a">{{ needs }} need you</span>{% endif -%}
+{%- endblock %}
+
+{% block right -%}
+<span class="a c-held" hidden>Order held</span>{{ find|safe }}<span class="d c-range" data-of="{first}–{last}/{n}">{{ range }}</span>
+{%- endblock %}
+
+{% block body -%}
+<div class="c-row c-colhead d"><span class="c-n">#</span><span class="c-kind" data-hint="An app, or a kit: apps call kits">Kind</span>
+{%- call sort(by_name) %}{% endcall -%}
+{%- call sort(by_group) %}{% endcall -%}
+<span class="c-lim">Mem</span><span class="c-lim">Time</span><span class="c-lim">Fuel</span>
+{%- call sort(by_status) %}{% endcall -%}
+{%- call sort(by_cells) %}{% endcall -%}
+{%- call sort(by_rate) %}{% endcall -%}
+</div><div class="c-listwrap"><div class="c-list">
+{%- for line in lines -%}
+{%- match line -%}
+{%- when Line::Sep with (ink, text) -%}
+<div class="c-sep {{ ink }}"><span>{{ text }}</span></div>
+{%- when Line::Row with (row) -%}
+{{ row|safe }}
+{%- endmatch -%}
+{%- else -%}
+<p class="c-none">No app matches. <a href="{{ show_all }}">Show all</a></p>
+{%- endfor -%}
+</div>{{ minimap|safe }}</div>
+{%- endblock %}
