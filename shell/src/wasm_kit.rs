@@ -38,11 +38,11 @@
 //! A call runs like an app's request: a fresh instance for each call, with
 //! what its caller has left of the request's fuel, I/O and time, and memory
 //! of its own. A chain of calls goes at most `MAX_DEPTH` deep. Unlike an app
-//! it has a directory of its own (data/kits/<id>, "/" in its WASI), the
-//! network, `http.fetch` to its [http] hosts (fetch.rs) and its
-//! configuration as environment variables. It gets no kv:
-//! it keeps its own data. What it takes and gives are values: no
-//! resources, streams or futures. A command to it runs once the sender
+//! it has a directory of its own (data/kits/<id>, "/" in its WASI),
+//! `http.fetch` to its [http] hosts (fetch.rs), and no other network: no
+//! sockets, no name lookup. Its configuration comes as environment
+//! variables. It gets no kv: it keeps its own data. What it takes and gives
+//! are values: no resources, streams or futures. A command to it runs once the sender
 //! committed, with a whole budget of its own.
 //!
 //! If its component exports appos:framework/handler, it has pages too: its

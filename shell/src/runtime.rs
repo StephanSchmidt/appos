@@ -508,13 +508,13 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked, data: &Pa
     })
 }
 
-/// A Wasm kit's WASI: its directory ("/"), the network and its
-/// configuration. Its directory was made when it loaded; should it be
-/// gone, the kit finds no "/".
-fn kit_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: &KitSandbox) {
-    let _ = wasi.preopened_dir(&kit.dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
-    wasi.inherit_network().allow_ip_name_lookup(true);
-    for (key, value) in &kit.env {
+/// A Wasm kit's WASI: its directory ("/") and its configuration. Its
+/// directory was made when it loaded; should it be gone, the kit finds no
+/// "/". No sockets and no name lookup, as for an app: a kit reaches out only
+/// through http::fetch, to its [http] hosts.
+fn kit_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, dir: &std::path::Path, env: &[(String, String)]) {
+    let _ = wasi.preopened_dir(dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
+    for (key, value) in env {
         wasi.env(key, value);
     }
 }
@@ -528,7 +528,7 @@ fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, ki
     let mut builder = WasiCtx::builder();
     builder.stdout(output.clone()).stderr(output.clone());
     if let Some(kit) = kit {
-        kit_wasi(&mut builder, kit);
+        kit_wasi(&mut builder, &kit.dir, &kit.env);
     }
     let ctx = Ctx {
         wasi: builder.build(),
@@ -1261,6 +1261,35 @@ mod tests {
         let app = axum::Router::new().fallback(|method: axum::http::Method| async move { method.to_string() });
         tokio::spawn(async move { axum::serve(listener, app).await });
         url
+    }
+
+    /// A kit's WASI has no TCP, no UDP and no name lookup: those would get
+    /// around [http] hosts (a lookup carries data in the name it asks for).
+    #[tokio::test]
+    async fn a_kit_has_no_sockets() {
+        use wasmtime_wasi::p2::bindings::sockets::instance_network::Host as _;
+        use wasmtime_wasi::p2::bindings::sockets::ip_name_lookup::Host as _;
+        use wasmtime_wasi::p2::bindings::sockets::network::{ErrorCode, IpAddressFamily};
+        use wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host as _;
+        use wasmtime_wasi::p2::bindings::sockets::udp_create_socket::Host as _;
+        use wasmtime_wasi::sockets::WasiSocketsView as _;
+        struct Kit(WasiCtx, ResourceTable);
+        impl WasiView for Kit {
+            fn ctx(&mut self) -> WasiCtxView<'_> {
+                WasiCtxView { ctx: &mut self.0, table: &mut self.1 }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = WasiCtx::builder();
+        kit_wasi(&mut builder, dir.path(), &[]);
+        let mut kit = Kit(builder.build(), ResourceTable::new());
+        let mut s = kit.sockets();
+        let tcp = s.create_tcp_socket(IpAddressFamily::Ipv4).map(|_| ()).map_err(|e| e.downcast().unwrap());
+        let udp = s.create_udp_socket(IpAddressFamily::Ipv4).await.map(|_| ()).map_err(|e| e.downcast().unwrap());
+        let network = s.instance_network().unwrap();
+        let lookup = s.resolve_addresses(network, "secret.example.com".into()).map(|_| ()).map_err(|e| e.downcast().unwrap());
+        assert!(matches!((&tcp, &udp), (Err(ErrorCode::AccessDenied), Err(ErrorCode::AccessDenied))), "{tcp:?} {udp:?}");
+        assert!(lookup.is_err(), "a lookup goes out");
     }
 
     #[tokio::test]
