@@ -1,6 +1,7 @@
-//! `appos new` and `appos sync`: the template an app starts from, the SDK
-//! it carries (src/appos.rs, src/appos.ts or src/main/java/app/Appos.java)
-//! and the contract it is built against (wit/).
+//! `appos new` and `appos sync`: the template an app or a kit starts from,
+//! the SDK an app carries (src/appos.rs, src/appos.ts or
+//! src/main/java/app/Appos.java) and the contract both are built against
+//! (wit/).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,10 +13,17 @@ use appos_shell::{terminal_eprintln as eprintln, terminal_println as println};
 
 use crate::platform::{self, Config};
 
-// TEMPLATE, TEMPLATE_TS and TEMPLATE_JAVA: every file of cli/template,
-// cli/template-ts and cli/template-java but build output, data, wit/ and
-// rustfmt.toml, by path (see build.rs).
+// TEMPLATE, TEMPLATE_TS, TEMPLATE_JAVA and TEMPLATE_KIT: every file of
+// cli/template, cli/template-ts, cli/template-java and cli/template-kit but
+// build output, data, wit/ and rustfmt.toml, by path (see build.rs).
 include!(concat!(env!("OUT_DIR"), "/template.rs"));
+
+/// What `appos new` creates: an app in a language, or a kit (in Rust).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Project {
+    App(Lang),
+    Kit,
+}
 
 /// The language an app is written in: the template it starts from and the
 /// SDK it carries.
@@ -32,9 +40,12 @@ impl Lang {
     /// The template of the app at `dir`: TypeScript if it has a
     /// package.json, Java if it has a pom.xml, none for a Zig app (a
     /// build.zig): it carries its own SDK, so `appos sync` updates only its
-    /// wit/. Else Rust.
+    /// wit/. None for a kit (kit.toml) too: it binds the contract itself, in
+    /// src/lib.rs. Else Rust.
     pub fn of(dir: &Path) -> Option<Lang> {
-        if crate::ts::is_ts(dir) {
+        if dir.join(appos_shell::KIT_TOML).is_file() {
+            None
+        } else if crate::ts::is_ts(dir) {
             Some(Lang::TypeScript)
         } else if crate::java::is_java(dir) {
             Some(Lang::Java)
@@ -193,16 +204,164 @@ pub fn new(name: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
 
 fn write_project(dir: &Path, name: &str, wit: &BTreeMap<String, String>, owner: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
     let files = project_files(name, owner, group, lang)?;
+    write_files(dir, files.into_iter().map(|(path, text)| (path.to_string(), text)).collect(), wit)
+}
+
+/// Writes a new project: its files, then the contract into wit/.
+fn write_files(dir: &Path, files: Vec<(String, String)>, wit: &BTreeMap<String, String>) -> anyhow::Result<()> {
     // Claim the directory after network access too. create_dir_all in
     // write() alone would silently reuse a project created in the meantime.
     std::fs::create_dir(dir).with_context(|| format!("could not create {}", dir.display()))?;
     for (path, content) in files {
         write(&dir.join(path), &content)?;
     }
-    for (file, text) in wit {
-        write(&dir.join("wit").join(file), text)?;
+    for (file, text) in contract_for(dir, wit) {
+        write(&dir.join("wit").join(file), &text)?;
     }
     Ok(())
+}
+
+/// `appos new --kit`: a kit in ./<name>, from cli/template-kit. <name> is
+/// its id, its WIT package kit:<name> (unique, as the id is on a platform)
+/// and the start of its grant, <name>-read.
+pub fn new_kit(name: &str, group: &str) -> anyhow::Result<()> {
+    check_kit_name(name)?;
+    let dir = PathBuf::from(name);
+    if dir.exists() {
+        anyhow::bail!("{} already exists", dir.display());
+    }
+    let Contract { wit, fakes, from, .. } = contract()?;
+    let against = from.unwrap_or_else(|| "the built-in contract, fine for local development".into());
+    let owner = git_owner();
+    write_kit(&dir, name, &wit, &owner, group)?;
+    sync_fakes(&dir, &fakes)?;
+
+    let pad = " ".repeat(name.len());
+    let owner = match owner.as_str() {
+        "" => "kit.toml names no owner yet (git has no user.name or user.email): set\n\
+               owner = \"Your Name <you@example.com>\" in it; the admin screen shows it.\n\n"
+            .to_string(),
+        o => format!("The owner in kit.toml is {o}, from git; the admin screen shows it.\n\n"),
+    };
+    let group = match group {
+        "" => "kit.toml names no group yet: set group = \"Platform\" (your team) in it.\n\n".to_string(),
+        g => format!("The group in kit.toml is {g}.\n\n"),
+    };
+    println!(
+        "Created {name}/, a kit (against {against}).\n\
+         It is a working hello world: a function apps call, greet, behind the\n\
+         grant {name}-read, and a page to try it. Change anything in it, or all of it.\n\n  \
+         cd {name} && appos dev    run its page at http://127.0.0.1:8080/{name}; changes reload\n  \
+         appos guide kits{pad}    what a kit offers, calls and shows\n\n\
+         What it offers apps is in api/{name}.wit and kit.toml's [grants], the code\n\
+         in src/lib.rs. wit/ is the platform's contract; appos sync updates it.\n\
+         make check runs formatting, lints and tests; appos deploy puts it on\n\
+         the current platform.\n\n{owner}{group}{}",
+        git_instructions(name, None).replace("New app", "New kit").replace("the app", "the kit")
+    );
+    Ok(())
+}
+
+/// A kit's name is its id, its WIT package's name (kit:<name>) and the
+/// start of its grant (<name>-read): it must make all three.
+fn check_kit_name(name: &str) -> anyhow::Result<()> {
+    appos_shell::validate_app_id(name).map_err(anyhow::Error::msg)?;
+    appos_shell::validate_grant_name(&format!("{name}-read")).map_err(|e| anyhow::anyhow!("the kit's grant: {e}"))?;
+    wit_parser::UnresolvedPackageGroup::parse("kit.wit", &format!("package kit:{name};")).map_err(|_| {
+        anyhow::anyhow!("kit:{name} is no WIT package name, which a kit's name makes; a WIT word like use or list can't be one: pick another name")
+    })?;
+    Ok(())
+}
+
+fn write_kit(dir: &Path, name: &str, wit: &BTreeMap<String, String>, owner: &str, group: &str) -> anyhow::Result<()> {
+    write_files(dir, kit_files(name, owner, group)?, wit)
+}
+
+/// The kit template's files for kit `name`: its id, crate, title, WIT
+/// package, grant, owner and group put in, api/hello.wit named after it,
+/// everything else as it is.
+fn kit_files(name: &str, owner: &str, group: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let string = |s: &str| toml::Value::String(s.into()).to_string();
+    let crate_name = name.replace('-', "_");
+    TEMPLATE_KIT
+        .iter()
+        .map(|&(path, text)| {
+            let file = |text: String| (path.to_string(), text);
+            Ok(match path {
+                "Cargo.toml" => file(replace(path, text, &[("name = \"hello\"\n", format!("name = \"{name}\"\n"))])?),
+                "Cargo.lock" => file(lock_named(text, name)?),
+                "kit.toml" => file(replace(
+                    path,
+                    text,
+                    &[
+                        ("id = \"hello\"\n", format!("id = {}\n", string(name))),
+                        ("name = \"Hello\"\n", format!("name = {}\n", string(&title_case(name)))),
+                        ("wasm = \"target/wasm32-wasip2/release/hello.wasm\"\n", format!("wasm = \"target/wasm32-wasip2/release/{crate_name}.wasm\"\n")),
+                        ("fake = \"target/wasm32-wasip2/release/hello.wasm\"\n", format!("fake = \"target/wasm32-wasip2/release/{crate_name}.wasm\"\n")),
+                        ("owner = \"\"\n", format!("owner = {}\n", string(owner))),
+                        ("group = \"\"\n", format!("group = {}\n", string(group))),
+                        ("[\"api/hello.wit\"]", format!("[\"api/{name}.wit\"]")),
+                        ("[grants.hello-read]\n", format!("[grants.{name}-read]\n")),
+                        ("\"kit:hello/greetings#greet\"", format!("\"kit:{name}/greetings#greet\"")),
+                    ],
+                )?),
+                "api/hello.wit" => (format!("api/{name}.wit"), replace(path, text, &[("package kit:hello@", format!("package kit:{name}@"))])?),
+                "src/lib.rs" => file(replace(
+                    path,
+                    text,
+                    &[
+                        ("export kit:hello/greetings@", format!("export kit:{name}/greetings@")),
+                        ("[\"api/hello.wit\", ", format!("[\"api/{name}.wit\", ")),
+                        ("exports::kit::hello::greetings::", format!("exports::kit::{crate_name}::greetings::")),
+                    ],
+                )?),
+                _ => file(text.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// What the kit at `dir` is: its id and its own WIT packages ("kit:hello"),
+/// from the files its kit.toml names. None for an app.
+fn own(dir: &Path) -> Option<(String, Vec<String>)> {
+    let toml: toml::Table = std::fs::read_to_string(dir.join(appos_shell::KIT_TOML)).ok()?.parse().ok()?;
+    let kit = toml.get("kit")?.as_table()?;
+    let id = kit.get("id")?.as_str()?.to_string();
+    let files = kit.get("wit").and_then(|w| w.as_array()).into_iter().flatten().filter_map(|f| f.as_str());
+    let packages = files
+        .filter_map(|file| {
+            let text = std::fs::read_to_string(dir.join(file)).ok()?;
+            let name = wit_parser::UnresolvedPackageGroup::parse(file, &text).ok()?.main.name;
+            Some(format!("{}:{}", name.namespace, name.name))
+        })
+        .collect();
+    Some((id, packages))
+}
+
+/// The contract as the project at `dir` builds against it. A kit's own
+/// packages are in its api/, maybe changed since it was deployed: they
+/// leave the platform's contract, their files in deps/ and their imports
+/// in appos.wit.
+fn contract_for(dir: &Path, wit: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let own = own(dir).map(|(_, packages)| packages).unwrap_or_default();
+    let in_deps = |path: &str| own.iter().any(|p| path.starts_with(&format!("deps/{}/", p.replace(':', "-"))));
+    let imported = |line: &str| own.iter().any(|p| line.trim_start().starts_with(&format!("import {p}/")));
+    wit.iter()
+        .filter(|(path, _)| !in_deps(path))
+        .map(|(path, text)| match path.as_str() {
+            "appos.wit" => (path.clone(), text.split_inclusive('\n').filter(|line| !imported(line)).collect()),
+            _ => (path.clone(), text.clone()),
+        })
+        .collect()
+}
+
+/// The fakes the project at `dir` runs with: a kit runs as itself, not as
+/// its fake.
+fn fakes_for(dir: &Path, fakes: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+    let Some((id, own)) = own(dir) else { return fakes.clone() };
+    let names: Vec<String> = std::iter::once(id).chain(own.iter().map(|p| p.replace(':', "-"))).collect();
+    let mine = |path: &str| names.iter().any(|n| path.split('/').next() == Some(n.as_str()));
+    fakes.iter().filter(|(path, _)| !mine(path)).map(|(path, bytes)| (path.clone(), bytes.clone())).collect()
 }
 
 /// The template's files for app `name`: its id, crate or package, title,
@@ -220,7 +379,7 @@ fn project_files(name: &str, owner: &str, group: &str, lang: Lang) -> anyhow::Re
             let text = match path {
                 "Cargo.toml" => replace(path, text, &[("name = \"hello\"\n", format!("name = \"{name}\"\n"))])?,
                 // The app's own entry; dependencies keep their versions.
-                "Cargo.lock" => replace(path, text, &[("name = \"hello\"\n", format!("name = \"{name}\"\n"))])?,
+                "Cargo.lock" => lock_named(text, name)?,
                 // An app id is a valid npm package name.
                 "package.json" => replace(path, text, &[("\"name\": \"hello\",\n", format!("\"name\": \"{name}\",\n"))])?,
                 // An app id is a valid Maven artifactId.
@@ -241,6 +400,18 @@ fn project_files(name: &str, owner: &str, group: &str, lang: Lang) -> anyhow::Re
             Ok::<_, anyhow::Error>((path, text))
         })
         .collect()
+}
+
+/// The template's Cargo.lock with its own package named `name`, where cargo
+/// keeps it (packages by name), so the first build doesn't rewrite it.
+fn lock_named(text: &str, name: &str) -> anyhow::Result<String> {
+    let text = replace("Cargo.lock", text, &[("name = \"hello\"\n", format!("name = \"{name}\"\n"))])?;
+    let mut parts = text.split("\n[[package]]\n");
+    let head = parts.next().unwrap_or_default().to_string();
+    let mut packages: Vec<&str> = parts.collect();
+    // Stable: two versions of a package keep their order.
+    packages.sort_by_key(|p| p.lines().next().unwrap_or_default());
+    Ok(packages.into_iter().fold(head, |lock, p| lock + "\n[[package]]\n" + p))
 }
 
 /// Puts each `to` in place of its `from`, which must be in the template's
@@ -272,7 +443,7 @@ pub fn sync(shell: Option<&str>) -> anyhow::Result<()> {
     } else {
         println!(
             "Updated {}: {sdk}wit/ is {from}.\n\
-             git diff shows what changed; make check builds and tests the app with them.",
+             git diff shows what changed; make check builds and tests it with them.",
             changed.join(", ")
         );
     }
@@ -283,6 +454,7 @@ pub fn sync(shell: Option<&str>) -> anyhow::Result<()> {
 /// files the contract doesn't have; sets a TypeScript app's
 /// verbatimModuleSyntax. Returns what changed.
 fn sync_files(dir: &Path, wit: &BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+    let wit = &contract_for(dir, wit);
     let wit_dir = dir.join("wit");
     if wit_dir.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
         anyhow::bail!("wit/ is a link; appos sync writes the contract into a wit/ folder");
@@ -318,6 +490,7 @@ fn sync_files(dir: &Path, wit: &BTreeMap<String, String>) -> anyhow::Result<Vec<
 /// Puts `fakes` into the app's fakes/, replacing what it held; answers
 /// which kits' fakes changed.
 fn sync_fakes(dir: &Path, fakes: &BTreeMap<String, Vec<u8>>) -> anyhow::Result<Vec<String>> {
+    let fakes = &fakes_for(dir, fakes);
     let fakes_dir = dir.join("fakes");
     let had = read_tree(&fakes_dir);
     if &had == fakes {
@@ -383,9 +556,11 @@ fn read_wit(dir: &Path) -> BTreeMap<String, String> {
     files
 }
 
-/// What in the app at `dir` isn't what it builds and runs against: the SDK
-/// of this appos, `wit`, the contract of `source`, and a TypeScript app's
-/// verbatimModuleSyntax, without which it gets no deps.json.
+/// What in the app or kit at `dir` isn't what it builds and runs against:
+/// the SDK of this appos, `wit`, the contract of `source` (for a kit,
+/// without its own packages, and only if it builds against it: a sign-in
+/// kit's wit/ is its own), and a TypeScript app's verbatimModuleSyntax,
+/// without which it gets no deps.json.
 fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String> {
     let mut stale = Vec::new();
     if let Some(lang) = Lang::of(dir)
@@ -393,7 +568,8 @@ fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String
     {
         stale.push(format!("{} is not the one of this appos", lang.sdk_path()));
     }
-    if &read_wit(dir) != wit {
+    let against = own(dir).is_none() || dir.join("wit").join("appos.wit").is_file();
+    if against && read_wit(dir) != contract_for(dir, wit) {
         stale.push(format!("wit/ is not the contract of {source}"));
     }
     if Lang::of(dir) == Some(Lang::TypeScript)
@@ -405,12 +581,12 @@ fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String
     stale
 }
 
-/// Warns when the app's SDK or contract differ from those it builds and
-/// runs against; `appos sync` brings both up to date.
+/// Warns when the SDK or contract of the app or kit at `dir` differ from
+/// those it builds and runs against; `appos sync` brings both up to date.
 pub fn warn_if_stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) {
     let stale = stale(dir, wit, source);
     if !stale.is_empty() {
-        eprintln!("warning: {}. `appos sync` brings the app up to date (and replaces changes made to the SDK and wit/).", stale.join(", and "));
+        eprintln!("warning: {}. `appos sync` brings them up to date (and replaces changes made to the SDK and wit/).", stale.join(", and "));
     }
 }
 
@@ -530,7 +706,7 @@ mod tests {
             let (new, template) = (files_below(&target), files_below(&template_dir(lang)));
             assert_eq!(new.keys().collect::<Vec<_>>(), template.keys().collect::<Vec<_>>());
             for (path, text) in &new {
-                let changed = String::from_utf8_lossy(text).lines().zip(String::from_utf8_lossy(&template[path]).lines()).filter(|(a, b)| a != b).count();
+                let changed = changed_lines(text, &template[path]);
                 let expected = match path.as_str() {
                     "Cargo.toml" | "Cargo.lock" | "package.json" | "pom.xml" => 1,
                     "app.toml" => 5,
@@ -544,6 +720,142 @@ mod tests {
             assert_eq!(manifest["app"]["wasm"].as_str(), Some(wasm));
             assert_eq!(manifest["app"]["owner"].as_str(), Some("Jane Doe <jane@example.com>"));
         }
+    }
+
+    /// The lines of `new` that `template` doesn't have, wherever they are.
+    fn changed_lines(new: &[u8], template: &[u8]) -> usize {
+        let mut left: Vec<&str> = std::str::from_utf8(template).unwrap().lines().collect();
+        std::str::from_utf8(new)
+            .unwrap()
+            .lines()
+            .filter(|line| match left.iter().position(|l| l == line) {
+                Some(i) => {
+                    left.remove(i);
+                    false
+                }
+                None => true,
+            })
+            .count()
+    }
+
+    /// Cargo keeps a lock's packages by name; renamed, the app's or kit's
+    /// own moves there, or the first build rewrites the lock.
+    #[test]
+    fn a_new_lock_keeps_cargos_order() {
+        for template in [TEMPLATE, TEMPLATE_KIT] {
+            let lock = template.iter().find(|(p, _)| *p == "Cargo.lock").unwrap().1;
+            for name in ["aa", "hello", "lead-form", "zz"] {
+                let named = lock_named(lock, name).unwrap();
+                let names: Vec<&str> = named.lines().filter(|l| l.starts_with("name = ")).collect();
+                assert!(names.is_sorted(), "{name}");
+                assert!(names.contains(&format!("name = \"{name}\"").as_str()));
+                assert_eq!(named.len(), lock.len() + name.len() - "hello".len());
+            }
+        }
+    }
+
+    fn kit_template() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("template-kit")
+    }
+
+    /// With the template's own name and no owner or group, `appos new
+    /// --kit` writes the kit template byte for byte, and the shell reads
+    /// its kit.toml.
+    #[test]
+    fn a_new_hello_kit_is_the_template() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("hello");
+        write_kit(&target, "hello", &builtin_wit(), "", "").unwrap();
+        assert_eq!(files_below(&target), files_below(&kit_template()));
+        assert_eq!(read_wit(&target), builtin_wit());
+        assert_eq!(read_wit(&kit_template()), builtin_wit(), "the kit template's wit/ is not the built-in contract");
+        assert_eq!(Lang::of(&target), None, "a kit carries no SDK");
+        assert_eq!(own(&target), Some(("hello".to_string(), vec!["kit:hello".to_string()])));
+        let (m, _, wasm) = appos_shell::Manifest::load(&target).unwrap();
+        assert!(m.is_kit());
+        assert_eq!(wasm, target.join("target/wasm32-wasip2/release/hello.wasm"));
+    }
+
+    /// Another kit differs from the template only in its names, owner and
+    /// group, and its WIT file is named after it.
+    #[test]
+    fn a_new_kit_changes_only_its_names_owner_and_group() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("lead-score");
+        write_kit(&target, "lead-score", &builtin_wit(), "Jane Doe <jane@example.com>", "Platform").unwrap();
+        let (new, template) = (files_below(&target), files_below(&kit_template()));
+        let renamed = |p: &String| if p == "api/hello.wit" { "api/lead-score.wit".to_string() } else { p.clone() };
+        assert_eq!(
+            new.keys().cloned().collect::<Vec<_>>(),
+            template.keys().map(renamed).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+        );
+        for (path, text) in &template {
+            let changed = changed_lines(&new[&renamed(path)], text);
+            let expected = match path.as_str() {
+                "Cargo.toml" | "Cargo.lock" | "api/hello.wit" => 1,
+                "src/lib.rs" => 3,
+                "kit.toml" => 9,
+                _ => 0,
+            };
+            assert_eq!(changed, expected, "{path}");
+        }
+        let kit: toml::Table = std::fs::read_to_string(target.join("kit.toml")).unwrap().parse().unwrap();
+        assert_eq!(kit["kit"]["id"].as_str(), Some("lead-score"));
+        assert_eq!(kit["kit"]["name"].as_str(), Some("Lead Score"));
+        assert_eq!(kit["kit"]["owner"].as_str(), Some("Jane Doe <jane@example.com>"));
+        assert_eq!(kit["kit"]["group"].as_str(), Some("Platform"));
+        assert_eq!(kit["kit"]["fake"].as_str(), Some("target/wasm32-wasip2/release/lead_score.wasm"));
+        assert_eq!(kit["grants"]["lead-score-read"]["functions"][0].as_str(), Some("kit:lead-score/greetings#greet"));
+        assert_eq!(own(&target), Some(("lead-score".to_string(), vec!["kit:lead-score".to_string()])));
+        appos_shell::Manifest::load(&target).unwrap();
+    }
+
+    /// A kit's name is its id, its WIT package and the start of its grant.
+    #[test]
+    fn a_kits_name_must_make_an_id_a_package_and_a_grant() {
+        for name in ["scoring", "lead-score", "crm2", "events-2026", "a"] {
+            assert!(check_kit_name(name).is_ok(), "{name}");
+        }
+        for name in ["2fa", "Scoring", "lead_score", "admin", "use", "list", "", &"a".repeat(56)] {
+            assert!(check_kit_name(name).is_err(), "{name:?}");
+            assert!(new_kit(name, "").is_err(), "{name:?}");
+        }
+    }
+
+    /// Once a kit is deployed, the platform's contract has its package and
+    /// its fake too. The kit has its own in api/, maybe changed: sync
+    /// leaves them out, and the kit isn't stale for it.
+    #[test]
+    fn a_kit_builds_against_the_platform_without_its_own_package() {
+        let root = tempfile::tempdir().unwrap();
+        let kit = root.path().join("scoring");
+        write_kit(&kit, "scoring", &builtin_wit(), "", "").unwrap();
+        let marker = "    // The platform's kits: appos new and appos sync add their interfaces.\n";
+        let mut platform = builtin_wit();
+        let appos =
+            platform["appos.wit"].replacen(marker, &format!("{marker}    import acme:crm/customers@0.1.0;\n    import kit:scoring/greetings@0.1.0;\n"), 1);
+        platform.insert("appos.wit".into(), appos);
+        platform.insert("deps/acme-crm/crm.wit".into(), "package acme:crm@0.1.0;\ninterface customers {}\n".into());
+        platform.insert("deps/kit-scoring/scoring.wit".into(), "package kit:scoring@0.1.0;\ninterface greetings {}\n".into());
+
+        assert_eq!(stale(&kit, &platform, "acme"), ["wit/ is not the contract of acme"]);
+        sync_files(&kit, &platform).unwrap();
+        let wit = read_wit(&kit);
+        assert!(wit.contains_key("deps/acme-crm/crm.wit"));
+        assert!(!wit.contains_key("deps/kit-scoring/scoring.wit"));
+        assert!(wit["appos.wit"].contains("    import acme:crm/customers@0.1.0;\n"));
+        assert!(!wit["appos.wit"].contains("kit:scoring"));
+        assert_eq!(stale(&kit, &platform, "acme"), Vec::<String>::new());
+        assert_eq!(sync_files(&kit, &platform).unwrap(), Vec::<String>::new());
+
+        let fakes: BTreeMap<String, Vec<u8>> =
+            ["acme-crm/kit.toml", "acme-crm/kit.wasm", "scoring/kit.toml", "scoring/kit.wasm"].iter().map(|p| (p.to_string(), b"x".to_vec())).collect();
+        assert_eq!(sync_fakes(&kit, &fakes).unwrap(), ["fakes/acme-crm"]);
+        assert_eq!(read_tree(&kit.join("fakes")).keys().collect::<Vec<_>>(), ["acme-crm/kit.toml", "acme-crm/kit.wasm"]);
+        // An app keeps all of it.
+        let app = root.path().join("events");
+        write_project(&app, "events", &platform, "", "", Lang::Rust).unwrap();
+        assert_eq!(read_wit(&app), platform);
     }
 
     #[test]

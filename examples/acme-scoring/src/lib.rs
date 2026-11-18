@@ -1,6 +1,6 @@
 //! Customer scores for Acme: a Wasm kit (kit.toml) on acme-platform. It
 //! calls the CRM kit (acme:crm/customers, grant crm-read), offers apps a
-//! score per customer (wit/scoring.wit, grant scoring-read), and shows the
+//! score per customer (api/scoring.wit, grant scoring-read), and shows the
 //! scores at /scoring. Apps call it like any kit: `appos sync` against the
 //! platform brings its WIT once it is deployed.
 //!
@@ -19,7 +19,7 @@ wit_bindgen::generate!({
             export appos:framework/handler@0.1.0;
             export acme:scoring/score@0.1.0;
         }",
-    path: ["wit/scoring.wit", "../acme-platform/wit/crm.wit", "../../wit/appos.wit"],
+    path: ["api/scoring.wit", "wit"],
     generate_all,
 });
 

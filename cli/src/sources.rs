@@ -29,16 +29,19 @@ fn digest(path: &Path) -> Option<[u8; 32]> {
     }
 }
 
-/// What `appos dev` watches in an app's directory: these folders and files
-/// (package.json, package-lock.json and tsconfig.json for a TypeScript app,
-/// build.zig and build.zig.zon for a Zig app, pom.xml for a Java app).
-/// `appos dev --help` and the guide name each of them.
+/// What `appos dev` watches in an app's or a kit's directory: these
+/// folders and files (package.json, package-lock.json and tsconfig.json for
+/// a TypeScript app, build.zig and build.zig.zon for a Zig app, pom.xml for
+/// a Java app, api/ and kit.toml for a kit). `appos dev --help` and the
+/// guide name each of them.
 pub(crate) const WATCHED: &[&str] = &[
     "src",
     "templates",
     "wit",
+    "api",
     ".cargo",
     "app.toml",
+    "kit.toml",
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",

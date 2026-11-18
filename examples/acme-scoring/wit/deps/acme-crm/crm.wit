@@ -1,0 +1,32 @@
+package acme:crm@0.1.0;
+
+/// Acme's customers, from the CRM.
+interface customers {
+    record customer {
+        id: string,
+        name: string,
+        /// Revenue in the last 12 months, in euros.
+        revenue: u32,
+        /// The account owner's email.
+        owner: string,
+    }
+
+    record note {
+        /// When it was added: 2026-11-18T09:30:00Z.
+        at: string,
+        /// Who added it: the signed-in user's email, else the app.
+        by: string,
+        text: string,
+    }
+
+    /// One customer; none for an unknown id. Grant crm-read.
+    get: func(id: string) -> option<customer>;
+    /// Customers whose name contains `text`, any case, at most 20, by
+    /// name. Grant crm-read.
+    search: func(text: string) -> list<customer>;
+    /// A customer's notes, newest first. Grant crm-read.
+    notes: func(id: string) -> list<note>;
+    /// Adds a note to a customer. A command: it runs after the request
+    /// commits, and not at all if the request fails. Grant crm-write.
+    add-note: func(id: string, text: string);
+}

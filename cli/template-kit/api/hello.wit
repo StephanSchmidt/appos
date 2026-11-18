@@ -1,0 +1,10 @@
+// What this kit offers apps. Once it is deployed, `appos sync` brings this
+// file into each app's wit/, and an app that holds the grant (kit.toml)
+// calls these functions. Change them here, in src/lib.rs and in kit.toml's
+// functions together; a deploy that changes what an app uses is refused.
+package kit:hello@0.1.0;
+
+interface greetings {
+    /// A greeting for `name`; "Hello!" without one.
+    greet: func(name: string) -> string;
+}

@@ -61,6 +61,19 @@ appos-data/
 !/cli/template-java/wit
 !/cli/template-java/src/**
 
+# A kit's hello world, for `appos new --kit`; embedded the same way.
+!/cli/template-kit/.gitignore
+!/cli/template-kit/Cargo.toml
+!/cli/template-kit/Cargo.lock
+!/cli/template-kit/kit.toml
+!/cli/template-kit/Makefile
+!/cli/template-kit/clippy.toml
+!/cli/template-kit/rust-toolchain.toml
+!/cli/template-kit/rustfmt.toml
+!/cli/template-kit/wit
+!/cli/template-kit/api/**
+!/cli/template-kit/src/**
+
 # Example apps, each built by an agent that knew only the appos binary, from
 # the request in its request.md. Each builds on its own, outside this repo.
 !/examples/README.md
@@ -75,6 +88,9 @@ appos-data/
 !/examples/*/clippy.toml
 !/examples/*/rust-toolchain.toml
 !/examples/*/wit/*.wit
+# A kit's WIT: what it offers (api/), the kits it calls (wit/deps/).
+!/examples/*/api/*.wit
+!/examples/*/wit/deps/**
 # The sign-in kit example: how auth.toml names it, and its kit.toml.
 !/examples/*/auth.toml
 !/examples/*/kit.toml

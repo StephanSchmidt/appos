@@ -29,7 +29,7 @@ mod usage;
 mod wasm_kit;
 mod web;
 
-pub use manifest::{APP_TOML, KIT_TOML, Manifest, Risk, validate_app_id};
+pub use manifest::{APP_TOML, KIT_TOML, Manifest, Risk, validate_app_id, validate_grant_name};
 
 use std::path::PathBuf;
 use std::sync::Arc;

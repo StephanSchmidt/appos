@@ -1,6 +1,7 @@
 //! Embeds the hello worlds `appos new` writes, file by file: cli/template
-//! (Rust) as TEMPLATE, cli/template-ts (TypeScript) as TEMPLATE_TS and
-//! cli/template-java (Java) as TEMPLATE_JAVA. A file added to a template is
+//! (Rust) as TEMPLATE, cli/template-ts (TypeScript) as TEMPLATE_TS,
+//! cli/template-java (Java) as TEMPLATE_JAVA and cli/template-kit (a kit,
+//! `appos new --kit`) as TEMPLATE_KIT. A file added to a template is
 //! in the next `appos new`, with no list to keep. Left out at the top: build
 //! output and local data (target/, appos-data/, node_modules/ and
 //! bindings/), wit/ (the contract comes from
@@ -15,12 +16,17 @@ const SKIP: &[&str] = &["target", "appos-data", "wit", "rustfmt.toml", "node_mod
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let mut out = String::new();
-    for (name, dir, what) in [("TEMPLATE", "template", "Rust"), ("TEMPLATE_TS", "template-ts", "TypeScript"), ("TEMPLATE_JAVA", "template-java", "Java")] {
+    for (name, dir, what) in [
+        ("TEMPLATE", "template", "Rust app"),
+        ("TEMPLATE_TS", "template-ts", "TypeScript app"),
+        ("TEMPLATE_JAVA", "template-java", "Java app"),
+        ("TEMPLATE_KIT", "template-kit", "kit"),
+    ] {
         let root = manifest_dir.join(dir);
         let mut files = Vec::new();
         walk(&root, &root, &mut files);
         files.sort();
-        writeln!(out, "/// The {what} hello world every new app starts from (cli/{dir}), by path.\npub const {name}: &[(&str, &str)] = &[")
+        writeln!(out, "/// The {what} hello world every new {what} starts from (cli/{dir}), by path.\npub const {name}: &[(&str, &str)] = &[")
             .expect("writing to a String");
         for (rel, abs) in &files {
             writeln!(out, "    ({rel:?}, include_str!({abs:?})),").expect("writing to a String");

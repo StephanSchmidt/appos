@@ -64,12 +64,15 @@ groups. auth.toml names it, kit.toml says what it may call; the README's
 
 Not an app either: a Wasm kit for acme-platform (Acme's shell, with its
 CRM as a Rust kit). It calls the CRM (grant crm-read), offers apps a score
-per customer (wit/scoring.wit, grant scoring-read) and shows the scores at
+per customer (api/scoring.wit, grant scoring-read) and shows the scores at
 /scoring. It deploys while the platform runs, as an app does:
 
     make check       # formatting, lints, tests
+    appos dev        # its page at http://127.0.0.1:8080/scoring, on the CRM's fake
     appos deploy     # builds it and sends kit.zip to the platform
 
+Its wit/ and fakes/ are acme-platform's (`appos sync --shell
+../../target/debug/acme-platform`), as `appos new --kit` lays a kit out.
 An app that holds scoring-read calls the new version from the next request
 on. A version that changes what an app uses is refused, naming the app.
 `appos off` makes its pages, and the apps that use it, answer "waiting";

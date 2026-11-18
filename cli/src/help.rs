@@ -13,12 +13,14 @@ its pages in the site layout, and gives it storage. Pages are templates
 them interactive without writing JavaScript.
 
 Apps:
-  appos new <name> [--group <team>] [--ts | --java]
+  appos new <name> [--group <team>] [--ts | --java | --kit]
                        create an app in ./<name>: a working hello world,
                        in TypeScript with --ts, in Java with --java. Change
-                       it into your app.
-  appos dev            build the app in this directory, run it in a local
-                       shell, and rebuild and reload it whenever you change it
+                       it into your app. With --kit, a kit instead: functions
+                       the platform's apps call (appos guide kits)
+  appos dev            build the app (or kit) in this directory, run it in a
+                       local shell, and rebuild and reload it whenever you
+                       change it
   appos build          build only
   appos review         write what appfuzz needs to review the app (its
                        grants and limits, your data and requests) and
@@ -71,7 +73,7 @@ change as it grows.
 
 Each section also prints on its own: appos guide <section>, one of files,
 lifecycle, request, page, templates, htmx, forms, storage, users, errors,
-styles, rules, git, dev, testing, typescript, java.
+styles, rules, git, dev, testing, typescript, java, kits.
 
 FILES (as appos new creates them)
   app.toml             id, name, version, owner (who to ask about the app,
@@ -351,8 +353,9 @@ LOCAL DEVELOPMENT
   templates/, wit/, .cargo/, app.toml, Cargo.toml, Cargo.lock, build.rs,
   rust-toolchain.toml, icon.svg and, for a TypeScript app, package.json,
   package-lock.json and tsconfig.json, for a Zig app build.zig and
-  build.zig.zon, for a Java app pom.xml, and rebuilds and reloads on every
-  change. If a build fails, the last good version keeps running.
+  build.zig.zon, for a Java app pom.xml, for a kit api/ and kit.toml, and
+  rebuilds and reloads on every change. If a build fails, the last good
+  version keeps running.
   The first build downloads crates, so it needs the network and takes a
   while; the app is ready when the shell prints "AppOS shell on ...", and
   again after each rebuild when it prints "loaded <app-id> ...". kv data is
@@ -465,9 +468,42 @@ JAVA
   tables pays for it every time: String.strip costs about 1.7 ms,
   String.trim nothing.
   make check runs appos build and mvn test (the tests run on the JVM).
+
+KITS
+  A kit is what apps call besides the page, like kv: functions behind
+  grants. Platforms bring their own, like a CRM. appos new <name> --kit
+  creates one in Rust, compiled to WebAssembly like an app: a function
+  apps call, greet, behind the grant <name>-read, and a page at
+  /<name> to try it. appos dev, build, sync, deploy, versions, log,
+  rollback, off and on work in its directory as in an app's.
+  The files that differ from FILES:
+  kit.toml             id, name, version, owner, group and the .wasm path,
+                       as in app.toml; wit: the files of what it offers;
+                       fake: what apps run in its place in appos dev;
+                       [grants.<grant>]: what each grant allows (the admin
+                       screen shows it) and its functions, as
+                       <package>/<interface>#<function>; [capabilities]: the
+                       grants it holds itself, the kits it calls
+  api/<name>.wit       what it offers: the package kit:<name>, its
+                       interfaces and functions. Once the kit is deployed,
+                       appos sync brings it into each app's wit/
+  src/lib.rs           the kit: wit_bindgen::generate! with its world, what
+                       it imports (registry, page, the kits it calls) and
+                       exports (handler, its page; its interfaces), then
+                       the functions, the page and the tests
+  wit/                 the platform's contract, as in an app, without the
+                       kit's own package; appos sync updates it
+  Its page is built as an app's: init() adds routes below /<kit-id>,
+  start() sets the HTML with page::set_html. To call another kit, add its
+  grant to [capabilities] and its interface to the world, like
+  import acme:crm/customers@0.1.0;, and run appos sync for its WIT and its
+  fake; appos dev runs the kit with the fakes of the kits it calls.
+  Apps call a kit once it is deployed and they hold its grant: appos sync
+  in the app brings its WIT and its fake. A deploy that changes what an app
+  uses is refused.
 "#;
 
-const HELP_NEW: &str = "appos new <name> [--group <team>] [--ts | --java]
+const HELP_NEW: &str = "appos new <name> [--group <team>] [--ts | --java | --kit]
 
 Creates ./<name> with a working hello world: a route, a menu entry, an Askama
 page, an htmx update and state in kv. <name> becomes the app id and its URL
@@ -484,6 +520,11 @@ platform's contract (wit/); otherwise against the one built into appos, which
 is all you need for local development. src/appos.rs (src/appos.ts,
 src/main/java/app/Appos.java) is the SDK of this appos; `appos sync`
 updates both later.
+
+With --kit, it creates a kit instead (appos guide kits): functions the
+platform's apps call, in Rust. <name> becomes the kit id, its WIT package
+kit:<name> (api/<name>.wit) and its grant <name>-read; it has a page at
+/<name> to try them. owner and group go into kit.toml.
 ";
 
 const HELP_DEV: &str = "appos dev [--addr 127.0.0.1:8080] [--shell <binary>]
@@ -492,7 +533,8 @@ Builds the app in this directory and runs it in a local shell at
 http://<addr>/<app-id>. Watches src/, templates/, wit/, .cargo/, app.toml,
 Cargo.toml, Cargo.lock, build.rs, rust-toolchain.toml, icon.svg and, for a
 TypeScript app, package.json, package-lock.json and tsconfig.json, for a Zig
-app build.zig and build.zig.zon, for a Java app pom.xml. File edits,
+app build.zig and build.zig.zon, for a Java app pom.xml, for a kit api/ and
+kit.toml. File edits,
 additions and deletions rebuild and reload the app. If a build fails, the last good version keeps
 running. kv data is kept in ./appos-data, with each route's last request
 that worked, for appos review. Stop with Ctrl-C; in the background, with
@@ -506,6 +548,9 @@ An app that calls a platform's kits runs on their fakes: kits in Wasm
 with the same functions and made-up data, which appos sync puts into
 fakes/ (one folder per kit, with its kit.toml). A fake keeps its data in
 appos-data/kits/<kit>. Without fakes/, only appos's own kits are there.
+
+In a kit's directory (kit.toml), it runs the kit the same way: its page at
+http://<addr>/<kit-id>, with the fakes of the kits it calls.
 
 --shell runs the app in a platform's binary instead, one built with
 appos_shell::Platform::main, with the platform's real kits.
@@ -755,6 +800,11 @@ says so. `git diff` shows what changed.
 
 appos dev and appos deploy warn when the SDK or wit/ differ from what the
 app runs against. Keep your own code out of the SDK: sync replaces it.
+
+In a kit's directory (kit.toml) it updates wit/ and fakes/ the same way,
+leaving out the kit's own package and its own fake: once the kit is
+deployed, the platform's contract has them too, and the kit has its own
+in api/. A kit carries no SDK.
 ";
 
 const HELP_GUIDE: &str = "appos guide [section]
@@ -762,7 +812,7 @@ const HELP_GUIDE: &str = "appos guide [section]
 Prints how apps work: routes, the page, htmx, storage, styles, rules.
 With a section, only that one: files, lifecycle, request, page, templates,
 htmx, forms, storage, users, errors, styles, rules, git, dev, testing,
-typescript, java.
+typescript, java, kits.
 ";
 
 /// A command's help, for `appos <command> --help`.
@@ -810,6 +860,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("testing", "TESTING"),
     ("typescript", "TYPESCRIPT"),
     ("java", "JAVA"),
+    ("kits", "KITS"),
 ];
 
 /// `appos guide [section]`: all of it, or one section.

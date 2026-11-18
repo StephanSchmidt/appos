@@ -148,11 +148,8 @@ pub fn deploy(file: Option<&str>) -> anyhow::Result<()> {
     let (id, zip) = match file {
         None => {
             // Best effort: an unreachable platform fails the deploy itself.
-            // A kit builds against what it chooses, not an app's contract.
             let dir = std::env::current_dir()?;
-            if !dir.join(appos_shell::KIT_TOML).is_file()
-                && let Ok(spec) = platform::fetch_spec(&p.url)
-            {
+            if let Ok(spec) = platform::fetch_spec(&p.url) {
                 scaffold::warn_if_stale(&dir, &spec.wit, &format!("platform {}", p.name));
             }
             pack_here()?

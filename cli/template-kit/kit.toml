@@ -1,0 +1,24 @@
+# A kit: functions the platform's apps call, behind grants, and a page of
+# its own. Deployed with `appos deploy`, as an app is.
+[kit]
+id = "hello"
+name = "Hello"
+version = "0.1.0"
+owner = ""
+group = ""
+wasm = "target/wasm32-wasip2/release/hello.wasm"
+wit = ["api/hello.wit"]    # what it offers apps
+# What apps run in its place in appos dev, after appos sync. This kit calls
+# nothing outside, so it is its own fake; one that does brings a fake with
+# made-up data.
+fake = "target/wasm32-wasip2/release/hello.wasm"
+
+# An app that holds a grant may call its functions. The admin screen
+# shows what each grant allows; policy.csv says who may use it.
+[grants.hello-read]
+allows = "Read greetings"
+functions = ["kit:hello/greetings#greet"]
+
+# The grants it holds itself: the kits it calls, as an app holds them.
+[capabilities]
+grant = []

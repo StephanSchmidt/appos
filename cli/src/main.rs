@@ -37,9 +37,9 @@ const GUIDE: Spec = Spec { positional: 1, ..Spec::bare("appos guide [section]") 
 const NEW: Spec = Spec {
     required: 1,
     positional: 1,
-    switches: &["--ts", "--java"],
+    switches: &["--ts", "--java", "--kit"],
     options: &["--group"],
-    ..Spec::bare("appos new <name> [--group <team>] [--ts | --java]")
+    ..Spec::bare("appos new <name> [--group <team>] [--ts | --java | --kit]")
 };
 const DEV: Spec = Spec { options: &["--addr", "--shell"], ..Spec::bare("appos dev [--addr 127.0.0.1:8080] [--shell <binary>]") };
 const SYNC: Spec = Spec { options: &["--shell"], ..Spec::bare("appos sync [--shell <binary>]") };
@@ -90,8 +90,11 @@ async fn run(cmd: &str, rest: &[String]) -> anyhow::Result<()> {
     match cmd {
         "guide" => help::guide(GUIDE.parse(rest)?.first()),
         "new" => {
-            let (name, group, lang) = new_args(rest)?;
-            scaffold::new(name, group, lang)
+            let (name, group, project) = new_args(rest)?;
+            match project {
+                scaffold::Project::App(lang) => scaffold::new(name, group, lang),
+                scaffold::Project::Kit => scaffold::new_kit(name, group),
+            }
         }
         "sync" => scaffold::sync(SYNC.parse(rest)?.option("--shell")),
         "build" => {
@@ -142,21 +145,23 @@ fn unknown(cmd: &str) -> anyhow::Error {
     anyhow::anyhow!("unknown command {cmd:?}; run `appos` for help")
 }
 
-/// `appos new <name> [--group <team>] [--ts | --java]`: the name, the group
-/// ("" if none) and the language.
-fn new_args(rest: &[String]) -> anyhow::Result<(&str, &str, scaffold::Lang)> {
+/// `appos new <name> [--group <team>] [--ts | --java | --kit]`: the name,
+/// the group ("" if none) and what to create.
+fn new_args(rest: &[String]) -> anyhow::Result<(&str, &str, scaffold::Project)> {
     let args = NEW.parse(rest)?;
     let group = match args.option("--group").map(str::trim) {
         Some("") => anyhow::bail!("--group needs a team, like Marketing; usage: {}", NEW.usage),
         group => group.unwrap_or_default(),
     };
-    let lang = match (args.switch("--ts"), args.switch("--java")) {
-        (true, true) => anyhow::bail!("--ts or --java, not both; usage: {}", NEW.usage),
-        (true, false) => scaffold::Lang::TypeScript,
-        (false, true) => scaffold::Lang::Java,
-        (false, false) => scaffold::Lang::Rust,
+    use scaffold::{Lang, Project};
+    let project = match (args.switch("--ts"), args.switch("--java"), args.switch("--kit")) {
+        (false, false, false) => Project::App(Lang::Rust),
+        (true, false, false) => Project::App(Lang::TypeScript),
+        (false, true, false) => Project::App(Lang::Java),
+        (false, false, true) => Project::Kit,
+        _ => anyhow::bail!("one of --ts, --java and --kit, not two; usage: {}", NEW.usage),
     };
-    Ok((args.first().unwrap_or_default(), group, lang))
+    Ok((args.first().unwrap_or_default(), group, project))
 }
 
 /// `appos log [--failures] [--before <n>]`.
@@ -211,12 +216,14 @@ mod tests {
     #[test]
     fn new_takes_a_name_a_group_and_a_language_in_any_order() {
         use scaffold::Lang::{Java, Rust, TypeScript};
-        assert_eq!(new_args(&args(&["events"])).unwrap(), ("events", "", Rust));
-        assert_eq!(new_args(&args(&["events", "--group", "Marketing"])).unwrap(), ("events", "Marketing", Rust));
-        assert_eq!(new_args(&args(&["--group", "Customer service", "events"])).unwrap(), ("events", "Customer service", Rust));
-        assert_eq!(new_args(&args(&["--group=Sales", "events"])).unwrap(), ("events", "Sales", Rust));
-        assert_eq!(new_args(&args(&["--ts", "events", "--group", "Sales"])).unwrap(), ("events", "Sales", TypeScript));
-        assert_eq!(new_args(&args(&["events", "--java"])).unwrap(), ("events", "", Java));
+        use scaffold::Project::{App, Kit};
+        assert_eq!(new_args(&args(&["events"])).unwrap(), ("events", "", App(Rust)));
+        assert_eq!(new_args(&args(&["events", "--group", "Marketing"])).unwrap(), ("events", "Marketing", App(Rust)));
+        assert_eq!(new_args(&args(&["--group", "Customer service", "events"])).unwrap(), ("events", "Customer service", App(Rust)));
+        assert_eq!(new_args(&args(&["--group=Sales", "events"])).unwrap(), ("events", "Sales", App(Rust)));
+        assert_eq!(new_args(&args(&["--ts", "events", "--group", "Sales"])).unwrap(), ("events", "Sales", App(TypeScript)));
+        assert_eq!(new_args(&args(&["events", "--java"])).unwrap(), ("events", "", App(Java)));
+        assert_eq!(new_args(&args(&["scoring", "--kit", "--group", "Platform"])).unwrap(), ("scoring", "Platform", Kit));
         for bad in [
             &["--group"][..],
             &["events", "--group", " "],
@@ -227,6 +234,8 @@ mod tests {
             &["a", "--ts", "--ts"],
             &["a", "--ts=yes"],
             &["a", "--ts", "--java"],
+            &["a", "--kit", "--ts"],
+            &["a", "--java", "--kit"],
         ] {
             assert!(new_args(&args(bad)).is_err(), "{bad:?}");
         }

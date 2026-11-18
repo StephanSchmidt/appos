@@ -11,7 +11,7 @@
 //! owner = "Jane Doe <jane@acme.com>"  # a deploy needs an owner and a group
 //! group = "Sales"
 //! wasm = "kit.wasm"                   # next to kit.toml
-//! wit = ["wit/scoring.wit"]           # what it offers
+//! wit = ["api/scoring.wit"]           # what it offers
 //! commands = ["acme:scoring/leads#add-lead"]   # its functions that are commands
 //! fake = "fake.wasm"                  # what appos dev runs in its place, if it has one
 //!
