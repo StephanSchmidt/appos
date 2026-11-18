@@ -20,6 +20,12 @@ capabilities their manifest grants, and people only what the platform's
 policy lets them (see [Who may do what](#who-may-do-what)).
 
 ```sh
+brew install stephanschmidt/appos/appos   # appos and appos-shell, macOS and Linux
+```
+
+Or build them from source:
+
+```sh
 make            # needs Rust 1.100+ and: rustup target add wasm32-wasip2
 make run        # the shell with the hello world at http://127.0.0.1:8080
 ```

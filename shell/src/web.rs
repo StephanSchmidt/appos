@@ -714,7 +714,7 @@ async fn install(headers: HeaderMap) -> Response {
         r#"#!/bin/sh
 set -e
 if ! command -v appos >/dev/null 2>&1; then
-  echo "appos is not installed. Build it from the AppOS repo: cargo install --path cli" >&2
+  echo "appos is not installed: brew install stephanschmidt/appos/appos" >&2
   exit 1
 fi
 appos login '{url}'

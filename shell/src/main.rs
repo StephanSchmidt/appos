@@ -3,6 +3,7 @@
 //!   appos-shell [--addr 127.0.0.1:8080] [--platform-addr IP:PORT] [--name NAME]
 //!               [--git URL] [--origin URL] [--data DIR] [--risk FILE]
 //!               [--auth FILE --policy FILE | --no-auth] [APP...]
+//!   appos-shell --version
 //!
 //! Each APP is a directory with an `app.toml`, or the `app.toml` itself.
 //! `--risk` rates the grants from 0 to 10, one `grant = level` per line.
@@ -66,6 +67,10 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> anyhow::Result<Optio
                 let path = value(&mut args, &arg)?;
                 opts.risk = appos_shell::Risk::load(std::path::Path::new(&path))?;
             }
+            "-V" | "--version" => {
+                println!("appos-shell {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
             "-h" | "--help" => {
                 println!(
                     "appos-shell [--addr 127.0.0.1:8080] [--platform-addr IP:PORT] [--name NAME] [--git URL] [--origin URL] [--data DIR] [--risk FILE] [--auth FILE --policy FILE | --no-auth] [APP...]"
@@ -95,6 +100,13 @@ mod tests {
         let parse = |args: &[&str]| parse_options(args.iter().map(|a| a.to_string())).unwrap().unwrap();
         assert!(!parse(&[]).no_auth);
         assert!(parse(&["--no-auth"]).no_auth);
+    }
+
+    #[test]
+    fn version_and_help_start_nothing() {
+        for flag in ["--version", "-V", "--help", "-h"] {
+            assert!(parse_options([flag].into_iter().map(String::from)).unwrap().is_none(), "{flag} would start the shell");
+        }
     }
 
     #[test]

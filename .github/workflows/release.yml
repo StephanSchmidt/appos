@@ -1,0 +1,101 @@
+name: release
+
+# Publishing a GitHub release (with your notes) builds appos and appos-shell
+# for macOS and Linux, attaches them to the release and points the Homebrew
+# formula in StephanSchmidt/homebrew-appos at it. For a release that is
+# already out: Actions > release > Run workflow, with its tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, like v0.9.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} --bin appos --bin appos-shell
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=appos-${{ matrix.target }}.tar.gz
+          mkdir dist
+          tar -czf "dist/$name" -C target/${{ matrix.target }}/release appos appos-shell
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum "$name"; else shasum -a 256 "$name"; fi > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # HOMEBREW_TAP_KEY: the private half of a deploy key with write access on
+  # StephanSchmidt/homebrew-appos, and on nothing else.
+  update-tap:
+    needs: upload
+    runs-on: ubuntu-latest
+    steps:
+      # The workflow's own commit, for render.sh: an older tag may not have it.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/tap
+          chmod 600 ~/.ssh/tap
+          # GitHub's published host key (api.github.com/meta), not whatever answers.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap -o IdentitiesOnly=yes"
+          git clone git@github.com:StephanSchmidt/homebrew-appos.git tap
+          .github/homebrew/render.sh "$version" dist > tap/appos.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appos.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "appos $version"
+          git push

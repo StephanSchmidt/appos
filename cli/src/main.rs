@@ -65,6 +65,10 @@ async fn main() {
             print!("{}", help::HELP);
             Ok(())
         }
+        Some("-V" | "--version") => {
+            print!("appos {}\n", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(cmd) if wants_help => match help::command(cmd) {
             Some(text) => {
                 print!("{text}");

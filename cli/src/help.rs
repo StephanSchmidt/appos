@@ -55,6 +55,7 @@ is nothing to configure.
                        crate with a known vulnerability
 
 Every command has its own help: appos <command> --help
+appos --version prints the version.
 
 Start: appos new <name>, cd <name>, appos dev, then read src/lib.rs and src/hello/.
 "#;

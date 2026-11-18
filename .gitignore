@@ -86,3 +86,7 @@ appos-data/
 !/examples/*/build.zig.zon
 # Java examples: the Maven build.
 !/examples/*/pom.xml
+
+# Releases: the binaries for macOS and Linux, and the Homebrew formula.
+!/.github/workflows/*.yml
+!/.github/homebrew/*
