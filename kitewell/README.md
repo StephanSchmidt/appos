@@ -30,8 +30,6 @@ The platform is the AppOS shell with one kit, `kitewell:booking` ([wit/booking.w
 
 A booking in progress is a draft. Its id is hard to guess, and the pages pass it on in their links (`?draft=`). `flow.next` tells a page where the customer goes after it.
 
-The platform has a plain page of its own for every step ([src/pages.rs](src/pages.rs), at /book/&lt;draft&gt;/&lt;step&gt;). While an app doesn't serve, because it is paused, rolled back or not deployed, `flow.next` sends customers to the platform's page for that step. Sales can pause their app and customers still book.
-
 ## Run it
 
 Rust, Node 24 and zig (for the TypeScript app), and the `appos` binary of this repo:
@@ -42,7 +40,7 @@ Rust, Node 24 and zig (for the TypeScript app), and the `appos` binary of this r
     (cd kitewell/workspace && npm install && appos build)
     cd kitewell && kitewell --dev packages workspace
 
-Then open http://127.0.0.1:8080/book. It goes to the sales app's package page. Pressing Enter reloads the apps after a rebuild. Leave out `workspace`, or `packages`, and the platform's own pages take over their steps.
+Then open http://127.0.0.1:8080/book. It goes to the sales app's package page. Pressing Enter reloads the apps after a rebuild.
 
 Try the offer codes KW-ACME-2026 and KW-NORDLICHT-2026, and KW-POLAR-2025, which expired. Drafts and bookings are kept in memory, or in a SQLite file given as `KITEWELL_DB`.
 
@@ -55,8 +53,8 @@ In production the platform runs with sign-in and the policy, `--auth auth.toml -
     src/booking.rs        the kit: its functions and grants
     src/catalog.rs        plans, prices, offers and the quote
     src/store.rs          drafts, offers, bookings and members in SQLite
-    src/pages.rs          the platform's own pages at /book
-    templates/            their templates, and the stylesheet every page shares
+    src/pages.rs          the platform's own page at /book, review
+    templates/            its templates, and the stylesheet every page shares
     screenshots/          the five steps of a booking
     policy.csv            who may use which grant in which app
     packages/             the sales team's app, Rust

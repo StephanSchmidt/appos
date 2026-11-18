@@ -10,8 +10,7 @@ package kitewell:booking@0.1.0;
 ///   setup      product      the workspace: members and invite links
 ///
 /// Review is the platform's own page, /book/<draft>. Each other slot is an
-/// app's page, and the platform has a plain page of its own for it
-/// (/book/<draft>/<slot>) that takes over while that app doesn't serve.
+/// app's page.
 ///
 /// A draft is the booking in progress. The platform keeps it under an id
 /// that is hard to guess: whoever has the id may change the draft, so the
@@ -130,7 +129,7 @@ interface flow {
     /// A draft; none for an unknown id. Grant booking-read.
     get: func(id: string) -> option<draft>;
     /// The path of a slot for a draft, to link to it: the app's page, or
-    /// the platform's own while the app doesn't serve. Grant booking-read.
+    /// the platform's own for review. Grant booking-read.
     link: func(id: string, to: slot) -> string;
     /// The path of the slot after `after`, to send the customer on. Grant
     /// booking-read.

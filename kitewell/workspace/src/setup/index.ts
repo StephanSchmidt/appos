@@ -1,6 +1,6 @@
 // The set-up module: step 5, right after the booking. The workspace is
 // there, and the customer adds their team. The platform links here with
-// ?draft=<id> while this app serves.
+// ?draft=<id>.
 
 import { type Module, get, post } from "../appos.ts";
 import * as web from "./web.ts";

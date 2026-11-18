@@ -4,7 +4,7 @@
 //! before any of this runs. The functions write at once; each write is
 //! harmless to repeat. The platform's own pages are in pages.rs.
 
-use appos_shell::kit::{Context, Grant, Kit, KitLinker, KitRoute};
+use appos_shell::kit::{Grant, Kit, KitLinker, KitRoute};
 
 use crate::catalog::{self, State};
 use crate::store::{Store, looks_like_email};
@@ -16,8 +16,8 @@ const CONFIGURE: &str = "kitewell:booking/configure@0.1.0";
 const TERMS: &str = "kitewell:booking/terms@0.1.0";
 const SETUP: &str = "kitewell:booking/setup@0.1.0";
 
-/// The grant for the platform's own pages at /book: review and book, and
-/// the plain page of each slot. It allows no function.
+/// The grant for the platform's own page at /book: review and book. It
+/// allows no function.
 pub const PAGES: &str = "booking-book";
 
 /// The slots apps own, and the path of each one's page. A slot not here
@@ -184,36 +184,31 @@ impl Booking {
         })
     }
 
-    /// The app page of a slot while its app serves; none for the
-    /// platform's own.
-    pub(crate) fn app_page(
-        &self,
-        serves: &dyn Fn(&str) -> bool,
-        slot: Slot,
-    ) -> Option<&'static str> {
-        let (_, path) = self.slots.iter().find(|(s, _)| *s == slot)?;
-        let app = path.split('/').find(|s| !s.is_empty())?;
-        serves(app).then_some(*path)
+    /// The page of a slot an app owns; none for review, the platform's own.
+    pub(crate) fn app_page(&self, slot: Slot) -> Option<&'static str> {
+        self.slots
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, path)| *path)
     }
 
-    /// Where a slot's page is for a draft: the app's while it serves, the
-    /// platform's own otherwise.
-    pub(crate) fn link(&self, serves: &dyn Fn(&str) -> bool, id: &str, to: Slot) -> String {
-        match (self.app_page(serves, to), to) {
-            (Some(path), _) => format!("{path}?draft={id}"),
-            (None, Slot::Review) => format!("/book/{id}"),
-            (None, slot) => format!("/book/{id}/{}", slot_name(slot)),
+    /// Where a slot's page is for a draft: the app's, or the platform's
+    /// own for review.
+    pub(crate) fn link(&self, id: &str, to: Slot) -> String {
+        match self.app_page(to) {
+            Some(path) => format!("{path}?draft={id}"),
+            None => format!("/book/{id}"),
         }
     }
 
-    pub(crate) fn next(&self, serves: &dyn Fn(&str) -> bool, id: &str, after: Slot) -> String {
+    pub(crate) fn next(&self, id: &str, after: Slot) -> String {
         let next = match after {
             Slot::Choose => Slot::Configure,
             Slot::Configure => Slot::Terms,
             Slot::Terms => Slot::Review,
             Slot::Review | Slot::Setup => Slot::Setup,
         };
-        self.link(serves, id, next)
+        self.link(id, next)
     }
 
     /// Books a draft as it is now, for the customer, who agreed to
@@ -265,16 +260,6 @@ impl Booking {
         email: &str,
     ) -> anyhow::Result<Result<Member, String>> {
         self.store.add_member(booking, name, email, &now())
-    }
-}
-
-fn slot_name(slot: Slot) -> &'static str {
-    match slot {
-        Slot::Choose => "choose",
-        Slot::Configure => "configure",
-        Slot::Terms => "terms",
-        Slot::Review => "review",
-        Slot::Setup => "setup",
     }
 }
 
@@ -353,7 +338,7 @@ impl Kit for Booking {
             ),
             Grant::new(
                 PAGES,
-                "Book on Kitewell's own pages, /book: review and book, and the plain page of each slot",
+                "Book on Kitewell's own page, /book: review and book",
                 &[],
                 1,
             ),
@@ -367,29 +352,13 @@ impl Kit for Booking {
         let b = self.clone();
         linker.func(FLOW, "get", move |_, (id,): (String,)| answer!(b.get(&id)))?;
         let b = self.clone();
-        linker.func(
-            FLOW,
-            "link",
-            move |cx: Context, (id, to): (String, Slot)| {
-                answer!(Ok::<_, anyhow::Error>(b.link(
-                    &|app| cx.serves(app),
-                    &id,
-                    to
-                )))
-            },
-        )?;
+        linker.func(FLOW, "link", move |_, (id, to): (String, Slot)| {
+            answer!(Ok::<_, anyhow::Error>(b.link(&id, to)))
+        })?;
         let b = self.clone();
-        linker.func(
-            FLOW,
-            "next",
-            move |cx: Context, (id, after): (String, Slot)| {
-                answer!(Ok::<_, anyhow::Error>(b.next(
-                    &|app| cx.serves(app),
-                    &id,
-                    after
-                )))
-            },
-        )?;
+        linker.func(FLOW, "next", move |_, (id, after): (String, Slot)| {
+            answer!(Ok::<_, anyhow::Error>(b.next(&id, after)))
+        })?;
         let b = self.clone();
         linker.func(FLOW, "booked", move |_, (id,): (String,)| {
             answer!(b.store.booking(&id))
@@ -524,22 +493,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_slot_is_the_apps_page_while_it_serves() {
+    fn each_slot_links_to_its_page() {
         let b = booking();
-        let all = |_: &str| true;
-        let no_workspace = |app: &str| app != "workspace";
-        assert_eq!(
-            b.next(&all, "d1", Slot::Choose),
-            "/workspace/configure?draft=d1"
-        );
-        assert_eq!(
-            b.next(&no_workspace, "d1", Slot::Choose),
-            "/book/d1/configure"
-        );
-        assert_eq!(b.next(&all, "d1", Slot::Terms), "/book/d1");
-        assert_eq!(b.next(&no_workspace, "d1", Slot::Review), "/book/d1/setup");
-        assert_eq!(b.link(&all, "d1", Slot::Terms), "/packages/terms?draft=d1");
-        assert_eq!(b.app_page(&|_| false, Slot::Choose), None);
+        assert_eq!(b.next("d1", Slot::Choose), "/workspace/configure?draft=d1");
+        assert_eq!(b.next("d1", Slot::Terms), "/book/d1");
+        assert_eq!(b.next("d1", Slot::Review), "/workspace/setup?draft=d1");
+        assert_eq!(b.link("d1", Slot::Terms), "/packages/terms?draft=d1");
+        assert_eq!(b.app_page(Slot::Review), None);
     }
 
     #[test]

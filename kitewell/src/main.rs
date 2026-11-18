@@ -22,8 +22,7 @@ use booking::{Booking, Slots};
 use types::Slot;
 
 /// The slots apps own, at the path of each one's page; review is the
-/// platform's own page, /book/<draft>. While an app doesn't serve, its
-/// slots are the platform's plain pages at /book/<draft>/<slot>.
+/// platform's own page, /book/<draft>.
 const SLOTS: Slots = &[
     (Slot::Choose, "/packages"),
     (Slot::Configure, "/workspace/configure"),
