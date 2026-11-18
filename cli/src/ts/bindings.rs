@@ -14,8 +14,12 @@
 //!                   ./bindings/node.mjs --test`): there the callbacks
 //!                   fail when called, so tests pass fakes instead
 //!
-//! Supported: bool, integers up to 32 bits, f64, string, list, option,
-//! tuple and record. Anything else in the WIT is an error naming the type.
+//! Supported: bool, integers, f64, string, list, option, tuple, record,
+//! enum (a union of strings: `"starter" | "team"`) and result (`Result`,
+//! `{ ok: true, value }` or `{ ok: false, error }`). 64-bit integers are
+//! numbers, exact up to 2^53, and only come back from the shell: no
+//! parameter takes one. Anything else in the WIT is an error naming the
+//! type.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -94,6 +98,17 @@ export function readBytes(v: DataView, o: number): Uint8Array {
 export function readList<T>(v: DataView, o: number, size: number, read: (v: DataView, o: number) => T): T[] {
   return listAt<T>(v.getUint32(o, true), v.getUint32(o + 4, true), size, read);
 }
+
+/** A WIT result: what a function answers, or why it couldn't. */
+export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
+
+export function resultOk<T, E>(value: T): Result<T, E> {
+  return { ok: true, value };
+}
+
+export function resultErr<T, E>(error: E): Result<T, E> {
+  return { ok: false, error };
+}
 "#;
 
 /// The files for `bindings/`, by name.
@@ -105,10 +120,19 @@ pub fn generate(resolve: &Resolve, world: WorldId) -> Result<Vec<(String, String
     let exports = exports(resolve, world);
 
     let mut files: BTreeMap<InterfaceId, File> = g.files.iter().map(|(id, name)| (*id, File::new(name))).collect();
-    // Records first, in the interface that defines them.
+    // Records and enums first, in the interface that defines them.
     for (&id, file) in &mut files {
         for (name, &ty) in &resolve.interfaces[id].types {
             let def = &resolve.types[ty];
+            if let TypeDefKind::Enum(e) = &def.kind {
+                let ts = pascal(name);
+                let cases: Vec<String> = e.cases.iter().map(|c| format!("\"{}\"", c.name)).collect();
+                file.body.push_str(&doc(&def.docs, ""));
+                writeln!(file.body, "export type {ts} = {};\n", cases.join(" | "))?;
+                writeln!(file.body, "const {}Cases: {ts}[] = [{}];\n", camel(name), cases.join(", "))?;
+                writeln!(file.body, "export function lift{ts}(n: number): {ts} {{\n  return {}Cases[n];\n}}\n", camel(name))?;
+                writeln!(file.body, "export function lower{ts}(x: {ts}): number {{\n  return {}Cases.indexOf(x);\n}}\n", camel(name))?;
+            }
             if let TypeDefKind::Record(r) = &def.kind {
                 let ts = pascal(name);
                 file.body.push_str(&doc(&def.docs, ""));
@@ -319,7 +343,7 @@ impl Gen<'_> {
             Type::Bool => "boolean".into(),
             Type::U8 | Type::U16 | Type::U32 | Type::S8 | Type::S16 | Type::S32 | Type::F64 => "number".into(),
             Type::String => "string".into(),
-            Type::U64 | Type::S64 => return Err(unsupported("a 64-bit integer")),
+            Type::U64 | Type::S64 => "number".into(),
             Type::F32 => return Err(unsupported("f32")),
             Type::Char => return Err(unsupported("char")),
             Type::ErrorContext => return Err(unsupported("error-context")),
@@ -342,10 +366,24 @@ impl Gen<'_> {
                         let parts = t.types.iter().map(|t| self.ts_type(t, f)).collect::<Result<Vec<_>>>()?;
                         format!("[{}]", parts.join(", "))
                     }
+                    TypeDefKind::Enum(_) => {
+                        let name = pascal(def.name.as_deref().unwrap_or("enum"));
+                        f.uses_type(&self.module_of(def.owner, "an anonymous enum")?, &name);
+                        name
+                    }
+                    TypeDefKind::Result(r) => {
+                        f.uses_type("./abi.ts", "Result");
+                        format!("Result<{}, {}>", self.ts_or_undefined(r.ok.as_ref(), f)?, self.ts_or_undefined(r.err.as_ref(), f)?)
+                    }
                     other => return Err(unsupported(kind_name(other))),
                 }
             }
         })
+    }
+
+    /// The TypeScript type of a result's side; `undefined` for none.
+    fn ts_or_undefined(&self, ty: Option<&Type>, f: &mut File) -> Result<String> {
+        ty.map_or_else(|| Ok("undefined".into()), |t| self.ts_type(t, f))
     }
 
     /// A value read from linear memory, as a TypeScript expression.
@@ -359,6 +397,9 @@ impl Gen<'_> {
             Type::U32 => format!("{v}.getUint32({o}, true)"),
             Type::S32 => format!("{v}.getInt32({o}, true)"),
             Type::F64 => format!("{v}.getFloat64({o}, true)"),
+            // Two halves: a number holds 2^53 exactly.
+            Type::U64 => format!("({v}.getUint32({o}, true) + {v}.getUint32({}, true) * 4294967296)", o.plus(4)),
+            Type::S64 => format!("({v}.getUint32({o}, true) + {v}.getInt32({}, true) * 4294967296)", o.plus(4)),
             Type::String => {
                 f.uses("./abi.ts", "readString");
                 format!("readString({v}, {o})")
@@ -367,6 +408,25 @@ impl Gen<'_> {
                 let def = &self.resolve.types[*id];
                 match &def.kind {
                     TypeDefKind::Type(t) => self.lift(t, v, o, f, depth)?,
+                    TypeDefKind::Enum(e) => {
+                        let lift = format!("lift{}", pascal(def.name.as_deref().unwrap_or("enum")));
+                        f.uses(&self.module_of(def.owner, "an anonymous enum")?, &lift);
+                        let tag = match e.tag() {
+                            Int::U8 => format!("{v}.getUint8({o})"),
+                            Int::U16 => format!("{v}.getUint16({o}, true)"),
+                            _ => format!("{v}.getUint32({o}, true)"),
+                        };
+                        format!("{lift}({tag})")
+                    }
+                    TypeDefKind::Result(r) => {
+                        let ts = format!("{}, {}", self.ts_or_undefined(r.ok.as_ref(), f)?, self.ts_or_undefined(r.err.as_ref(), f)?);
+                        let payload = o.plus(self.sizes.payload_offset(Int::U8, [r.ok.as_ref(), r.err.as_ref()]).size_wasm32());
+                        let ok = r.ok.as_ref().map_or_else(|| Ok("undefined".to_string()), |t| self.lift(t, v, &payload, f, depth))?;
+                        let err = r.err.as_ref().map_or_else(|| Ok("undefined".to_string()), |t| self.lift(t, v, &payload, f, depth))?;
+                        f.uses("./abi.ts", "resultOk");
+                        f.uses("./abi.ts", "resultErr");
+                        format!("({v}.getUint8({o}) === 0 ? resultOk<{ts}>({ok}) : resultErr<{ts}>({err}))")
+                    }
                     TypeDefKind::Record(_) => {
                         let lift = format!("lift{}", pascal(def.name.as_deref().unwrap_or("record")));
                         f.uses(&self.module_of(def.owner, "an anonymous record")?, &lift);
@@ -441,6 +501,11 @@ impl Gen<'_> {
                         let tag = next()?;
                         format!("({tag} === 0 ? undefined : {})", self.flat_lift(t, p, f)?)
                     }
+                    TypeDefKind::Enum(_) => {
+                        let lift = format!("lift{}", pascal(def.name.as_deref().unwrap_or("enum")));
+                        f.uses(&self.module_of(def.owner, "an anonymous enum")?, &lift);
+                        format!("{lift}({})", next()?)
+                    }
                     TypeDefKind::Tuple(t) => {
                         let ts = self.ts_type(ty, f)?;
                         let parts = t.types.iter().map(|t| self.flat_lift(t, p, f)).collect::<Result<Vec<_>>>()?;
@@ -463,16 +528,27 @@ impl Gen<'_> {
             Type::S8 | Type::S16 | Type::S32 => args.push(arg("i32", "number")),
             Type::F64 => args.push(arg("f64", "number")),
             Type::String => args.push(arg("string", "string")),
+            Type::U64 | Type::S64 => return Err(unsupported("a 64-bit integer as a parameter")),
             Type::Id(id) => match &self.resolve.types[*id].kind {
                 TypeDefKind::Type(t) => self.lower(t, expr, pre, args, f)?,
+                TypeDefKind::Enum(_) => {
+                    let def = &self.resolve.types[*id];
+                    let lower = format!("lower{}", pascal(def.name.as_deref().unwrap_or("enum")));
+                    f.uses(&self.module_of(def.owner, "an anonymous enum")?, &lower);
+                    args.push(Arg { expr: format!("{lower}({expr})"), kind: "u32", ts: "number" });
+                }
                 TypeDefKind::List(Type::U8) => args.push(arg("bytes", "Uint8Array")),
                 TypeDefKind::Option(t) => {
                     let zero = match self.deref(t) {
-                        Type::Bool => "false",
-                        Type::String => "\"\"",
-                        Type::Id(id) if matches!(self.resolve.types[id].kind, TypeDefKind::List(Type::U8)) => "new Uint8Array(0)",
-                        Type::Id(_) => return Err(unsupported("an option of a compound type as a parameter")),
-                        _ => "0",
+                        Type::Bool => "false".to_string(),
+                        Type::String => "\"\"".to_string(),
+                        Type::Id(id) => match &self.resolve.types[id].kind {
+                            TypeDefKind::List(Type::U8) => "new Uint8Array(0)".to_string(),
+                            // Any case: the shell ignores it without the option.
+                            TypeDefKind::Enum(e) => format!("\"{}\"", e.cases[0].name),
+                            _ => return Err(unsupported("an option of a compound type as a parameter")),
+                        },
+                        _ => "0".to_string(),
                     };
                     let t0 = f.temp();
                     pre.push(format!("const {t0} = {expr};"));
@@ -785,6 +861,31 @@ mod tests {
         assert_eq!(profile["exports"][1]["params"], json!(["u32"]));
         let scan = profile["callbacks"].as_array().unwrap().iter().find(|c| c["name"] == "appos_framework_kv_scan").unwrap();
         assert_eq!(scan["params"], json!(["string", "u32", "string", "u32", "bool", "bytes"]));
+    }
+
+    #[test]
+    fn enums_results_and_64_bit_integers() {
+        let files = generated(
+            "package t:t;
+            interface flow {
+                enum plan { starter, team }
+                record quote { plan: plan, cents: s64, total: u64, plans: list<plan> }
+                with-plan: func(id: string, plan: option<plan>) -> result<quote, string>;
+                done: func(id: string) -> result<_, string>;
+            }
+            world w { import flow; }",
+        );
+        let flow = &files["flow.ts"];
+        assert!(flow.contains("export type Plan = \"starter\" | \"team\";"), "{flow}");
+        assert!(flow.contains("plan: liftPlan(v.getUint8(o)),"), "{flow}");
+        assert!(flow.contains("cents: (v.getUint32(o + 8, true) + v.getInt32(o + 12, true) * 4294967296),"), "{flow}");
+        assert!(flow.contains("total: (v.getUint32(o + 16, true) + v.getUint32(o + 20, true) * 4294967296),"), "{flow}");
+        assert!(flow.contains("plans: readList<Plan>(v, o + 24, 1, (v1: DataView, o1: number): Plan => liftPlan(v1.getUint8(o1))),"), "{flow}");
+        assert!(flow.contains("export function withPlan(id: string, plan: Plan | undefined): Result<Quote, string> {"), "{flow}");
+        assert!(flow.contains("lowerPlan((t1 ?? \"starter\"))"), "{flow}");
+        assert!(flow.contains("(v.getUint8(0) === 0 ? resultOk<Quote, string>(liftQuote(v, 8)) : resultErr<Quote, string>(readString(v, 8)))"), "{flow}");
+        assert!(flow.contains("export function done(id: string): Result<undefined, string> {"), "{flow}");
+        assert!(files["abi.ts"].contains("export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };"));
     }
 
     #[test]

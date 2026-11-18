@@ -395,6 +395,9 @@ TYPESCRIPT
                        page.setHtml, kv.get, log.info. A function the
                        platform adds to its contract is there after the next
                        build. Don't edit it; it stays out of git
+  A kit's WIT arrives typed: records as interfaces, enums as unions of
+  strings ("team" | "business"), a result as { ok: true, value } or
+  { ok: false, error }, like a usecase's, 64-bit integers as numbers.
   Pages are html templates instead of Askama: html`<p>${name}</p>` escapes
   every value; another template, a list of them, or raw(text) go in as they
   are. A part htmx swaps is a function of its own in view.ts. The request:
