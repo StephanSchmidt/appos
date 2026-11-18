@@ -1,493 +1,117 @@
 # AppOS
 
-Marketing ships to production. So do sales and customer service: anyone
-with an idea and an AI agent. That takes shift left to the extreme, since
-development moves to the people who need the app. AppOS is one way to
-make it safe. Each idea is its own small app. Before it goes live it is
-checked and, where needed, hardened; [appfuzz](https://appfuzz.dev) is one
-way to automate that check (`appos review` sets it up). WebAssembly
-sandboxes it, and it may do only what its manifest grants and the policy
-lets its users do. Engineering owns the platform and gardens the live
-apps: it sees every app, who owns it, what it may do and how it runs,
-checks its packages for known vulnerabilities (`appos audit`, Rust and
-TypeScript apps for now), and can limit it, roll it back or turn it off.
+Marketing ships to production, and so do sales, customer service and
+anyone else with an idea and an AI agent. That takes shift left to the
+extreme, since development moves to the people who need the app. AppOS is
+one way to make it safe. Each idea is its own small app. Before it goes
+live it is checked and, where needed, hardened; [appfuzz](https://appfuzz.dev)
+is one way to automate that check. WebAssembly sandboxes the app, and it
+may do only what its manifest grants and the policy lets its users do.
+Engineering owns the platform and gardens the live apps: it sees every
+app, who owns it, what it may do and how it runs, checks its packages for
+known vulnerabilities, and can limit it, roll it back or turn it off.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/marketing-ships-dark.svg">
   <img alt="How marketing ships with AppOS. Marketing describes an idea to its AI agent, which writes a web app. The app is built to WebAssembly and deployed to AppOS. An automatic review, for example with appfuzz, checks it; once it passes, it runs in a sandbox that users reach. Platform engineering sets the rules for that step." src="docs/marketing-ships-light.svg">
 </picture>
 
-![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
-
-A shell that runs WebAssembly apps, written by anyone (or their agents),
-behind one layout. The shell owns the page and the data; apps get only the
-capabilities their manifest grants, and people only what the platform's
-policy lets them (see [Who may do what](#who-may-do-what)).
+## Install
 
 ```sh
 brew install stephanschmidt/appos/appos   # appos and appos-shell, macOS and Linux
 ```
 
-Or build them from source:
+Or build them from source with Rust 1.100+ and
+`rustup target add wasm32-wasip2`:
 
 ```sh
-make            # needs Rust 1.100+ and: rustup target add wasm32-wasip2
+make            # the shell, the CLI, the hello world and the Rust examples, with their checks
 make run        # the shell with the hello world at http://127.0.0.1:8080
 ```
 
-`make` builds the shell and the CLI, the hello world and the Rust example
-apps (each with its own check), and runs the checks.
 `make typescript`, `make zig` and `make java` check the other languages.
 
 ## Building an app
 
 ```sh
-appos new events --group Marketing  # a working hello world in ./events
-                                    # (--ts: TypeScript, --java: Java)
+appos new events --group Marketing  # a working hello world in ./events (--ts, --java)
 cd events
-appos dev                           # run it at http://127.0.0.1:8080/events; changes rebuild and reload
+appos dev                           # http://127.0.0.1:8080/events; changes rebuild and reload
 appos guide                         # how apps work
-appos review                        # writes appfuzz's files and the command that runs it
 ```
 
-`appos` with no arguments explains itself. Telling an agent "use the appos
-CLI to build an app" is meant to be enough.
+`appos` with no arguments explains itself, and telling an agent "use the
+appos CLI to build an app" is meant to be enough. The shell calls an app's
+`init()` once and its `start()` for each request, in a fresh sandbox; the
+app builds the page with host calls like `page::set-html` and `kv::get`
+([docs/apps.md](docs/apps.md)).
 
 ## Hardening
 
 Hardening means checking an app before it goes live and fixing what the
-check finds. `appos review` sets up the app review: the shell writes the
+check finds. `appos review` sets up the review: the shell writes the
 appfuzz manifest (grants, kv costs, the I/O budget, fuel, memory) and
 takes the data and one request per route from what you did in `appos
 dev`. [appfuzz](https://appfuzz.dev), one way to automate the review, runs
 it; `appos review` prints the command. Deploys don't run it yet, so run it
-before `appos deploy`. The deploy then checks the app as the shell does
-at startup (see Deploying).
-
-## Platforms
-
-A shell serves a platform API so the CLI can build against it, like a
-kubectl context. Bind it to an internal address to keep it off the public
-site:
-
-```sh
-appos-shell --name acme --addr 0.0.0.0:8080 --platform-addr 10.0.0.5:9090 \
-            --git https://gitlab.acme.com/marketing-apps --risk risk.toml \
-            --auth auth.toml --policy policy.csv apps/*
-```
-
-On a developer's machine, either of these connects:
-
-```sh
-curl -fsSL http://10.0.0.5:9090/_platform/install | sh
-appos login http://10.0.0.5:9090
-```
-
-A shell with sign-in takes a token on its platform API. `appos login` asks
-for one: an admin makes it on the admin screen at `/admin/token` and
-pastes it (or pipes it in, for CI). The token acts as them, checked against
-the policy at every call, so taking someone out of the policy stops their
-tokens at once. It lasts 30 days; `appos logout` ends it sooner. Only its
-hash is kept. With `--no-auth`, the API takes no token.
-
-Then `appos hosts` shows what the platform offers, `appos new` writes its
-contract (`wit/`) into new apps, and `appos sync` into existing ones
-(`appos deploy` warns when an app's contract differs). With `--git`, `appos new` also tells the
-user (or their agent) to push the app to `<git>/<app-id>.git`; appos never
-runs git itself, it only says how to use it. Platforms are kept in
-`~/.config/appos/config.toml` (or `$APPOS_CONFIG`); `appos platforms` and
-`appos use <name>` switch between them. Without `--platform-addr`, the API
-is served on the main address under `/_platform`.
+before `appos deploy`.
 
 ## Deploying
-
-A shell on one port, site and platform API together, and an app deployed
-to it:
 
 ```sh
 appos-shell --name demo              # http://127.0.0.1:8080; prints a link that signs you in as admin
 appos login http://127.0.0.1:8080    # open the link, then paste a token from /admin/token
-cd calculator && appos deploy        # http://127.0.0.1:8080/calculator
+cd events && appos deploy            # http://127.0.0.1:8080/events
 ```
 
-An app travels as one file, app.zip: app.toml, the .wasm, icon.svg and,
-for a Rust or TypeScript app, deps.json, the packages compiled into it (see
-[Gardening](#gardening)). `appos deploy` builds and packs it in memory; `appos
-pack` writes it (`target/app.zip`, the same bytes for the same app), and
-`appos deploy app.zip` sends one built elsewhere, by CI or another
-machine. app.toml
-names the app's owner, the person or team to ask about it, and its group,
-the team it belongs to; the admin screen groups apps by it. A deploy
-without either is refused:
-
-```toml
-[app]
-id = "calculator"
-name = "Calculator"
-version = "0.1.0"
-owner = "Jane Doe <jane@example.com>"   # appos new fills it in from git
-group = "Marketing"                     # appos new --group Marketing
-```
-
-The shell checks a deployed app as it does at startup, keeps its app.zip
-in `<data>/apps/<app-id>/<version>/` and makes it live; its kv data stays.
-A version is the version from app.toml followed by 32 hex digits from a
-SHA-256 hash of app.toml, the .wasm, icon.svg and deps.json. Stored
-versions are immutable: changing an icon creates a new version too.
-Versions use 1–200 ASCII letters, digits, dots, underscores, dashes or plus
-signs, so their stored bundles stay inside the app's directory.
-
-```sh
-appos versions             # live, retired, failed, refused or waiting, and why
-appos rollback             # back to the version deployed before the live one
-appos rollback 0.1.0-3f2a9c1d0e4b5867a8b9c0d1e2f30415 --reason "the new form loses leads"
-```
-
-If the live version fails 5 requests within a minute (timeouts, over
-budget, crashes), the shell rolls back to the version before it by itself.
-Then deploys wait: they are stored but go live only once an admin makes a
-version live on the admin screen. The builder can't ship over a failure an
-admin hasn't seen.
-
-`appos deploy` and `appos versions` first tell what happened to the app
-since the last look: automatic rollbacks, refused deploys, versions an
-admin or `appos rollback` made live, each with the reason.
-
-```sh
-appos log                  # everything that happened to the app, newest first
-appos log --failures       # refused deploys, automatic rollbacks, limits hit
-```
-
-An automatic rollback or a limit hit lists the failed requests behind it
-with their errors, so a builder or their agent can see why the app failed.
-Scripts get the same as JSON from `/_platform/log?app=<app-id>`.
-
-The admin screen and the platform API are for those the policy gives
-admin-read, to look, and admin-write, to change (see Who may do what); the
-API takes a token (see Platforms).
-The shell answers only under its own names: the host of `--origin`, of the
-platform listener, localhost and IP addresses, so a web page can't reach
-a shell on your machine under a name of its own (DNS rebinding). Behind a
-proxy, give `--origin` the address people use.
-Browser writes to app routes and platform endpoints must come from the
-same origin. A TLS terminating reverse proxy should set `X-Forwarded-Proto`
-to `https`.
-
-## Gardening
-
-Gardening means checking the live apps regularly: what failed, whose owner
-left, and which packages turned unsafe after the deploy. `appos audit`
-lists the live apps that use a package with a known vulnerability, and
-who owns them:
-
-```sh
-appos audit                # the live apps on the current platform
-appos audit --json         # the same as JSON, for scripts
-```
-
-`appos deploy` and `appos pack` put deps.json into a Rust app's app.zip:
-the crates.io crates compiled into its .wasm, as package URLs like
-`pkg:cargo/serde@1.0.228`. appos reads them from Cargo.lock and the
-crates' Cargo.toml as cargo resolves them for wasm32-wasip2, without
-running cargo: no dev- or build-dependencies, no proc-macros, only what
-the features and the target turn on.
-
-For a TypeScript app, deps.json holds the npm packages scriptc compiles
-into it (`pkg:npm/semver@7.7.3`): those `bindings/entry.ts` imports,
-theirs and so on, through node_modules as Node finds them, at the
-versions in package-lock.json, without running node, npm or scriptc. What
-scriptc serves itself (Node's builtins, polyfills of them) isn't listed.
-appos reads the imports from the syntax: an import that brings only
-types says so (`import type`), and every other one loads its module. That
-holds for JavaScript files, and for a TypeScript file when the nearest
-tsconfig.json above it sets `"verbatimModuleSyntax": true`, or there is
-none. New apps have it, and `appos sync` sets it in older ones. Packages
-from git, a tarball or another registry are left out with a warning, as
-their names can be another package's in the npm registry; set
-`APPOS_NPM_MIRRORS` to the URLs of the registry mirrors you install from.
-
-The shell keeps deps.json with the version; `/_platform/packages` lists
-it for every live app.
-
-`appos audit` matches these lists against the advisories OSV
-(https://osv.dev) publishes for each ecosystem: for crates.io those of
-RustSec and GitHub and the known malicious crates, for npm those of
-GitHub and the known malicious packages. It downloads all of them once a
-week into ~/.cache/appos, and the ones that changed since at most once an
-hour; it sends osv.dev no package names. For each app with a vulnerable
-package it names the owner, the advisory and the versions that fix it,
-and it exits with 1 if there is one, so CI can run it every day.
-Unmaintained and unsound crates are warnings.
-
-Where appos can't tell which packages are built in, the app.zip goes
-without deps.json and `appos deploy` and `appos pack` warn. For a Rust
-app: resolver 1 (edition 2015 or 2018 without `resolver = "2"`),
-rustflags that change the target's cfg, `[replace]`, a crate missing
-from the cargo cache (build the app first). For a TypeScript app: a
-TypeScript file under a tsconfig.json without verbatimModuleSyntax, a
-scriptc other than the one the template pins, a package-lock.json from
-before npm 7, a node_modules that isn't what package-lock.json says (run
-npm install). The audit lists those apps as not checked, like Java and
-Zig apps, which get no deps.json yet.
-
-It finds accidents, like a forgotten `cargo update` or `npm update`, not
-intent: the sandbox and the grants hold an app whatever it is built with.
-
-## Admin screen
-
-`/admin`, next to the platform API, one page. On top a console: what
-needs you, one app at a time (Seen clears it until something new
-happens); a screen with every app, its group and its last 16 minutes (or
-hours, days), needs-you first, turned-off apps in red, Find in its first
-line narrowing it by name, owner or group, an app's story, one minute's requests,
-its versions, a map by group. Left, browse: the App knob (a light per app, A to Z;
-click one for that app), Group (one group's apps) and Range. Right, what to
-do with the app (its story, requests, versions), its on/off slide
-(green LED while visitors get it, red once turned off) and three
-faders for its limits per request: memory, time and fuel (instructions).
-Bottom right, the platform: a power button (green while apps run) turns
-every app off, and back on, and the Freeze slide (up, amber) holds every new deploy for an admin. Like
-on a device, a control acts at once; each change is logged as admin and
-can be undone from its toast for ten minutes. Below: the last 30 days in numbers (apps live, deploys,
-what the platform stopped, time to recovery), the last hour in charts,
-one app in detail (its icon (`icon.svg`, sent in app.zip), owner, routes,
-its grants and their risk, versions with "Make live", last failures,
-"Turn off"), the inventory of all apps with their groups and owners, and what was
-refused, rolled back or turned off. It is live: within a
-second of a deploy, rollback or turn-off, and every few seconds while
-requests come in. The log, `/admin/log`: every event, newest first,
-filtered by text, app, kind, severity, who and days.
-
-The shell keeps it all in `<data>/platform.db`, separate from the apps' kv:
-every version, every event (deploys, refusals, rollbacks, limit hits, risk
-changes, limits set) and the requests per app and hour, all for good; of
-the requests themselves, the newest 5000 per app.
-
-## Risk
-
-The company that runs the shell rates each grant from 0 (harmless) to 10,
-in a file it keeps; apps can't change it:
-
-```toml
-# risk.toml, used with: appos-shell --risk risk.toml
-kv-read = 1
-kv-write = 2
-```
-
-An app is as risky as its riskiest grant; a grant without a level leaves
-the app unrated. The admin screen shows each app's risk, `appos hosts` the
-grants'. What a level means, such as who may use grants above 5, is up to
-the company.
+An app travels as one file, app.zip, and app.toml names its owner and its
+group; a deploy without them is refused. Each deploy is a new version that
+never changes. `appos versions` lists them and `appos rollback` goes back.
+If the live version fails 5 requests within a minute, the shell rolls back
+by itself and holds new deploys until an admin makes a version live.
+[docs/deploying.md](docs/deploying.md) has platforms, tokens, versions and
+the log.
 
 ## Who may do what
 
 An app's grants say what the app may do. The platform's policy says which
 people may make it do that, under the same names. A host call goes through
-only if both allow it; apps don't see who is signed in and check nothing.
-
-```sh
-appos-shell --auth auth.toml --policy policy.csv
-```
-
-The two files go together. Without them the shell runs on this machine
-only: it refuses an address or `--origin` other machines reach, and prints
-a link at each start, with a token that is new every time. The link signs
-in as `admin@localhost`, who may use every grant, the admin screen and the
-platform API; nobody else may use anything. `--no-auth` runs the shell
-open: anyone may do anything, on the admin screen and the platform API
-too; it says so at the start. `appos dev` runs that way, on localhost.
-
-```toml
-# auth.toml: how people sign in (dev, header, oidc or kit; see Sign-in)
-provider = "dev"         # anyone signs in as anyone; localhost only
-session-hours = 8        # the default
-```
+only if both allow it, and the app checks nothing itself.
 
 ```
 # policy.csv: p, who, where, what
 p, anyone, webinars, kv-read
 p, signed-in, webinars, kv-write
-p, group:sales, discounts, kv-*
-p, group:marketing, apps:Marketing, kv-read
-p, alice@acme.com, pricing, kv-read
-# the admin screen and the platform API: admin-read looks, admin-write changes
 p, group:platform, *, admin-*
-p, group:support, *, admin-read
-# g, who, group: puts someone in a group
-g, bob@acme.com, group:platform
 ```
 
-Who: an email, `group:<name>` (from the sign-in, or given with `g`),
-`signed-in` or `anyone`. Where: an app id, `apps:<group>` (the group in
-app.toml) or `*`. What: a grant or a pattern like `kv-*`. The admin
-screen's grants, admin-read and admin-write, go with `*` and by name: a
-pattern like `*` that would also give them is refused. What no line
-allows is denied. The rules
-are [casbin](https://casbin.org)'s, with a model built into the shell.
+People sign in through OIDC, a proxy's headers or a sign-in kit. Without a
+sign-in and a policy, the shell runs on this machine only and prints a link
+that signs you in as admin. [docs/access.md](docs/access.md) has the
+policy, sign-in and the risk level of each grant.
 
-A host call the policy denies ends the request and drops its writes. A
-visitor who isn't signed in is sent to sign in and comes back to the page;
-one who is gets "Not allowed", naming the app's owner. A denial is not the
-app failing: it never counts toward an automatic rollback.
+## Running the apps
 
-The shell checks the file every 2 s and reads it again when it changes; the
-admin log shows each change. A file with a mistake is refused, with the
-line, and the policy stays as it was; at startup it stops the shell.
+![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
 
-The admin screen is AdminKit's pages, a kit built into the shell: those
-with admin-read look, those with admin-write also change (with admin-read
-alone the controls show and don't act, and the header says "Look only");
-anyone else is sent to sign in or gets "Not allowed". The platform API
-asks the same of a token: admin-read for a GET, admin-write for a deploy
-or another change. It shows who is signed in, logs each change with
-their email ("Admin screen, ann@acme.com"), and lists the policy under
-Policy, as sentences by who, with a file that was refused and why. With
-`--platform-addr`, sign-in for the admin screen runs on that address: an
-OIDC identity provider needs `http://<platform-addr>/_auth/callback`
-registered too.
-
-## Sign-in
-
-auth.toml names one provider. The shell keeps the session in a signed
-cookie, so a provider runs only while someone signs in.
-
-```toml
-provider = "header"                     # a proxy in front signs people in
-trusted-proxies = ["10.0.0.2"]          # its headers count only from here
-email-header = "X-Forwarded-Email"      # these three are the defaults
-name-header = "X-Forwarded-User"
-groups-header = "X-Forwarded-Groups"    # comma separated
-sign-in-url = "/oauth2/start?rd={to}"   # {to}: the page to come back to
-sign-out-url = "/oauth2/sign_out"
-```
-
-```toml
-provider = "oidc"                       # Keycloak, Entra ID, Okta, Google, ...
-issuer = "https://login.acme.com"
-client-id = "appos"
-client-secret-env = "APPOS_OIDC_SECRET" # the secret is never in the file
-scopes = ["openid", "email", "profile"] # the default
-groups-claim = "groups"                 # where the groups are, if anywhere
-```
-
-The identity provider sends people back to `<origin>/_auth/callback`.
-
-### Your own sign-in
-
-Anything else is a sign-in kit: a kit in WebAssembly of the world
-`appos:auth/sign-in` ([wit-auth/auth.wit](wit-auth/auth.wit), also in
-`/_platform/spec` as `sign_in`). It exports `start` (show a page or send the
-browser to the identity provider) and `finish` (the form it posted, or the
-callback; the shell has checked the state) and returns a page, a redirect,
-an identity, or why not.
-
-```toml
-# auth.toml
-provider = "kit"
-kit = "acme-sign-in"                    # its directory, next to auth.toml
-
-# acme-sign-in/kit.toml
-[kit]
-id = "acme-sign-in"
-name = "Acme sign-in"
-version = "1.0.0"
-wasm = "acme-auth.wasm"
-[http]
-hosts = ["login.acme.com"]              # the only hosts it may call
-[config]                                # what config.get returns
-tenant = "acme"
-[config-env]                            # secrets: from the environment
-client-secret = "ACME_SECRET"
-```
-
-The kit is sandboxed like an app: no files, no environment, no storage.
-It may call `config.get` and `http.fetch`, which reaches only its [http]
-hosts, over https (http only to localhost), and follows no redirects, as
-any kit's fetch. Each step runs in a
-fresh instance with an app's fuel and memory, for at most 10 s. A kit
-that doesn't load stops the shell at startup; one that fails while someone
-signs in shows "Sign-in isn't working right now", and the site goes on.
-
-[examples/auth-github](examples/auth-github) signs in the members of one
-GitHub organization, with their teams as groups: Rust and wit-bindgen,
-`make build` makes `auth_github.wasm`.
-
-## Every request has a budget
-
-An endless loop or a page that eats memory stops when its request runs
-out of budget. Its visitor gets an error, the request counts as a failure
-(5 within a minute roll the app back, see Deploying) and the shell and
-the other apps keep running.
-
-Each request gets 1 billion instructions (fuel), 64 MB memory, 100 I/O
-units and 2 seconds; an app may ask for up to 30 seconds in app.toml
-(`[limits] seconds = 5`). An admin can set an app's memory (16–512 MB),
-time (1–30 s) and instructions (250 million–8 billion) on the admin screen;
-they stay across deploys until set back. The time limit stops an app
-wherever it is, also while it waits in a host call.
-Database reads and commits run off the async worker threads. Waiting for
-the KV connection or a SQLite writer lock uses the request's remaining
-time; an expired transaction rolls back its writes.
-The memory budget covers all Wasm memories in the request together;
-tables share a limit of 100,000 elements. Request bodies are limited to
-256 KB; unreadable or invalid UTF-8 form bodies are refused.
-Page output (including its head and fragment names) and init's route/menu
-metadata each have a 4 MB budget. A KV scan returns at most 1,000 rows and
-4 MB of keys and values, after merging the request's own writes.
-
-App logs and platform responses quote terminal control characters when
-printed. Every physical app log line carries its app id, and rendered
-output is capped at 64 KB per request. Native logging runs on a bounded
-worker queue: a closed or stalled collector may drop console messages,
-without blocking requests or losing the error details kept by the platform.
-
-## How an app works
-
-An app is a WebAssembly component with two functions (`wit/appos.wit`):
-
-- `init()` runs once when the shell loads the app. It registers routes
-  (with `:param` segments) and menu entries.
-- `start(handler, request)` runs once per request in a fresh sandbox. Like it
-  calls `log` and `kv`, the app builds the page with host calls:
-  `page::set-html(name, html)` ("page" is the whole page content),
-  `page::add-header(html)` for `<head>` (e.g. the app's own `<style>`),
-  `page::redirect`, `page::set-status`, and finally `page::done()`: the app stops
-  there and is unloaded, and the shell sends the result to the browser.
-  - For htmx requests, every other name replaces the content of the element
-    with that id.
-
-`{% block name %}` doubles as the fragment `name`: list it in
-`#[template(..., blocks = ["name"])]` and render it with `t.as_name()`, so one
-template serves the full page and its htmx updates.
-
-History restoration requests receive the full page, including the shell
-layout. `req.htmx` is true for fragment swaps and false for full-page
-loads, including history restoration. Responses vary by `HX-Request` and
-`HX-History-Restore-Request` so caches keep these representations separate.
-
-Apps are mounted at `/<app-id>/`. The manifest is small. `kv-read` grants
-`kv::get` and `kv::scan`, `kv-write` grants `kv::set` and `kv::delete`; an
-app that imports a kv function its manifest doesn't grant is refused:
-
-```toml
-[app]
-id = "events"
-name = "Events"
-version = "0.1.0"
-wasm = "target/wasm32-wasip2/release/events.wasm"
-
-[capabilities]
-grant = ["kv-read", "kv-write"]
-```
+The admin screen at `/admin` shows every app with its owner, group,
+grants, versions and requests. An admin turns an app off, sets its limits
+or makes an earlier version live there. Each request gets 1 billion
+instructions, 64 MB memory, 100 I/O units and 2 seconds; a request over
+budget stops, and the shell and the other apps keep running. `appos audit`
+lists the live apps that use a package with a known vulnerability, with
+their owners, for Rust and TypeScript apps so far.
+[docs/operations.md](docs/operations.md) has the admin screen, the budgets
+and the audit.
 
 ## Kits
 
 Besides `page`, `kv` and `users`, apps call the platform's kits:
 functions in WIT, each behind a grant. An app that holds a kit's grant
-imports its interface and calls its functions like its own; `appos sync`
-brings the kit's WIT into the app's `wit/`, and the bindings in each
-language come from it. AppOS checks the app's grant and the policy before
-a call reaches the kit; a kit never checks permissions itself.
+imports its interface and calls its functions like its own. AppOS checks
+the app's grant and the policy before a call reaches the kit; a kit never
+checks permissions itself.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/kits-dark.svg">
@@ -499,60 +123,23 @@ CRM kit and [acme-scoring](examples/acme-scoring). Solid arrows are queries,
 which answer at once and only read; the dashed arrow is a command, which goes
 out after the app's request commits.
 
-A kit is one of two things:
-
-- Rust, compiled into the platform. The platform team builds its shell
-  with `appos_shell::Platform::new().kit(...)`; the kit implements the
-  `Kit` trait: its WIT, its grants, the Rust behind each function and its
-  pages. [kitewell](kitewell) is a platform with one such kit, its booking
-  flow, and two apps by sales and product that call it.
-- WebAssembly, deployed like an app. `appos new crm --kit` writes one in
-  Rust: kit.toml (id, owner, group, grants and the functions each allows),
-  its WIT in `api/`. `appos dev`, `deploy`, `versions`, `rollback`, `off`
-  and `on` work in its folder, and it has versions, limits and an off
-  switch like an app. [examples/acme-scoring](examples/acme-scoring)
-  scores the customers of [acme-platform](examples/acme-platform)'s CRM
-  kit; `appos guide kits` has the details.
-
-A call an app waits for only reads. A change is a command: a function that
-returns nothing, sent once the caller's request commits and run by the kit
-after. A request that fails sends nothing; a command that fails is tried
-again, and one that keeps failing waits on the admin screen. A kit may
-have pages of its own, like Kitewell's `/book`; a Wasm kit's are at
-`/<kit-id>`. A Wasm kit reaches other services only through `http::fetch`,
-to the hosts in kit.toml's `[http]`, over https; apps have no network at
-all. While a kit is off, the apps that hold its grants answer 503 and
-their commands to it wait.
+A kit is Rust compiled into the platform, like the booking kit of
+[kitewell](kitewell), or WebAssembly deployed like an app, which
+`appos new crm --kit` starts. [docs/kits.md](docs/kits.md) has both kinds,
+commands and how a kit calls other services.
 
 ## Layout
 
 ```
 wit/appos.wit         the contract between shell and apps
 wit-auth/auth.wit     the contract between shell and sign-in kits
-shell/                the shell: library + appos-shell binary
-                      (axum, wasmtime, SQLite for kv and the platform
-                      database, platform API, admin screen)
+shell/                the shell: library + appos-shell binary (axum,
+                      wasmtime, SQLite for kv and the platform database)
 cli/                  the appos CLI; runs the same shell for `appos dev`
-cli/src/deps/         deps.json: the packages in an app, a lister per
-                      language (cargo/ for Rust); shell/src/deps/ matches
-                      them against OSV
-cli/template/         the hello world every new app starts from
-cli/template-ts/      the same in TypeScript (appos new --ts)
-cli/template-java/    the same in Java (appos new --java)
-cli/template-kit/     a kit in Rust, compiled to WebAssembly (appos new --kit)
-examples/             four apps (pricing, webinars, status, discounts) in
-                      Rust, TypeScript and Zig, each from a request; see
-                      its README
-examples/auth-github/  a sign-in kit: GitHub, teams as groups
-examples/acme-platform/ a platform with a Rust kit, Acme's CRM
-examples/acme-scoring/ a Wasm kit for it: customer scores
+cli/src/deps/         deps.json: the packages in an app, for `appos audit`
+cli/template*/        the hello world in Rust, TypeScript and Java, and a kit
+examples/             apps in Rust, TypeScript and Zig, each from a request,
+                      a sign-in kit and a platform with kits
 kitewell/             a SaaS on AppOS: a booking kit, apps by sales and product
+docs/                 deploying, access, operations, apps and kits in detail
 ```
-
-There is no SDK crate: bindings are generated in each app from its `wit/`,
-and the helpers (routes and modules, the request's time and dates, kv with
-JSON, form errors) are `src/appos.rs`. Both are part of the scaffold: the
-`appos` binary carries them, `appos new` writes them and `appos sync`
-brings an app up to date with the binary; `appos dev` and `appos deploy`
-warn when they differ. The template and the Rust examples carry the same
-copies, byte for byte (`cargo test -p appos` checks).
