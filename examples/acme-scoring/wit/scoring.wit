@@ -1,0 +1,10 @@
+package acme:scoring@0.1.0;
+
+/// How much a customer is worth a call, from Acme's CRM.
+interface score {
+    /// 0 to 100: revenue in the last 12 months gives 60 from 1 million
+    /// euros, 45 from 250,000, 30 from 50,000, else 15; each note on the
+    /// customer adds 10, up to 40. None for an unknown customer. Grant
+    /// scoring-read.
+    score: func(customer: string) -> option<u32>;
+}

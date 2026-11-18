@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::access::Policies;
 use crate::auth::Auth;
-use crate::kit::Kits;
+use crate::kit::{Kits, LiveKits};
 use crate::manifest::Risk;
 use crate::outbox::Outbox;
 use crate::platform::PlatformDb;
@@ -28,8 +28,9 @@ pub struct Shell {
     pub usage: Recorder,
     /// The grants' risk levels, as the company rates them.
     pub risk: Risk,
-    /// What apps call besides the page: kv and the platform's kits.
-    pub kits: Kits,
+    /// What apps call besides the page: kv, the platform's kits and the
+    /// Wasm kits' live versions.
+    pub kits: Arc<LiveKits>,
     /// Delivers the commands to the kits (outbox.rs).
     pub outbox: Outbox,
     /// Keep each route's last request that worked, for `appos review`.
@@ -55,6 +56,7 @@ pub struct Parts {
     pub data: PathBuf,
     pub platform: PlatformDb,
     pub risk: Risk,
+    /// The platform's own kits: the Wasm kits come as they load.
     pub kits: Kits,
     pub keep_examples: bool,
     pub auth: Option<Auth>,
@@ -65,8 +67,17 @@ impl Shell {
     /// Reads the state platform.db keeps and starts the usage writer and
     /// the kits' deliveries; in a Tokio runtime.
     pub fn new(p: Parts) -> anyhow::Result<Arc<Shell>> {
-        let state = State::open(p.platform.clone(), p.risk.clone())?;
-        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits, state.live(p.policy.clone()));
+        let kits = Arc::new(LiveKits::new(p.kits));
+        let state = State::open(p.platform.clone(), p.risk.clone(), kits.clone())?;
+        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), state.live(p.policy.clone()));
+        // A kit that went live or on: its interfaces get a delivery task,
+        // and waiting messages go at once.
+        let (mut changes, wake) = (state.changes(), outbox.clone());
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                wake.wake();
+            }
+        });
         Ok(Arc::new(Shell {
             origin: p.origin,
             name: p.name,
@@ -78,7 +89,7 @@ impl Shell {
             platform: p.platform,
             risk: p.risk,
             outbox,
-            kits: p.kits,
+            kits,
             keep_examples: p.keep_examples,
             auth: p.auth,
             policy: p.policy,

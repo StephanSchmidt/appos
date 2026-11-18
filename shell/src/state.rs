@@ -8,6 +8,11 @@
 //!
 //! Requests read only memory. Frozen deploys and paused apps matter only to
 //! changes, so they are read from platform.db under the change lock.
+//!
+//! A Wasm kit is held like an app, under its id. Its version goes live
+//! only if everything loaded that uses it still fits it, and an app's only
+//! if it fits the kits' live versions (`State::fits`). What uses a kit
+//! waits while the kit doesn't serve (`Live::waits`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -19,7 +24,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::access::{Access, Policies};
 use crate::auth::{Identity, Who};
 use crate::deploy::{Ask, FAILURE_WINDOW, FAILURES_BEFORE_ROLLBACK};
-use crate::kit::User;
+use crate::kit::{Kits, LiveKits, User};
 use crate::manifest::Risk;
 use crate::platform::{Actor, Event, NewVersion, PlatformDb, Rollback, Target, Version, VersionStatus, now_ms};
 use crate::runtime::{AdminLimits, Budget, LoadedApp};
@@ -36,11 +41,12 @@ fn held_reason(pause: &Event) -> String {
 }
 
 /// What is live, for kits: the apps that serve (loaded and on, as `State`
-/// has them now) and the policy. Cheap to clone.
+/// has them now), the kits and the policy. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct Live {
     apps: Arc<RwLock<BTreeMap<String, Arc<LoadedApp>>>>,
     off: Arc<RwLock<BTreeSet<String>>>,
+    kits: Option<Arc<LiveKits>>,
     /// None: no policy, everyone may use every grant.
     policy: Option<Arc<Policies>>,
 }
@@ -52,13 +58,40 @@ impl std::fmt::Debug for Live {
 }
 
 impl Live {
+    /// Whether the app (or Wasm kit) serves: loaded, on, and not waiting
+    /// for a kit.
     pub fn serves(&self, id: &str) -> bool {
-        self.apps.read().contains_key(id) && !self.off.read().contains(id)
+        let Some(app) = self.apps.read().get(id).cloned() else { return false };
+        !self.off.read().contains(id) && self.waits(&app).is_none()
+    }
+
+    /// The kit `app` waits for, if one it uses (or one they use) doesn't
+    /// serve: a Wasm kit not loaded or off, a Rust kit that isn't up.
+    pub fn waits(&self, app: &LoadedApp) -> Option<String> {
+        self.kit_waits(&self.kits.as_ref()?.now(), &app.manifest.capabilities.grant)
+    }
+
+    /// The kit what holds `grants` waits for, as `waits`. A Wasm kit is
+    /// up once a version is loaded (`Kit::up`).
+    pub(crate) fn kit_waits(&self, kits: &Kits, grants: &[String]) -> Option<String> {
+        let off = self.off.read();
+        kits.waits(grants, &|id| !off.contains(id))
+    }
+
+    /// The kits now; the built-in ones without a platform.
+    pub(crate) fn kits(&self) -> Kits {
+        self.kits.as_ref().map_or_else(Kits::builtin, |k| k.now())
     }
 
     #[cfg(test)]
     pub(crate) fn with_policy(policy: Arc<Policies>) -> Live {
         Live { policy: Some(policy), ..Live::default() }
+    }
+
+    /// With these kits, fixed.
+    #[cfg(test)]
+    pub(crate) fn of_kits(kits: Kits) -> Live {
+        Live { kits: Some(Arc::new(LiveKits::new(kits))), ..Live::default() }
     }
 
     /// What the policy lets `user` use of `held`, a kit's grants, as `name`:
@@ -83,29 +116,40 @@ type Failures = BTreeMap<String, (String, Vec<(Instant, i64)>)>;
 pub struct State {
     platform: PlatformDb,
     risk: Risk,
+    kits: Arc<LiveKits>,
     apps: Arc<RwLock<BTreeMap<String, Arc<LoadedApp>>>>,
     off: Arc<RwLock<BTreeSet<String>>>,
     limits: RwLock<BTreeMap<String, AdminLimits>>,
     failures: Mutex<Failures>,
     /// Changes happen one at a time, each only for its write and swap.
     change: tokio::sync::Mutex<()>,
+    /// Told when what serves may have changed: a version went live, or
+    /// an app was turned on. The outbox looks then (shell.rs).
+    changed: tokio::sync::watch::Sender<()>,
 }
 
 impl State {
     /// The state platform.db keeps: which apps are off and their limits.
     /// The shell doesn't start without it.
-    pub fn open(platform: PlatformDb, risk: Risk) -> anyhow::Result<State> {
+    pub fn open(platform: PlatformDb, risk: Risk, kits: Arc<LiveKits>) -> anyhow::Result<State> {
         let off = platform.off_apps().context("could not read which apps are off")?;
         let limits = platform.limits().context("could not read the apps' limits")?;
         Ok(State {
             platform,
             risk,
+            kits,
             apps: Default::default(),
             off: Arc::new(RwLock::new(off.into_iter().collect())),
             limits: RwLock::new(limits),
             failures: Default::default(),
             change: Default::default(),
+            changed: tokio::sync::watch::Sender::new(()),
         })
+    }
+
+    /// Changes when what serves may have changed.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 
     pub fn app(&self, id: &str) -> Option<Arc<LoadedApp>> {
@@ -121,9 +165,10 @@ impl State {
         self.off.read().contains(id)
     }
 
-    /// Which apps serve and the policy, for kits (`Context::serves`).
+    /// Which apps serve, the kits and the policy, for kits
+    /// (`Context::serves`).
     pub fn live(&self, policy: Option<Arc<Policies>>) -> Live {
-        Live { apps: self.apps.clone(), off: self.off.clone(), policy }
+        Live { apps: self.apps.clone(), off: self.off.clone(), kits: Some(self.kits.clone()), policy }
     }
 
     /// What an admin set for the app's requests.
@@ -136,24 +181,63 @@ impl State {
         Budget::of(&app.manifest, self.limits_of(&app.manifest.app.id))
     }
 
-    /// Apps that platform.db needn't hear of: from folders, at startup and
-    /// on `appos dev`'s reload, and the live versions loaded at startup.
-    pub fn insert_loaded(&self, apps: impl IntoIterator<Item = Arc<LoadedApp>>) {
+    /// Apps (and kits) that platform.db needn't hear of: from folders, at
+    /// startup and on `appos dev`'s reload, and the live versions loaded
+    /// at startup. Each goes live if it fits (`fits`).
+    pub async fn insert_loaded(&self, apps: impl IntoIterator<Item = Arc<LoadedApp>>) -> anyhow::Result<()> {
+        let _change = self.change.lock().await;
         for app in apps {
-            self.swap_in(app);
+            let kits = self.fits(&app)?;
+            self.swap_in(app, kits);
         }
+        Ok(())
     }
 
-    fn swap_in(&self, app: Arc<LoadedApp>) {
+    /// Whether `app` may go live now: its id is no other kind's, what it
+    /// uses of the Wasm kits fits their live versions, and if it is a
+    /// kit, what uses it fits its new version. For a kit, answers the
+    /// kits with it, checked. Under the change lock: what is live may
+    /// have changed while it loaded.
+    pub fn fits(&self, app: &LoadedApp) -> anyhow::Result<Option<Kits>> {
+        let id = &app.manifest.app.id;
+        let apps = self.apps.read();
+        if let Some(other) = apps.get(id)
+            && other.is_kit() != app.is_kit()
+        {
+            let (is, isnt) = if other.is_kit() { ("a kit", "an app") } else { ("an app", "a kit") };
+            bail!("{id} is {is} here, not {isnt}");
+        }
+        for kit in apps.values().filter_map(|a| a.kit.as_ref()).filter(|k| k.id != *id) {
+            kit.fits(None, &app.uses).map_err(|e| anyhow::anyhow!("{id} uses kit {}: {e}; build against the platform's WIT (appos sync)", kit.id))?;
+        }
+        let Some(v) = &app.kit else {
+            anyhow::ensure!(!self.kits.now().taken().contains(id.as_str()), "app id {id:?} is a kit's name");
+            return Ok(None);
+        };
+        let old = self.kits.live(id);
+        for dependent in apps.values().filter(|a| a.manifest.app.id != *id) {
+            v.fits(old.as_deref(), &dependent.uses)
+                .map_err(|e| anyhow::anyhow!("{} uses {id}: {e}; a new version keeps what is used", dependent.manifest.app.id))?;
+        }
+        Ok(Some(self.kits.with(v)?))
+    }
+
+    /// Makes `app` live; `kits` (from `fits`) if it is a kit.
+    fn swap_in(&self, app: Arc<LoadedApp>, kits: Option<Kits>) {
         let id = app.manifest.app.id.clone();
         self.failures.lock().remove(&id);
+        if let (Some(v), Some(kits)) = (&app.kit, kits) {
+            self.kits.put(v.clone(), kits);
+        }
         self.apps.write().insert(id, app);
+        self.changed.send_replace(());
     }
 
     /// A loaded deploy, `v`: goes live, or waits while the app is paused or
     /// deploys are frozen. Returns why it waits.
     pub async fn deployed(&self, app: Arc<LoadedApp>, v: NewVersion, started: Instant) -> anyhow::Result<Option<String>> {
         let _change = self.change.lock().await;
+        let kits = self.fits(&app)?;
         let held = self
             .platform
             .run(move |db| {
@@ -169,7 +253,7 @@ impl State {
             })
             .await?;
         if held.is_none() {
-            self.swap_in(app);
+            self.swap_in(app, kits);
         }
         Ok(held)
     }
@@ -186,6 +270,7 @@ impl State {
     /// the event's id.
     pub async fn roll_back(&self, app_id: &str, label: Option<&str>, ask: Ask, to: &Version, app: Arc<LoadedApp>) -> anyhow::Result<i64> {
         let _change = self.change.lock().await;
+        let kits = self.fits(&app)?;
         let risk = self.risk.of_app(&app.manifest);
         let (id, label, expected) = (app_id.to_string(), label.map(str::to_string), to.id);
         let event = self
@@ -207,7 +292,7 @@ impl State {
                 db.rolled_back(&id, &to, from.as_ref(), &why)
             })
             .await?;
-        self.swap_in(app);
+        self.swap_in(app, kits);
         Ok(event)
     }
 
@@ -240,10 +325,11 @@ impl State {
             .await?;
         let mut off = self.off.write();
         if on {
-            off.remove(app_id)
+            off.remove(app_id);
+            self.changed.send_replace(());
         } else {
-            off.insert(app_id.to_string())
-        };
+            off.insert(app_id.to_string());
+        }
         Ok(event)
     }
 
@@ -279,6 +365,7 @@ impl State {
         for id in &ids {
             off.remove(id);
         }
+        self.changed.send_replace(());
         Ok(ids)
     }
 

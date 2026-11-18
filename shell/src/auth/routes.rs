@@ -604,7 +604,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn the_policy_page_reads_the_rules_and_says_when_a_change_is_refused() {
-        let csv = "p, group:platform, *, admin\np, anyone, test, kv-*\np, signed-in, apps:Tests, kv-write\np, anyone, tset, kv-read\ng, ann@acme.com, group:platform\n";
+        let csv = "p, group:platform, *, admin\np, anyone, test, kv-*\np, signed-in, apps:Tests, kv-write\np, anyone, tset, kv-read\np, anyone, *, score-read\ng, ann@acme.com, group:platform\n";
         let (dir, shell) = crate::testing::shell_with_policy("provider = \"dev\"", csv).await;
         let app = both(&shell);
         // Ann is an admin by the file's g line alone.
@@ -622,7 +622,8 @@ pub(crate) mod tests {
             r#"href="/admin/apps/test">Test</a>"#,
             "the apps of group <b>Tests</b>",
             "<b>tset</b> <span class=\"quiet\">(no app of that id here)</span>",
-            "5 lines from",
+            "<b>score-read</b> <span class=\"quiet\">(no kit offers it now)</span>",
+            "6 lines from",
         ] {
             assert!(body.contains(said), "{said}: {body}");
         }

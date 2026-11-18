@@ -71,7 +71,7 @@ pub async fn prepare(dir: &Path, data: &Path, wasm: &str) -> anyhow::Result<Revi
     let path = dir.to_path_buf();
     let checked = tokio::task::spawn_blocking(move || Bundle::from_dir(&path)?.checked()).await??;
     // init can't use kv; the routes are all this load is for.
-    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &crate::kit::Kits::builtin(), &checked).await?;
+    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &crate::kit::Kits::builtin(), &checked, data).await?;
     let m = &app.manifest;
     let (entries, kept) = match data.join("appos.db") {
         db if db.is_file() => {

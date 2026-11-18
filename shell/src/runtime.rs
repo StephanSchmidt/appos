@@ -6,6 +6,10 @@
 //! entries. `call` runs once per request, in a fresh instance, as one kv
 //! transaction (tx.rs).
 //!
+//! A Wasm kit (wasm_kit.rs) loads here too: its imports are checked as an
+//! app's, and if it exports the handler it has pages like an app, in its
+//! own WASI (its directory, the network, its configuration).
+//!
 //! A request has a budget: fuel (instructions), memory, I/O units and time.
 //! Fuel stops a loop, but not an app waiting in a host call, such as a
 //! sleep; so apps run async, and the time limit drops the request wherever
@@ -13,6 +17,7 @@
 //! strike there too.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +30,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::access::Access;
 use crate::bundle::Checked;
-use crate::kit::{self, About, Context, Kits, User};
+use crate::kit::{self, About, Context, Kits, Use, User};
 use crate::manifest::Manifest;
 use crate::platform::Outcome;
 use crate::state::Live;
@@ -169,11 +174,14 @@ pub struct Failed {
     pub error: anyhow::Error,
     /// The last lines the app logged or printed (a panic message).
     pub output: Vec<String>,
+    /// The Wasm kit that trapped, if one did: its id and label. The
+    /// failure counts toward its automatic rollback, not the app's.
+    pub kit: Option<(String, String)>,
 }
 
 impl Failed {
     fn new(kind: Outcome, error: anyhow::Error) -> Self {
-        Failed { kind, error, output: vec![] }
+        Failed { kind, error, output: vec![], kit: None }
     }
 }
 
@@ -235,6 +243,9 @@ pub struct Ctx {
     /// A Wasm kit this store called went over its budget, which is this
     /// request's.
     over_kit: bool,
+    /// The Wasm kit that trapped in a call from this store: its id and
+    /// label.
+    kit_failed: Option<(String, String)>,
 }
 
 /// Track allocations across all memories/tables in the store. Wasmtime
@@ -303,8 +314,20 @@ pub struct LoadedApp {
     /// Requests run side by side (read). One that runs again after a
     /// conflict runs alone (write), so it can't conflict again.
     turns: tokio::sync::RwLock<()>,
-    pre: AppPre<Ctx>,
+    /// None for a kit without pages.
+    pre: Option<AppPre<Ctx>>,
     db: Db,
+    /// The kits' functions it imports: what their new versions must keep.
+    pub(crate) uses: HashMap<String, Use>,
+    /// What it offers, if it is a Wasm kit.
+    pub(crate) kit: Option<Arc<crate::wasm_kit::KitVersion>>,
+}
+
+impl LoadedApp {
+    /// Whether it is a Wasm kit.
+    pub fn is_kit(&self) -> bool {
+        self.kit.is_some()
+    }
 }
 
 /// Requests one app may run at once: one per core of this machine. More
@@ -362,19 +385,15 @@ fn import_types(engine: &Engine, component: &Component) -> HashMap<String, wasmt
     uses
 }
 
-/// Links appos:framework/log, which Wasm kits may use too.
-pub(crate) fn add_log(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
-    types::add_to_linker::<Ctx, HasSelf<Ctx>>(linker, |c| c)?;
-    log::add_to_linker::<Ctx, HasSelf<Ctx>>(linker, |c| c)?;
-    Ok(())
-}
-
 /// Refuses grants no kit offers, and imports the manifest doesn't grant.
+/// A kit may import all of WASI.
 fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -> anyhow::Result<()> {
     let unknown: Vec<&String> = m.capabilities.grant.iter().filter(|g| kits.grant(g).is_none()).collect();
     if let Some(g) = unknown.first() {
-        bail!("unknown capability {g:?}; known: {}", kits.names().join(", "));
+        let kit = if m.is_kit() { "" } else { "; a Wasm kit's grants come once it is deployed" };
+        bail!("unknown capability {g:?}; known: {}{kit}", kits.names().join(", "));
     }
+    let (file, who) = (m.file(), if m.is_kit() { "kits" } else { "apps" });
     let mut problems = Vec::new();
     for (import, functions) in imports {
         let short = import.rsplit('/').next().unwrap_or(import);
@@ -384,7 +403,7 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -
             for f in functions {
                 match kits.grant_for(import, f) {
                     Some(g) if m.grants(&g.name) => {}
-                    Some(g) => problems.push(format!("uses {short}::{f}, which needs {} (add it to [capabilities] grant in app.toml)", g.name)),
+                    Some(g) => problems.push(format!("uses {short}::{f}, which needs {} (add it to [capabilities] grant in {file})", g.name)),
                     None => problems.push(format!("uses {short}::{f}, which no grant allows")),
                 }
             }
@@ -392,16 +411,17 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -
             if !ALWAYS.contains(&cap) {
                 problems.push(format!("uses {cap}, which no grant allows"));
             }
-        } else if !ALLOWED_WASI.iter().any(|w| import.starts_with(w)) {
-            problems.push(format!("imports {import}, which apps can never use"));
+        } else if !ALLOWED_WASI.iter().any(|w| import.starts_with(w)) && !(m.is_kit() && import.starts_with("wasi:")) {
+            problems.push(format!("imports {import}, which {who} can never use"));
         }
     }
     if problems.is_empty() { Ok(()) } else { bail!("{}", problems.join("; ")) }
 }
 
 /// Compiles an app, checks its imports, links only granted functions and
-/// runs its `init`, within the app's time limit.
-pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow::Result<LoadedApp> {
+/// runs its `init`, within the app's time limit. A Wasm kit gets its
+/// directory below `data` (data/kits/<id>).
+pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked, data: &Path) -> anyhow::Result<LoadedApp> {
     // Compiling takes a while; keep it off the threads serving requests.
     let (e, bundle) = (engine.clone(), app.bundle.clone());
     let component = tokio::task::spawn_blocking(move || Component::new(&e, &bundle.wasm))
@@ -410,9 +430,12 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
         .context("not a valid WebAssembly component")?;
     let manifest = app.manifest.clone();
     let id = &manifest.app.id;
-    anyhow::ensure!(!kits.page_names().contains(id.as_str()), "app id {id:?}: the platform's own pages are at /{id}");
-    anyhow::ensure!(!kits.taken().contains(id.as_str()), "app id {id:?} is a kit's name");
-    check_imports(&imports(engine, &component), &manifest, kits)?;
+    let what = if manifest.is_kit() { "kit" } else { "app" };
+    // A kit's new version links to the other kits, not to its old one.
+    let kits = if manifest.is_kit() { kits.without(id) } else { kits.clone() };
+    anyhow::ensure!(!kits.page_names().contains(id.as_str()), "{what} id {id:?}: the platform's own pages are at /{id}");
+    anyhow::ensure!(!kits.taken().contains(id.as_str()), "{what} id {id:?} is a kit's name");
+    check_imports(&imports(engine, &component), &manifest, &kits)?;
 
     let mut linker: Linker<Ctx> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
@@ -421,26 +444,43 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
     log::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     page::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     // The import check made sure the app calls only the functions it's granted.
-    kits.link(&mut linker, &manifest.capabilities.grant, &import_types(engine, &component))?;
-    let pre = AppPre::new(linker.instantiate_pre(&component)?)?;
+    let types = import_types(engine, &component);
+    let linked = kits.link(&mut linker, &manifest.capabilities.grant, &types)?;
+    let uses = linked.into_iter().filter_map(|l| Some((l.name.clone(), Use { ty: types.get(&l.name)?.clone(), grant: l.grant, command: l.command }))).collect();
+    let instance = linker.instantiate_pre(&component)?;
+    let kit = match &manifest.kit {
+        Some(offers) => {
+            let exports = crate::wasm_kit::check_exports(engine, &component, offers)?;
+            let version = crate::wasm_kit::version(&manifest, offers, &app.bundle, &app.label, exports, instance.clone(), db.clone(), data)?;
+            Some(Arc::new(version))
+        }
+        None => None,
+    };
+    // An app has pages; a kit has them if it exports the handler.
+    let handler = component.component_type().exports(engine).any(|(name, _)| name.starts_with("appos:framework/handler"));
+    let pre = if kit.is_none() || handler { Some(AppPre::new(instance)?) } else { None };
 
-    let budget = Budget::of(&manifest, AdminLimits::default());
-    let mut store = new_store(engine, &manifest.app.id, db.clone(), Phase::Init { routes: vec![], menu: vec![] }, budget, empty_wasi);
-    let deadline = Instant::now() + manifest.time_limit();
-    let init = timeout_at(deadline, async {
-        let instance = pre.instantiate_async(&mut store).await?;
-        instance.appos_framework_handler().call_init(&mut store).await
-    })
-    .await;
-    match init {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(anyhow::Error::from(e).context("init failed")),
-        Err(_) => bail!("init took longer than {} s", manifest.time_limit().as_secs()),
-    }
-    let Phase::Init { routes, menu } = &mut store.data_mut().phase else { unreachable!() };
-    let (routes, menu) = (std::mem::take(routes), std::mem::take(menu));
-    if routes.is_empty() {
-        bail!("init registered no routes; call registry::add_route");
+    let (mut routes, mut menu) = (vec![], vec![]);
+    if let Some(pre) = &pre {
+        let budget = Budget::of(&manifest, AdminLimits::default());
+        let phase = Phase::Init { routes: vec![], menu: vec![] };
+        let mut store = new_store(engine, &manifest.app.id, db.clone(), phase, budget, |wasi| own_wasi(wasi, kit.as_deref()));
+        let deadline = Instant::now() + manifest.time_limit();
+        let init = timeout_at(deadline, async {
+            let instance = pre.instantiate_async(&mut store).await?;
+            instance.appos_framework_handler().call_init(&mut store).await
+        })
+        .await;
+        match init {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(anyhow::Error::from(e).context("init failed")),
+            Err(_) => bail!("init took longer than {} s", manifest.time_limit().as_secs()),
+        }
+        let Phase::Init { routes: r, menu: m } = &mut store.data_mut().phase else { unreachable!() };
+        (routes, menu) = (std::mem::take(r), std::mem::take(m));
+        if routes.is_empty() && kit.is_none() {
+            bail!("init registered no routes; call registry::add_route");
+        }
     }
     Ok(LoadedApp {
         manifest,
@@ -452,11 +492,29 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
         turns: tokio::sync::RwLock::new(()),
         pre,
         db,
+        uses,
+        kit,
     })
 }
 
-/// An app's WASI: no files, no network, no environment.
-fn empty_wasi(_: &mut wasmtime_wasi::WasiCtxBuilder) {}
+/// What a store gets in its WASI: nothing for an app (no files, no
+/// network, no environment); for a kit its directory ("/"), the network
+/// and its configuration.
+fn own_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: Option<&crate::wasm_kit::KitVersion>) {
+    if let Some(kit) = kit {
+        kit_wasi(wasi, &kit.sandbox);
+    }
+}
+
+/// A Wasm kit's WASI. Its directory was made when it loaded; should it be
+/// gone, the kit finds no "/".
+fn kit_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: &KitSandbox) {
+    let _ = wasi.preopened_dir(&kit.dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
+    wasi.inherit_network().allow_ip_name_lookup(true);
+    for (key, value) in &kit.env {
+        wasi.env(key, value);
+    }
+}
 
 /// A store for `id`; `wasi` adds to its WASI what it may use besides the
 /// output.
@@ -489,6 +547,7 @@ fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, wa
         context: None,
         depth: 0,
         over_kit: false,
+        kit_failed: None,
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| c);
@@ -514,6 +573,10 @@ pub async fn call(
     live: Live,
 ) -> (Result<Page, Failed>, Cost) {
     let deadline = Instant::now() + budget.time;
+    let Some(pre) = &app.pre else {
+        let error = anyhow::anyhow!("{} has no pages", app.manifest.app.id);
+        return (Err(Failed::new(Outcome::Crashed, error)), Cost::default());
+    };
     let held = &app.manifest.capabilities.grant;
     let cx = Context::new(About {
         app: app.manifest.app.id.clone(),
@@ -538,7 +601,7 @@ pub async fn call(
                 Err(_) => return (Err(timeout()), cost),
             }
         };
-        let (result, mut ctx, fuel) = run_once(app, handler, req, deadline, budget, access, &cx).await;
+        let (result, mut ctx, fuel) = run_once(app, pre, handler, req, deadline, budget, access, &cx).await;
         cost.fuel = fuel;
         cost.io = ctx.io_used;
         let page = match result {
@@ -573,8 +636,10 @@ fn timed_out(budget: Budget) -> Failed {
 /// One run in a fresh instance. page.done stops the app right there (as a
 /// trap the shell expects); returning from `start` without it ends the app
 /// the same way. The instance is dropped either way. Returns the fuel used.
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     app: &LoadedApp,
+    pre: &AppPre<Ctx>,
     handler: &str,
     req: &Request,
     deadline: Instant,
@@ -583,12 +648,13 @@ async fn run_once(
     cx: &Context,
 ) -> (Result<Page, Failed>, Ctx, u64) {
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
-    let mut store = new_store(app.pre.engine(), &app.manifest.app.id, app.db.clone(), Phase::Start { page, done: false }, budget, empty_wasi);
+    let phase = Phase::Start { page, done: false };
+    let mut store = new_store(pre.engine(), &app.manifest.app.id, app.db.clone(), phase, budget, |wasi| own_wasi(wasi, app.kit.as_deref()));
     store.data_mut().tx = Tx::with_deadline(deadline.into_std());
     store.data_mut().access = access;
     store.data_mut().context = Some(cx.clone());
     let ran = timeout_at(deadline, async {
-        let instance = app.pre.instantiate_async(&mut store).await?;
+        let instance = pre.instantiate_async(&mut store).await?;
         instance.appos_framework_handler().call_start(&mut store, handler, req).await
     })
     .await;
@@ -618,7 +684,8 @@ async fn run_once(
             } else {
                 e.into()
             };
-            Err(Failed::new(kind, error))
+            let kit = if kind == Outcome::Crashed { ctx.kit_failed.take() } else { None };
+            Err(Failed { kit, ..Failed::new(kind, error) })
         }
         Err(_) => Err(timed_out(budget)),
     };
@@ -631,6 +698,8 @@ pub(crate) struct KitSandbox {
     pub pre: InstancePre<Ctx>,
     /// Its name: where policy.csv gives it grants, its log lines' name.
     pub name: String,
+    /// Its version's label, to blame it for a trap.
+    pub label: String,
     /// The grants it holds, in kit.toml's order: a grant's place is its bit.
     pub held: Vec<String>,
     /// Commands it sends go into the outbox here.
@@ -661,6 +730,9 @@ pub(crate) struct Called {
     pub denied: Option<String>,
     /// It went over the budget, the caller's.
     pub over: bool,
+    /// The Wasm kit that trapped, this one or one it called: its id and
+    /// label.
+    pub blame: Option<(String, String)>,
 }
 
 /// Calls `export`, an interface and one of its functions, of a Wasm kit, in a fresh instance with
@@ -679,15 +751,7 @@ pub(crate) async fn call_kit(
     let deadline = Instant::from_std(cx.deadline());
     let budget = Budget { fuel: left.fuel, memory: MEMORY, time: cx.time_left() };
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
-    let mut store = new_store(kit.pre.engine(), &kit.name, kit.db.clone(), Phase::Start { page, done: false }, budget, |wasi| {
-        // The kit's own: its directory, the network, its configuration.
-        // `start` made it; should it be gone, the kit finds no "/".
-        let _ = wasi.preopened_dir(&kit.dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
-        wasi.inherit_network().allow_ip_name_lookup(true);
-        for (key, value) in &kit.env {
-            wasi.env(key, value);
-        }
-    });
+    let mut store = new_store(kit.pre.engine(), &kit.name, kit.db.clone(), Phase::Start { page, done: false }, budget, |wasi| kit_wasi(wasi, kit));
     let ctx = store.data_mut();
     ctx.tx = Tx::with_deadline(cx.deadline());
     ctx.access = access;
@@ -707,6 +771,10 @@ pub(crate) async fn call_kit(
     let over = ctx.over_memory || ctx.over_tables || ctx.over_host || ctx.over_kit;
     let left = Left { fuel, io: ctx.io_used, depth: left.depth };
     let denied = ctx.denied.take();
+    // A trap in the kit's own code is the kit's; an error a host function
+    // gave it (a kit it called, the policy) is not.
+    let trapped = matches!(&ran, Ok(Err(e)) if e.downcast_ref::<Trap>().is_some_and(|t| *t != Trap::OutOfFuel && *t != Trap::Interrupt));
+    let blame = ctx.kit_failed.take().or_else(|| (trapped && !over && denied.is_none()).then(|| (kit.name.clone(), kit.label.clone())));
     let result = match ran {
         Err(_) => Err(wasmtime::format_err!("{what}: the request's time ran out in {}", kit.name)),
         Ok(Err(e)) if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) => Err(e),
@@ -720,7 +788,8 @@ pub(crate) async fn call_kit(
     if result.is_err() {
         print_logs(&ctx);
     }
-    Called { result, left, denied, over }
+    let blame = if result.is_err() { blame } else { None };
+    Called { result, left, denied, over, blame }
 }
 
 /// A Wasm kit's call from this store: how deep it runs, what the caller
@@ -741,6 +810,9 @@ impl Ctx {
         self.over_kit |= called.over || self.io_used > IO_BUDGET;
         if self.denied.is_none() {
             self.denied.clone_from(&called.denied);
+        }
+        if self.kit_failed.is_none() {
+            self.kit_failed.clone_from(&called.blame);
         }
     }
 }
@@ -993,7 +1065,7 @@ mod tests {
     #[test]
     fn kit_calls_go_at_most_max_depth_deep() {
         let budget = Budget { fuel: FUEL, memory: MEMORY, time: Duration::from_secs(1) };
-        let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, empty_wasi);
+        let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, |_| {});
         let ctx = store.data_mut();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default() }));
@@ -1044,7 +1116,7 @@ mod tests {
     fn store(engine: &Engine) -> Store<Ctx> {
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let db = crate::tx::in_memory();
-        new_store(engine, &manifest.app.id, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()), empty_wasi)
+        new_store(engine, &manifest.app.id, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()), |_| {})
     }
 
     #[tokio::test]
@@ -1071,7 +1143,7 @@ mod tests {
         let engine = engine().unwrap();
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let module = wasmtime::Module::new(&engine, "(module (memory 300))").unwrap();
-        let mut small = new_store(&engine, &manifest.app.id, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b, empty_wasi);
+        let mut small = new_store(&engine, &manifest.app.id, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b, |_| {});
         assert!(wasmtime::Instance::new_async(&mut small, &module, &[]).await.is_err());
         assert!(small.data().over_memory);
         assert!(wasmtime::Instance::new_async(&mut store(&engine), &module, &[]).await.is_ok());

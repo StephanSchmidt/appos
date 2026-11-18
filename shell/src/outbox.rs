@@ -8,13 +8,20 @@
 //! long, comes again later with the same id, after 1 s, 2 s, 4 s and so on
 //! up to 5 minutes. After 10 tries it waits for an admin (the admin's
 //! messages page) and is never dropped.
+//!
+//! The kit is found at each batch: a Wasm kit's new version gets the next
+//! one. While the kit doesn't serve (off, or waiting for a kit itself),
+//! its messages wait without using up tries. A task starts when its
+//! interface first appears: at startup, or with a Wasm kit's deploy.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::kit::{Kit, Kits, Message};
+use crate::kit::{Kit, Message};
 use crate::platform::{Actor, Kind, NewEvent, PlatformDb, now_ms};
 use crate::state::Live;
 use crate::terminal_errorln as eprintln;
@@ -31,53 +38,84 @@ const BATCH: u32 = 32;
 /// How long a delivery task sleeps with nothing due; a commit that sends
 /// wakes it sooner.
 const IDLE: Duration = Duration::from_secs(60);
+/// How long a task waits for its kit to serve again, unless woken.
+const WAITING: Duration = Duration::from_secs(5);
 /// The longest error kept per message.
 const MAX_ERROR: usize = 2000;
 
-/// Wakes the delivery tasks.
-#[derive(Clone, Default)]
-pub struct Outbox {
-    tasks: Arc<Vec<Arc<Notify>>>,
+/// Starts and wakes the delivery tasks.
+#[derive(Clone)]
+pub struct Outbox(Arc<Inner>);
+
+struct Inner {
+    db: Db,
+    platform: PlatformDb,
+    live: Live,
+    /// By interface.
+    tasks: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl Outbox {
-    /// A request committed messages: the kits look at once.
+    /// A request committed messages, a kit went live or was turned on:
+    /// tasks start for new interfaces, and every task looks at once.
     pub fn wake(&self) {
-        for task in self.tasks.iter() {
+        let mut tasks = self.0.tasks.lock();
+        for interface in self.0.live.kits().interfaces() {
+            tasks.entry(interface.clone()).or_insert_with(|| {
+                let wake = Arc::new(Notify::new());
+                let to = Deliver { interface, db: self.0.db.clone(), platform: self.0.platform.clone(), live: self.0.live.clone() };
+                tokio::spawn(deliver(to, wake.clone()));
+                wake
+            });
+        }
+        for task in tasks.values() {
             task.notify_one();
         }
     }
 }
 
 /// Starts one delivery task per interface; in a Tokio runtime. A message
-/// that waits for an admin is logged in `platform`. `live` tells kits
-/// which apps serve.
-pub fn start(db: Db, platform: PlatformDb, kits: &Kits, live: Live) -> Outbox {
-    let tasks = kits
-        .interfaces()
-        .into_iter()
-        .map(|(interface, kit)| {
-            let wake = Arc::new(Notify::new());
-            let to = Deliver { interface, kit, db: db.clone(), platform: platform.clone(), live: live.clone() };
-            tokio::spawn(deliver(to, wake.clone()));
-            wake
-        })
-        .collect();
-    Outbox { tasks: Arc::new(tasks) }
+/// that waits for an admin is logged in `platform`. `live` has the kits,
+/// and tells them which apps serve.
+pub fn start(db: Db, platform: PlatformDb, live: Live) -> Outbox {
+    let outbox = Outbox(Arc::new(Inner { db, platform, live, tasks: Mutex::default() }));
+    outbox.wake();
+    outbox
 }
 
 /// Where one delivery task delivers, and what it needs.
 struct Deliver {
     interface: String,
-    kit: Arc<dyn Kit>,
     db: Db,
     platform: PlatformDb,
     live: Live,
 }
 
+impl Deliver {
+    /// The interface's kit, if it serves; else what it waits for.
+    fn kit(&self) -> Result<Arc<dyn Kit>, String> {
+        let kits = self.live.kits();
+        let Some((kit, grants)) = kits.kit_of(&self.interface) else { return Err("its kit".into()) };
+        match self.live.kit_waits(&kits, &grants) {
+            Some(kit) => Err(kit),
+            None => Ok(kit),
+        }
+    }
+}
+
 async fn deliver(to: Deliver, wake: Arc<Notify>) {
     let (db, interface) = (&to.db, &to.interface);
     loop {
+        let kit = match to.kit() {
+            Ok(kit) => kit,
+            Err(_) => {
+                tokio::select! {
+                    _ = wake.notified() => {}
+                    _ = tokio::time::sleep(WAITING) => {}
+                }
+                continue;
+            }
+        };
         let batch = {
             let (db, interface) = (db.clone(), interface.clone());
             tokio::task::spawn_blocking(move || tx::due(&db, &interface, now_ms(), BATCH)).await
@@ -85,7 +123,7 @@ async fn deliver(to: Deliver, wake: Arc<Notify>) {
         match batch {
             Ok(Ok(batch)) if !batch.is_empty() => {
                 for message in batch {
-                    if let Err(e) = try_one(&to, message).await {
+                    if let Err(e) = try_one(&to, kit.clone(), message).await {
                         eprintln!("{interface}: the outbox could not be updated: {e}");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -107,9 +145,9 @@ async fn deliver(to: Deliver, wake: Arc<Notify>) {
 
 /// Runs one message in its own task (a kit that panics fails the message,
 /// not delivery), then takes it out or keeps it for later.
-async fn try_one(to: &Deliver, waiting: Waiting) -> rusqlite::Result<()> {
+async fn try_one(to: &Deliver, kit: Arc<dyn Kit>, waiting: Waiting) -> rusqlite::Result<()> {
     let (id, attempts, function, app) = (waiting.id.clone(), waiting.attempts, waiting.function.clone(), waiting.app.clone());
-    let (db, kit, live) = (&to.db, to.kit.clone(), to.live.clone());
+    let (db, live) = (&to.db, to.live.clone());
     let run = tokio::spawn(async move {
         let (cx, msg) = Message::of(waiting, RUN_TIME, live);
         kit.run(cx, msg).await
@@ -194,15 +232,9 @@ mod tests {
     async fn a_failed_command_is_tried_again_then_waits_for_an_admin() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
         sent(&db);
-        let to = Deliver {
-            interface: "acme:crm/leads".into(),
-            kit: Arc::new(Down { panics: false }),
-            db: db.clone(),
-            platform: platform.clone(),
-            live: Live::default(),
-        };
+        let to = Deliver { interface: "acme:crm/leads".into(), db: db.clone(), platform: platform.clone(), live: Live::default() };
         for n in 1..=MAX_ATTEMPTS {
-            try_one(&to, tx::outbox(&db).unwrap().remove(0)).await.unwrap();
+            try_one(&to, Arc::new(Down { panics: false }), tx::outbox(&db).unwrap().remove(0)).await.unwrap();
             let w = tx::outbox(&db).unwrap().remove(0);
             assert_eq!((w.attempts, w.error.as_deref(), w.due.is_none()), (n, Some("the CRM is down"), n == MAX_ATTEMPTS));
         }
@@ -219,8 +251,8 @@ mod tests {
     #[tokio::test]
     async fn a_kit_that_panics_fails_the_message_not_delivery() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
-        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: true }), db: db.clone(), platform, live: Live::default() };
-        try_one(&to, sent(&db)).await.unwrap();
+        let to = Deliver { interface: "acme:crm/leads".into(), db: db.clone(), platform, live: Live::default() };
+        try_one(&to, Arc::new(Down { panics: true }), sent(&db)).await.unwrap();
         let w = tx::outbox(&db).unwrap().remove(0);
         assert!(w.error.as_deref().is_some_and(|e| e.starts_with("the kit crashed")), "{:?}", w.error);
         assert_eq!(w.attempts, 1);

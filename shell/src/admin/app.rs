@@ -197,7 +197,7 @@ pub(super) fn risk_table(shell: &Shell, a: &App) -> String {
                 if *l == level { r#" class="sets""# } else { "" },
                 escape(g),
                 grant_chip(*l),
-                escape(shell.kits.allows(g)),
+                escape(shell.kits.now().allows(g)),
             )
         })
         .collect();

@@ -685,7 +685,7 @@ async fn rollback(State(shell): S, who: Who, Path(id): Path<String>, axum::Json(
 /// in base64. Public, like the contract.
 async fn fakes(State(shell): S) -> Response {
     use base64::Engine as _;
-    match crate::wasm_kit::fake_files(&shell.kits, &shell.engine) {
+    match crate::wasm_kit::fake_files(&shell.kits.now(), &shell.engine) {
         Ok(files) => {
             let files: BTreeMap<String, String> =
                 files.into_iter().map(|(path, bytes)| (path, base64::engine::general_purpose::STANDARD.encode(bytes))).collect();
@@ -709,11 +709,11 @@ async fn spec(State(shell): S) -> Response {
         name: shell.name.clone(),
         origin: shell.origin.clone(),
         framework: framework().to_string(),
-        capabilities: shell.kits.names(),
+        capabilities: shell.kits.now().names(),
         risk: shell.risk.levels().clone(),
         apps,
         git: shell.git.clone(),
-        wit: shell.kits.contract(),
+        wit: shell.kits.now().contract(),
         sign_in: std::collections::BTreeMap::from([("auth.wit".to_string(), SIGN_IN_WIT.to_string())]),
         token: shell.policy.is_some(),
     })
@@ -796,7 +796,8 @@ async fn dispatch_app(shell: Arc<Shell>, who: Who, req: Request, htmx: bool) -> 
     };
     let decoded: Vec<String> = req.path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
     let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
-    if let Some((route, params, grants)) = shell.kits.page(req.method.as_str(), &segments) {
+    let kits = shell.kits.now();
+    if let Some((route, params, grants)) = kits.page(req.method.as_str(), &segments) {
         let back = back.unwrap_or_else(|| req.path.clone());
         return kit_page(&shell, &who, route, params, grants, req, htmx, &back).await;
     }
@@ -808,6 +809,9 @@ async fn dispatch_app(shell: Arc<Shell>, who: Who, req: Request, htmx: bool) -> 
     };
     if shell.state.is_off(app_id) {
         return turned_off(&shell, &who, &app);
+    }
+    if let Some(kit) = shell.live().waits(&app) {
+        return waits(&shell, &who, &app, &kit);
     }
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
     let Some((route, params)) = match_route(&app, req.method.as_str(), &rest) else {
@@ -908,6 +912,13 @@ fn turned_off(shell: &Shell, who: &Who, app: &LoadedApp) -> Response {
     message(shell, who, StatusCode::SERVICE_UNAVAILABLE, "Turned off", &format!("{name} is turned off for now. Try again later."))
 }
 
+/// The app uses a kit that doesn't serve now: it waits, like an app that
+/// is off.
+fn waits(shell: &Shell, who: &Who, app: &LoadedApp, kit: &str) -> Response {
+    let name = &app.manifest.app.name;
+    message(shell, who, StatusCode::SERVICE_UNAVAILABLE, "Waiting", &format!("{name} waits for {kit}, which it uses. Try again later."))
+}
+
 /// Runs the route's handler once a permit is free and records the usage.
 async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Route, request: runtime::Request, path: &str, back: &str) -> Response {
     let app_id = &app.manifest.app.id;
@@ -944,6 +955,12 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
         shell.usage.record(usage);
         return turned_off(shell, who, app);
     }
+    if let Some(kit) = shell.live().waits(app) {
+        drop(permit);
+        usage.error = Some(format!("{kit} stopped serving while the request waited in the queue"));
+        shell.usage.record(usage);
+        return waits(shell, who, app, &kit);
+    }
     let access = crate::access::of(shell, who, app);
     let started = Instant::now();
     let user = crate::access::user(shell, who);
@@ -975,9 +992,13 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
             eprintln!("[{app_id}] failed ({}): {cause}", f.kind);
             usage.outcome = f.kind;
             usage.error = Some(std::iter::once(cause).chain(f.output).collect::<Vec<_>>().join("\n"));
-            // Conflicts come from load, not from a broken version.
+            // Conflicts come from load, not from a broken version. A trap
+            // in a Wasm kit is the kit's.
             if f.kind.counts_toward_rollback() {
-                crate::deploy::note_failure(shell, app_id, &app.label);
+                match &f.kit {
+                    Some((kit, label)) => crate::deploy::note_failure(shell, kit, label),
+                    None => crate::deploy::note_failure(shell, app_id, &app.label),
+                }
             }
             message(shell, who, StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This app is unavailable right now. The rest of the site works.")
         }

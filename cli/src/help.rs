@@ -616,6 +616,11 @@ Before deploying, it tells what happened to the app since you last looked
 admin made live, the app turned off or on, and who did it. It warns when
 the app's wit/ isn't the platform's contract, or its SDK (src/appos.rs and
 the like) isn't the one of this appos; `appos sync` updates both.
+
+In a Wasm kit's directory (kit.toml), it deploys the kit as kit.zip:
+kit.toml, kit.wasm, its WIT and its fake. Apps call the new version from
+the next request on; a version that changes what an app uses is refused.
+`appos versions`, `log`, `rollback`, `off` and `on` work there too.
 ";
 
 const HELP_PACK: &str = "appos pack [file]
@@ -624,7 +629,8 @@ Builds the app in this directory and writes it as one file, app.zip:
 app.toml, the .wasm, icon.svg if there is one and, for a Rust or
 TypeScript app, deps.json: the packages it is built with, for `appos
 audit`. Writes
-target/app.zip, or the file given. `appos deploy app.zip` sends it to a platform.
+target/app.zip, or the file given; in a kit's directory, target/kit.zip.
+`appos deploy app.zip` sends it to a platform.
 `appos deploy` alone builds, packs and sends in one go; pack is for
 deploying later or from somewhere else.
 

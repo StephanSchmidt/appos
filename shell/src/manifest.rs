@@ -1,6 +1,7 @@
 //! The app manifest (`app.toml`): who the app is, who owns it, which group
 //! it belongs to and which capabilities it is granted. Routes and menu entries come from the app's
-//! `init`.
+//! `init`. A Wasm kit's kit.toml (wasm_kit.rs) reads into the same, with
+//! what the kit offers on top: a kit is held like an app.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,9 @@ pub struct Manifest {
     pub capabilities: Capabilities,
     #[serde(default)]
     pub limits: Limits,
+    /// What a kit offers, from its kit.toml; none for an app.
+    #[serde(skip)]
+    pub kit: Option<crate::wasm_kit::Offers>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +62,11 @@ fn default_wasm() -> PathBuf {
     PathBuf::from("app.wasm")
 }
 
+/// An app's manifest.
+pub const APP_TOML: &str = "app.toml";
+/// A Wasm kit's.
+pub const KIT_TOML: &str = "kit.toml";
+
 /// Grants one app may hold.
 pub const MAX_GRANTS: usize = 64;
 /// Bytes of a grant's name.
@@ -77,6 +86,24 @@ pub fn validate_grant_name(name: &str) -> Result<(), String> {
         return Err("admin is the admin screen's, not a grant".into());
     }
     Ok(())
+}
+
+/// Why `grant`, which no kit offers now, is a mistake, if it is: a Wasm
+/// kit's grant may come with its deploy, but one that looks like a grant
+/// of the platform's own kits (`known`) is misspelt: kv-wrte. Patterns
+/// (kv-*) are checked the same.
+pub fn misspelt(grant: &str, known: &[String]) -> Option<String> {
+    let prefix = |g: &str| g.split('-').next().unwrap_or(g).to_string();
+    let wellformed = if grant.contains('*') {
+        grant.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '*')
+    } else {
+        validate_grant_name(grant).is_ok()
+    };
+    if !wellformed {
+        return Some(format!("{grant:?} is no grant: lowercase letters, digits and dashes"));
+    }
+    let like: Vec<&str> = known.iter().filter(|k| prefix(k) == prefix(grant)).map(String::as_str).collect();
+    (!like.is_empty()).then(|| format!("{grant:?} is no grant; the {}- grants are {}", prefix(grant), like.join(", ")))
 }
 
 /// The highest risk level.
@@ -107,10 +134,12 @@ impl Risk {
         Ok(Self(levels))
     }
 
-    /// Refuses grants no kit offers.
+    /// Refuses grants that look like a misspelt grant of the platform's
+    /// own kits (`misspelt`): a Wasm kit's may come later.
     pub fn check(&self, kits: &crate::kit::Kits) -> anyhow::Result<()> {
-        match self.0.keys().find(|g| kits.grant(g).is_none()) {
-            Some(grant) => anyhow::bail!("risk file: unknown grant {grant:?}; known: {}", kits.names().join(", ")),
+        let known = kits.names();
+        match self.0.keys().filter(|g| kits.grant(g).is_none()).find_map(|g| misspelt(g, &known)) {
+            Some(why) => anyhow::bail!("risk file: {why}"),
             None => Ok(()),
         }
     }
@@ -203,12 +232,18 @@ pub fn validate_app_id(id: &str) -> Result<(), String> {
 }
 
 impl Manifest {
-    /// Reads `app.toml`, or the `app.toml` in a directory. Returns it, its
-    /// text and where its .wasm is.
+    /// Reads `app.toml` or `kit.toml`, or the one in a directory (kit.toml
+    /// if it has one). Returns it, its text and where its .wasm is.
     pub fn load(path: &Path) -> anyhow::Result<(Self, String, PathBuf)> {
-        let file = if path.is_dir() { path.join("app.toml") } else { path.to_path_buf() };
+        let file = match path.is_dir() {
+            true if path.join(KIT_TOML).is_file() => path.join(KIT_TOML),
+            true => path.join(APP_TOML),
+            false => path.to_path_buf(),
+        };
         let text = std::fs::read_to_string(&file).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
-        let m = Self::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+        let kit = file.file_name().is_some_and(|n| n == KIT_TOML);
+        let m = if kit { Self::parse_kit(&text) } else { Self::parse(&text) };
+        let m = m.map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
         let wasm = file.parent().unwrap_or(Path::new(".")).join(&m.app.wasm);
         Ok((m, text, wasm))
     }
@@ -218,6 +253,28 @@ impl Manifest {
         let m: Manifest = toml::from_str(text)?;
         m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(m)
+    }
+
+    /// Reads and checks the text of a Wasm kit's `kit.toml`.
+    pub fn parse_kit(text: &str) -> anyhow::Result<Self> {
+        let m = crate::wasm_kit::manifest(text)?;
+        m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(m)
+    }
+
+    /// Whether it is a kit's.
+    pub fn is_kit(&self) -> bool {
+        self.kit.is_some()
+    }
+
+    /// "app.toml" or "kit.toml", for messages.
+    pub fn file(&self) -> &'static str {
+        if self.is_kit() { KIT_TOML } else { APP_TOML }
+    }
+
+    /// "[app]" or "[kit]", for messages.
+    fn section(&self) -> &'static str {
+        if self.is_kit() { "[kit]" } else { "[app]" }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -245,30 +302,32 @@ impl Manifest {
 
     /// Who to ask about the app, trimmed. A deploy without one is refused.
     pub fn owner(&self) -> anyhow::Result<&str> {
+        let (file, section, what) = (self.file(), self.section(), if self.is_kit() { "kit" } else { "app" });
         let owner = self.app.owner.as_deref().unwrap_or("").trim();
         if owner.is_empty() {
-            anyhow::bail!("app.toml needs an owner under [app]: the person or team to ask about this app, like owner = \"Jane Doe <jane@example.com>\"");
+            anyhow::bail!("{file} needs an owner under {section}: the person or team to ask about this {what}, like owner = \"Jane Doe <jane@example.com>\"");
         }
         if owner.chars().count() > MAX_OWNER {
-            anyhow::bail!("app.toml: owner is longer than {MAX_OWNER} characters");
+            anyhow::bail!("{file}: owner is longer than {MAX_OWNER} characters");
         }
         if owner.chars().any(char::is_control) {
-            anyhow::bail!("app.toml: owner is one line of text");
+            anyhow::bail!("{file}: owner is one line of text");
         }
         Ok(owner)
     }
 
     /// The group the app belongs to, trimmed. A deploy without one is refused.
     pub fn group(&self) -> anyhow::Result<&str> {
+        let (file, section, what) = (self.file(), self.section(), if self.is_kit() { "kit" } else { "app" });
         let group = self.app.group.as_deref().unwrap_or("").trim();
         if group.is_empty() {
-            anyhow::bail!("app.toml needs a group under [app]: the team the app belongs to, like group = \"Marketing\"");
+            anyhow::bail!("{file} needs a group under {section}: the team the {what} belongs to, like group = \"Marketing\"");
         }
         if group.chars().count() > MAX_GROUP {
-            anyhow::bail!("app.toml: group is longer than {MAX_GROUP} characters");
+            anyhow::bail!("{file}: group is longer than {MAX_GROUP} characters");
         }
         if group.chars().any(char::is_control) {
-            anyhow::bail!("app.toml: group is one line of text");
+            anyhow::bail!("{file}: group is one line of text");
         }
         Ok(group)
     }
@@ -312,6 +371,10 @@ mod tests {
         assert!(Risk::parse("kv-read = 11").is_err());
         assert!(Risk::parse("kv = 1").unwrap().check(&crate::kit::Kits::builtin()).is_err());
         assert!(Risk::parse("kv-read = 10").unwrap().check(&crate::kit::Kits::builtin()).is_ok());
+        assert!(
+            Risk::parse("kv-fly = 2").unwrap().check(&crate::kit::Kits::builtin()).unwrap_err().to_string().contains("the kv- grants are kv-read, kv-write")
+        );
+        assert!(Risk::parse("score-read = 4").unwrap().check(&crate::kit::Kits::builtin()).is_ok(), "a Wasm kit's grant may come later");
     }
 
     #[test]

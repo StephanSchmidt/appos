@@ -49,6 +49,9 @@ pub(super) struct App {
     pub(super) tile: Oklch,
     /// What an admin set for its requests.
     pub(super) limits: AdminLimits,
+    /// The kit it waits for, which it uses and which doesn't serve, and
+    /// since when, as far as the platform knows.
+    pub(super) waits: Option<(String, i64)>,
 }
 
 names! {
@@ -56,6 +59,7 @@ names! {
     pub(super) enum ProblemKind {
         RolledBack = "rolled-back",
         TurnedOff = "turned-off",
+        Waits = "waits",
         NotRunning = "not-running",
         Failing = "failing",
         Busy = "busy",
@@ -72,6 +76,7 @@ impl ProblemKind {
         match self {
             ProblemKind::RolledBack => "Rolled back",
             ProblemKind::TurnedOff => "Turned off",
+            ProblemKind::Waits => "Waiting",
             ProblemKind::NotRunning => "Not running",
             ProblemKind::Failing => "Failing",
             ProblemKind::Busy => "Busy",
@@ -86,6 +91,7 @@ impl ProblemKind {
         match self {
             ProblemKind::RolledBack => "Rollback",
             ProblemKind::TurnedOff => "Off",
+            ProblemKind::Waits => "Waits",
             ProblemKind::NotRunning => "Down",
             ProblemKind::Failing => "Failing",
             ProblemKind::Busy => "Busy",
@@ -213,6 +219,11 @@ impl App {
             .or_else(|| live.into_iter().chain(&self.versions).map(|v| v.group.as_str()).find(|g| !g.is_empty()))
     }
 
+    /// Whether it is a Wasm kit: apps call it.
+    pub(super) fn is_kit(&self) -> bool {
+        self.running.as_ref().is_some_and(|a| a.is_kit())
+    }
+
     /// One line for the tile: the most pressing reason, or what the app
     /// did in the last hour.
     pub(super) fn line(&self) -> String {
@@ -265,6 +276,9 @@ pub(super) fn load(shell: &Shell, now: i64) -> (Vec<App>, Vec<Event>) {
     let mut changed = db.newest_of(&CHANGES).unwrap_or_default();
     let mut seen = db.newest_of(&[Kind::Seen]).unwrap_or_default();
     let refused = db.count_versions(VersionStatus::Refused).unwrap_or_default();
+    // What doesn't serve since when: a kit turned off, or never loaded.
+    let live = shell.state.live(None);
+    let off_since: BTreeMap<String, i64> = off.iter().map(|(id, e)| (id.clone(), e.at)).collect();
     let mut ids: Vec<String> = running.keys().cloned().collect();
     ids.extend(versions.keys().filter(|id| !running.contains_key(*id)).cloned());
     let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
@@ -275,6 +289,11 @@ pub(super) fn load(shell: &Shell, now: i64) -> (Vec<App>, Vec<Event>) {
         .map(|id| {
             let running = running.get(&id).cloned();
             let versions = versions.remove(&id).unwrap_or_default();
+            let deployed = versions.iter().find(|v| v.status == VersionStatus::Live).map_or(0, |v| v.deployed_at);
+            let waits = running.as_ref().and_then(|a| live.waits(a)).map(|kit| {
+                let since = off_since.get(&kit).copied().unwrap_or(deployed);
+                (kit, since)
+            });
             let name = match (&running, versions.first()) {
                 (Some(a), _) => a.manifest.app.name.clone(),
                 (None, Some(v)) => v.name.clone(),
@@ -289,6 +308,7 @@ pub(super) fn load(shell: &Shell, now: i64) -> (Vec<App>, Vec<Event>) {
                 reqs: reqs.remove(&id).unwrap_or_default(),
                 seen: seen.remove(&id),
                 limits: shell.state.limits_of(&id),
+                waits,
                 id,
                 name,
                 running,
@@ -333,6 +353,11 @@ pub(super) fn problems(app: &App, risk: &Risk, events: &[Event], now: i64) -> Ve
         let text = format!("Turned off at {} {}; visitors get a page saying so", clock(e.at), by(e));
         let line = e.reason.as_deref().map_or_else(|| format!("Turned off at {}", clock(e.at)), capitalize);
         out.push(Problem { kind: ProblemKind::TurnedOff, tone: Tone::Warning, text, line, since: e.at });
+    }
+    // It runs, but what it uses doesn't: visitors are turned away.
+    if let Some((kit, since)) = &app.waits {
+        let text = format!("Waits for {kit}, which it uses; visitors get a page saying so");
+        out.push(Problem { kind: ProblemKind::Waits, tone: Tone::Warning, text, line: format!("Waits for {kit}"), since: *since });
     }
     // Since the live version went live: a new one is news.
     let deployed = app.versions.iter().find(|v| v.status == VersionStatus::Live).map_or(0, |v| v.deployed_at);
@@ -640,8 +665,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
         let checked = crate::testing::bundle("1", None).checked().unwrap();
-        let app = crate::runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await.unwrap();
-        shell.state.insert_loaded([Arc::new(app)]);
+        let app = crate::runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await.unwrap();
+        shell.state.insert_loaded([Arc::new(app)]).await.unwrap();
         let (apps, _) = load(&shell, crate::platform::now_ms());
         let app = apps.iter().find(|a| a.id == "test").unwrap();
         assert_eq!(app.owner(), Some("Tests"));

@@ -59,3 +59,19 @@ groups. auth.toml names it, kit.toml says what it may call; the README's
 
     make check       # formatting, lints, tests
     make build       # auth_github.wasm, next to kit.toml
+
+## A kit deployed like an app: acme-scoring
+
+Not an app either: a Wasm kit for acme-platform (Acme's shell, with its
+CRM as a Rust kit). It calls the CRM (grant crm-read), offers apps a score
+per customer (wit/scoring.wit, grant scoring-read) and shows the scores at
+/scoring. It deploys while the platform runs, as an app does:
+
+    make check       # formatting, lints, tests
+    appos deploy     # builds it and sends kit.zip to the platform
+
+An app that holds scoring-read calls the new version from the next request
+on. A version that changes what an app uses is refused, naming the app.
+`appos off` makes its pages, and the apps that use it, answer "waiting";
+`appos rollback` works as for an app. It builds against ../acme-platform's
+crm.wit and the repo's wit/appos.wit, so it stays in this repo.

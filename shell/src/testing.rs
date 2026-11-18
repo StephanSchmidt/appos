@@ -58,9 +58,7 @@ pub async fn shell_with_policy(auth_toml: &str, policy_csv: &str) -> (tempfile::
 /// `secret`, and its built-in policy, with the kv app deployed as "test".
 pub async fn shell_with_token(secret: &str) -> (tempfile::TempDir, Arc<Shell>) {
     let dir = tempfile::tempdir().unwrap();
-    let policy = crate::access::Policies::built_in(&crate::auth::token::policy(&crate::kit::Kits::builtin().names()), crate::kit::Kits::builtin().names())
-        .await
-        .unwrap();
+    let policy = crate::access::Policies::built_in(&crate::auth::token::policy(), crate::kit::Kits::builtin().names()).await.unwrap();
     let auth = crate::auth::Auth::token_with(secret.into(), "http://localhost", [7; 32]);
     let shell = Shell::new(Parts { auth: Some(auth), policy: Some(Arc::new(policy)), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
     crate::deploy::deploy(&shell, &kv_bundle().pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();
@@ -75,6 +73,7 @@ pub fn kv_bundle() -> Bundle {
         wasm: include_bytes!("testing-kv.wat").to_vec(),
         icon: None,
         deps: None,
+        kit: None,
     }
 }
 
@@ -84,5 +83,6 @@ pub fn bundle(version: &str, icon: Option<&str>) -> Bundle {
         wasm: include_bytes!("testing.wat").to_vec(),
         icon: icon.map(str::to_string),
         deps: None,
+        kit: None,
     }
 }

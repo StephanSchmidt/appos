@@ -6,7 +6,6 @@
 
 use super::Identity;
 use super::routes::Step;
-use crate::access::ADMIN;
 use crate::web::escape;
 
 /// Who the token signs in.
@@ -64,10 +63,9 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The policy that goes with it: the token's admin may use every grant
-/// (the kits') in every app, and the admin screen.
-pub fn policy(grants: &[String]) -> String {
-    let grants: String = grants.iter().map(|g| format!("p, {EMAIL}, *, {g}\n")).collect();
-    format!("{grants}p, {EMAIL}, *, {ADMIN}\n")
+/// in every app, also a Wasm kit's deployed later, and the admin screen.
+pub fn policy() -> String {
+    format!("p, {EMAIL}, *, *\n")
 }
 
 #[cfg(test)]
@@ -76,6 +74,7 @@ mod tests {
 
     use super::super::routes::tests::{cookies, get, post, send};
     use super::*;
+    use crate::access::ADMIN;
 
     fn session(headers: &axum::http::HeaderMap) -> Option<String> {
         cookies(headers).split("; ").find(|c| c.starts_with("appos-session=") && c.len() > "appos-session=".len()).map(str::to_string)
@@ -115,8 +114,9 @@ mod tests {
 
     #[tokio::test]
     async fn its_policy_is_every_grant_and_admin_for_the_token_only() {
-        let grants = crate::kit::Kits::builtin().names();
-        let p = crate::access::Policy::parse(&policy(&grants), &grants).await.unwrap();
+        let mut grants = crate::kit::Kits::builtin().names();
+        let p = crate::access::Policies::built_in(&policy(), grants.clone()).await.unwrap().current();
+        grants.push("scoring-read".into());
         let admin = super::super::Who::signed_in(Identity::new("token", EMAIL, "Admin", []).unwrap());
         assert!(p.may(&admin, ADMIN));
         for g in grants {

@@ -24,6 +24,10 @@
 //! The platform API takes a token from `appos login` and the policy's
 //! `admin` (web.rs, `api_only`); with `--no-auth`, whoever reaches it can
 //! deploy, roll back and turn apps off.
+//!
+//! A Wasm kit is deployed the same way, as kit.zip, and held like an app:
+//! versions, rollback, off and on. At startup the kits load first, each
+//! once the kits whose grants it holds are live, then the apps.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,7 +37,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 
 use crate::bundle::{self, Bundle, Checked};
-use crate::manifest::Manifest;
 use crate::platform::{Actor, NewVersion, Version};
 use crate::runtime::{self, LoadedApp};
 use crate::shell::Shell;
@@ -88,7 +91,7 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
     let zip = zip.to_vec();
     let (bundle, m) = tokio::task::spawn_blocking(move || {
         let bundle = Bundle::unpack(&zip)?;
-        let m = Manifest::parse(&bundle.manifest)?;
+        let m = bundle.manifest()?;
         anyhow::Ok((bundle, m))
     })
     .await??;
@@ -110,7 +113,9 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
     let loaded = async {
         bundle::check(&bundle.manifest)?;
         let checked = bundle.checked()?;
-        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await?;
+        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await?;
+        // Checked again when it goes live: what is live may change meanwhile.
+        shell.state.fits(&app)?;
         let packages = checked.packages.clone();
         // Kept as `pack` writes it, whatever zipped it: one file per version.
         let (data, stored) = (shell.data.clone(), checked.bundle.clone());
@@ -140,6 +145,13 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
 /// Loads a stored version, with the checks of every app, and that it is
 /// what was stored under this id and label.
 async fn load_stored(shell: &Shell, app_id: &str, label: &str) -> anyhow::Result<LoadedApp> {
+    let checked = read_stored(shell, app_id, label).await?;
+    runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await
+}
+
+/// A stored version, checked, and that it is what was stored under this
+/// id and label.
+async fn read_stored(shell: &Shell, app_id: &str, label: &str) -> anyhow::Result<Checked> {
     let path = version_dir(&shell.data, app_id, label)?.join(bundle::FILE);
     let (expected_id, expected_label) = (app_id.to_string(), label.to_string());
     let checked: Checked = tokio::task::spawn_blocking(move || {
@@ -154,23 +166,72 @@ async fn load_stored(shell: &Shell, app_id: &str, label: &str) -> anyhow::Result
         anyhow::Ok(checked)
     })
     .await??;
-    runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await
+    Ok(checked)
 }
 
-/// At startup: loads the live version of every deployed app. The shell
-/// doesn't start without knowing them; one that doesn't load is told.
-pub async fn load_live(shell: &Shell) -> anyhow::Result<()> {
+/// The deployed apps' live versions, read: what `load_kits` leaves to
+/// `load_live`.
+pub struct LiveApps(Vec<(Version, Checked)>);
+
+/// At startup, the kits: those in `dirs` (`--kit`, which stop the shell if
+/// they don't load) and the live versions of the deployed ones, each once
+/// the kits whose grants it holds are live. The shell doesn't start
+/// without knowing the live versions; one that doesn't load is told.
+pub async fn load_kits(shell: &Shell, dirs: &[PathBuf]) -> anyhow::Result<LiveApps> {
+    // Where it comes from, for messages; whether the shell stops without it.
+    let mut kits: Vec<(String, Checked, bool)> = vec![];
+    for dir in crate::wasm_kit::kit_dirs(dirs)? {
+        let checked = Bundle::from_dir(&dir).and_then(Bundle::checked).with_context(|| format!("kit {}", dir.display()))?;
+        kits.push((dir.display().to_string(), checked, true));
+    }
     let live = shell.platform.run(|db| db.live()).await.context("could not read the live versions")?;
+    let mut apps = vec![];
     for v in live {
-        match load_stored(shell, &v.app_id, &v.label).await {
-            Ok(app) => {
-                println!("loaded {} {} at /{} ({} routes)", v.app_id, v.label, v.app_id, app.routes.len());
-                shell.state.insert_loaded([Arc::new(app)]);
-            }
+        match read_stored(shell, &v.app_id, &v.label).await {
+            Ok(checked) if checked.manifest.is_kit() => kits.push((format!("{} {}", v.app_id, v.label), checked, false)),
+            Ok(checked) => apps.push((v, checked)),
             Err(e) => eprintln!("could not load {} {}: {e:#}", v.app_id, v.label),
         }
     }
-    Ok(())
+    while !kits.is_empty() {
+        let now = shell.kits.now();
+        let missing = |c: &Checked| c.manifest.capabilities.grant.iter().filter(|g| now.grant(g).is_none()).cloned().collect::<Vec<_>>();
+        let Some(n) = kits.iter().position(|(_, c, _)| missing(c).is_empty()) else {
+            for (from, c, stops) in &kits {
+                let why = format!("no kit offers {}", missing(c).join(", "));
+                anyhow::ensure!(!stops, "kit {from}: {why}");
+                eprintln!("could not load {from}: {why}");
+            }
+            break;
+        };
+        let (from, checked, stops) = kits.remove(n);
+        let loaded = async {
+            let kit = Arc::new(runtime::load(&shell.engine, shell.db.clone(), &now, &checked, &shell.data).await?);
+            shell.state.insert_loaded([kit]).await
+        };
+        match loaded.await {
+            Ok(()) => println!("kit {} {}, from {from}", checked.manifest.app.id, checked.label),
+            Err(e) if stops => return Err(e.context(format!("kit {from}"))),
+            Err(e) => eprintln!("could not load {from}: {e:#}"),
+        }
+    }
+    Ok(LiveApps(apps))
+}
+
+/// At startup, after the kits: loads the live version of every deployed
+/// app.
+pub async fn load_live(shell: &Shell, apps: LiveApps) {
+    for (v, checked) in apps.0 {
+        let loaded = async {
+            let app = Arc::new(runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await?);
+            shell.state.insert_loaded([app.clone()]).await?;
+            anyhow::Ok(app)
+        };
+        match loaded.await {
+            Ok(app) => println!("loaded {} {} at /{} ({} routes)", v.app_id, v.label, v.app_id, app.routes.len()),
+            Err(e) => eprintln!("could not load {} {}: {e:#}", v.app_id, v.label),
+        }
+    }
 }
 
 /// The longest reason kept, in characters.
@@ -264,8 +325,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
         let checked = crate::testing::bundle("1", None).checked().unwrap();
-        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits, &checked).await.unwrap();
-        shell.state.insert_loaded([Arc::new(app)]);
+        let app = runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await.unwrap();
+        shell.state.insert_loaded([Arc::new(app)]).await.unwrap();
         assert!(shell.platform.live_of("test").unwrap().is_none());
 
         assert_eq!(shell.state.stop_all(None).await.unwrap(), ["test"]);

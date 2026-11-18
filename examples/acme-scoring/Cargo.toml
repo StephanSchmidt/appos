@@ -1,0 +1,23 @@
+[package]
+name = "acme-scoring"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[lints.clippy]
+unwrap_used = "deny"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

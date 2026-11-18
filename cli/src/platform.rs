@@ -293,7 +293,7 @@ fn call_json<T: serde::de::DeserializeOwned>(p: &Platform, path: &str, body: Opt
 
 /// Sends an app as app.zip to a shell, which checks it and makes it live.
 pub fn deploy(p: &Platform, zip: &[u8]) -> anyhow::Result<Deployed> {
-    call_json(p, "/_platform/deploy", Some(Body::Zip(zip)), "the platform refused the app: ")
+    call_json(p, "/_platform/deploy", Some(Body::Zip(zip)), "the platform refused it: ")
 }
 
 pub fn versions(p: &Platform, app_id: &str) -> anyhow::Result<Vec<Version>> {

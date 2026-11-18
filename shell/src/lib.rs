@@ -29,12 +29,11 @@ mod usage;
 mod wasm_kit;
 mod web;
 
-pub use manifest::{Manifest, Risk, validate_app_id};
+pub use manifest::{APP_TOML, KIT_TOML, Manifest, Risk, validate_app_id};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use wasmtime::Engine;
 // Native status messages are logs; closed output pipes must not stop the server.
 use crate::{terminal_errorln as eprintln, terminal_logln as println};
 
@@ -131,7 +130,7 @@ impl Platform {
                     serve_with(*opts, kits).await
                 }
                 args::Run::Contract(dirs) => {
-                    let kits = wasm_kit::with_dirs(kits, &dirs)?;
+                    let kits = wasm_kit::add_dirs(kits, &wasm_kit::kit_dirs(&dirs)?)?;
                     crate::terminal_println!("{}", serde_json::to_string_pretty(&kits.contract())?);
                     Ok(())
                 }
@@ -181,7 +180,7 @@ impl Options {
 /// The kits `appos dev` runs the app at `dir` with: the built-in ones and
 /// the fakes `appos sync` put into its fakes/.
 pub fn dev_kits(dir: &std::path::Path) -> anyhow::Result<kit::Kits> {
-    wasm_kit::add_dirs(kit::Kits::builtin(), &fakes(dir), false)
+    wasm_kit::add_dirs(kit::Kits::builtin(), &fakes(dir))
 }
 
 /// The fakes `appos sync` put into the app at `dir` (fakes/<kit>/kit.toml):
@@ -196,25 +195,24 @@ fn fakes(dir: &std::path::Path) -> Vec<PathBuf> {
 /// Loads the apps from directories, with the checks a deployed bundle gets
 /// (bundle.rs). An app that fails to load is refused with a message; the
 /// others still run.
-async fn load_all(engine: &Engine, db: &tx::Db, kits: &kit::Kits, paths: &[PathBuf]) -> Vec<Arc<runtime::LoadedApp>> {
-    let mut apps = Vec::new();
+async fn load_all(shell: &shell::Shell, paths: &[PathBuf]) {
     for path in paths {
         let loaded = async {
             let path = path.clone();
             let checked = tokio::task::spawn_blocking(move || bundle::Bundle::from_dir(&path)?.checked()).await??;
-            runtime::load(engine, db.clone(), kits, &checked).await
+            let app = Arc::new(runtime::load(&shell.engine, shell.db.clone(), &shell.kits.now(), &checked, &shell.data).await?);
+            shell.state.insert_loaded([app.clone()]).await?;
+            anyhow::Ok(app)
         }
         .await;
         match loaded {
             Ok(app) => {
                 let m = &app.manifest.app;
                 println!("loaded {} {} at /{} ({} routes)", m.id, app.label, m.id, app.routes.len());
-                apps.push(Arc::new(app));
             }
             Err(e) => eprintln!("refused {}: {e:#}", path.display()),
         }
     }
-    apps
 }
 
 /// Requests carry the address they come from: the header provider
@@ -231,14 +229,12 @@ pub async fn serve(opts: Options) -> anyhow::Result<()> {
 
 async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     check_auth(&opts)?;
-    let kits = wasm_kit::with_dirs(kits, &opts.kits)?;
     opts.risk.check(&kits)?;
     if opts.no_auth {
         println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too");
     }
     let engine = runtime::engine()?;
     let db = tx::open_db(&opts.data.join("appos.db"))?;
-    kits.start(&engine, &opts.data, &db)?;
     // No platform.db yet: the first start, with no last one to compare with.
     let first = !opts.data.join("platform.db").exists();
     let platform = platform::PlatformDb::open(&opts.data.join("platform.db"))?;
@@ -248,7 +244,6 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
         Ok(n) => println!("risk.toml: {n} grants rated differently than at the last start"),
         Err(e) => eprintln!("could not keep the risk levels: {e:#}"),
     }
-    let apps = load_all(&engine, &db, &kits, &opts.apps).await;
 
     let origin = opts.origin.clone().unwrap_or_else(|| format!("http://{}", opts.addr));
     // Neither --auth nor --no-auth: the token sign-in (auth/token.rs).
@@ -264,7 +259,7 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
             println!("{}: {} rules", policies.file_name(), policies.current().rules());
             Some(Arc::new(policies))
         }
-        None if token.is_some() => Some(Arc::new(access::Policies::built_in(&auth::token::policy(&kits.names()), kits.names()).await?)),
+        None if token.is_some() => Some(Arc::new(access::Policies::built_in(&auth::token::policy(), kits.names()).await?)),
         None => None,
     };
     let shell = shell::Shell::new(shell::Parts {
@@ -282,15 +277,18 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
         policy,
     })?;
     access::watch(shell.clone());
-    shell.state.insert_loaded(apps);
-    deploy::load_live(&shell).await?;
+    // The kits first, then the apps that use them.
+    let deployed = deploy::load_kits(&shell, &opts.kits).await?;
+    load_all(&shell, &opts.apps).await;
+    deploy::load_live(&shell, deployed).await;
+    shell.outbox.wake();
 
     if let Some(mut reload) = opts.reload.take() {
         let shell = shell.clone();
         let paths = opts.apps.clone();
         tokio::spawn(async move {
             while reload.recv().await.is_some() {
-                shell.state.insert_loaded(load_all(&engine, &db, &kits, &paths).await);
+                load_all(&shell, &paths).await;
             }
         });
     }

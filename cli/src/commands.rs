@@ -107,31 +107,33 @@ fn here() -> anyhow::Result<(Platform, String)> {
     Ok((p, id))
 }
 
-/// Where `appos pack` writes; target/ is in the app's .gitignore.
-const PACKED: &str = "target/app.zip";
+/// The zip's name: app.zip, or kit.zip for a Wasm kit.
+fn zip_name(dir: &Path) -> &'static str {
+    if dir.join(appos_shell::KIT_TOML).is_file() { "kit.zip" } else { "app.zip" }
+}
 
-/// The app in this directory as app.zip: checks app.toml first (a deploy
-/// needs an owner, no point building without), builds, packs. Returns the
-/// app id and the zip.
+/// The app in this directory as app.zip, or the kit as kit.zip: checks
+/// app.toml or kit.toml first (a deploy needs an owner, no point building
+/// without), builds, packs. Returns the id and the zip.
 fn pack_here() -> anyhow::Result<(String, Vec<u8>)> {
     let dir = std::env::current_dir()?;
-    let (_, wasm_path) = app_info(&dir)?;
-    let manifest = std::fs::read_to_string(dir.join("app.toml"))?;
+    app_info(&dir)?;
+    let (_, manifest, _) = appos_shell::Manifest::load(&dir)?;
     let id = bundle::check(&manifest)?;
     dev::build()?;
-    let wasm = std::fs::read(&wasm_path).map_err(|e| anyhow::anyhow!("{}: {e}", wasm_path.display()))?;
-    let icon = std::fs::read_to_string(dir.join("icon.svg")).ok();
-    let deps = crate::deps::json(&dir);
-    let zip = Bundle { manifest, wasm, icon, deps }.pack()?;
+    let bundle = Bundle { deps: crate::deps::json(&dir), ..Bundle::from_dir(&dir)? };
+    let zip = bundle.pack()?;
     if zip.len() > bundle::MAX {
-        anyhow::bail!("app.zip is {} MB, more than the {} MB a platform takes", zip.len() >> 20, bundle::MAX >> 20);
+        anyhow::bail!("{} is {} MB, more than the {} MB a platform takes", zip_name(&dir), zip.len() >> 20, bundle::MAX >> 20);
     }
     Ok((id, zip))
 }
 
 pub fn pack(file: Option<&str>) -> anyhow::Result<()> {
     let (_, zip) = pack_here()?;
-    let path = Path::new(file.unwrap_or(PACKED));
+    // target/ is in the app's .gitignore.
+    let packed = format!("target/{}", zip_name(&std::env::current_dir()?));
+    let path = Path::new(file.unwrap_or(&packed));
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
@@ -146,8 +148,12 @@ pub fn deploy(file: Option<&str>) -> anyhow::Result<()> {
     let (id, zip) = match file {
         None => {
             // Best effort: an unreachable platform fails the deploy itself.
-            if let Ok(spec) = platform::fetch_spec(&p.url) {
-                scaffold::warn_if_stale(&std::env::current_dir()?, &spec.wit, &format!("platform {}", p.name));
+            // A kit builds against what it chooses, not an app's contract.
+            let dir = std::env::current_dir()?;
+            if !dir.join(appos_shell::KIT_TOML).is_file()
+                && let Ok(spec) = platform::fetch_spec(&p.url)
+            {
+                scaffold::warn_if_stale(&dir, &spec.wit, &format!("platform {}", p.name));
             }
             pack_here()?
         }
@@ -309,6 +315,8 @@ pub fn turn(on: bool, reason: Option<&str>) -> anyhow::Result<()> {
     platform::turn(&p, &id, on, reason)?;
     if on {
         println!("{id} is on again on {}.", p.name);
+    } else if std::env::current_dir()?.join(appos_shell::KIT_TOML).is_file() {
+        println!("{id} is off on {}: its pages, and the apps that use it, answer with a page saying so. Turn it on with: appos on", p.name);
     } else {
         println!("{id} is off on {}: every route answers with a page saying so. Turn it on with: appos on", p.name);
     }

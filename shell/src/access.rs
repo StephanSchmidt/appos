@@ -124,6 +124,10 @@ impl Policy {
     /// Checks every line against the kits' `grants`, then hands them to
     /// casbin. A mistake anywhere refuses the whole file.
     pub async fn parse(text: &str, grants: &[String]) -> anyhow::Result<Policy> {
+        Policy::parse_with(text, grants, false).await
+    }
+
+    async fn parse_with(text: &str, grants: &[String], built_in: bool) -> anyhow::Result<Policy> {
         let (mut p, mut g) = (Vec::<Vec<String>>::new(), Vec::<Vec<String>>::new());
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
@@ -132,7 +136,7 @@ impl Policy {
             }
             let fields: Vec<&str> = line.split(',').map(str::trim).collect();
             let rule = match fields[..] {
-                ["p", who, app, what] => rule(who, app, what, grants).map(|r| (&mut p, r)),
+                ["p", who, app, what] => rule(who, app, what, grants, built_in).map(|r| (&mut p, r)),
                 ["g", who, group] => member(who, group).map(|r| (&mut g, r)),
                 _ => Err("give `p, who, app, what` or `g, who, group:<name>`".to_string()),
             };
@@ -214,8 +218,11 @@ impl Policy {
     }
 }
 
-/// `p, who, app, what`.
-fn rule(who: &str, app: &str, what: &str, grants: &[String]) -> Result<Vec<String>, String> {
+/// `p, who, app, what`. `what` is a grant, a pattern or admin; a grant no
+/// kit offers now is fine unless it looks like a misspelt one of
+/// `grants`, the platform's own (manifest.rs `misspelt`). A built-in
+/// policy may give `*`, admin with it.
+fn rule(who: &str, app: &str, what: &str, grants: &[String], built_in: bool) -> Result<Vec<String>, String> {
     let who = subject(who)?;
     match app {
         "*" => {}
@@ -230,10 +237,12 @@ fn rule(who: &str, app: &str, what: &str, grants: &[String]) -> Result<Vec<Strin
         if app != "*" {
             return Err("admin is the whole admin screen: give * as the app".into());
         }
-    } else if key_match(ADMIN, what) {
+    } else if key_match(ADMIN, what) && !built_in {
         return Err(format!("{what:?} would also give admin: name the grants (kv-*), and admin on a line of its own"));
-    } else if grants_of(what, grants).is_empty() {
-        return Err(format!("{what:?} is no grant; known: {}, admin", grants.join(", ")));
+    } else if grants_of(what, grants).is_empty()
+        && let Some(why) = crate::manifest::misspelt(what, grants).filter(|_| !built_in)
+    {
+        return Err(format!("{why}; or admin"));
     }
     Ok(vec![who, app.to_string(), what.to_string()])
 }
@@ -304,9 +313,9 @@ impl Policies {
         self.current.read().clone()
     }
 
-    /// A policy no file holds: read once, never again.
+    /// A policy no file holds: read once, never again. It may give `*`.
     pub async fn built_in(text: &str, grants: Vec<String>) -> anyhow::Result<Policies> {
-        let policy = Policy::parse(text, &grants).await?;
+        let policy = Policy::parse_with(text, &grants, true).await?;
         Ok(Policies {
             path: None,
             grants,
@@ -489,7 +498,9 @@ mod tests {
     async fn mistakes_refuse_the_file_with_the_line() {
         let err = |text: &'static str| async move { Policy::parse(text, &kv()).await.err().map(|e| e.to_string()).unwrap_or_default() };
         assert!(err("p, anyone, webinars, kv-read\np, anyone, webinars, kv-fly").await.contains("line 2"));
-        assert!(err("p, anyone, webinars, kv-fly").await.contains("no grant; known: kv-read, kv-write, user-read, admin"));
+        assert!(err("p, anyone, webinars, kv-fly").await.contains("\"kv-fly\" is no grant; the kv- grants are kv-read, kv-write; or admin"));
+        assert!(err("p, anyone, webinars, Kv_Read").await.contains("is no grant: lowercase letters, digits and dashes"));
+        assert!(err("p, anyone, webinars, score-read\np, anyone, *, crm-*").await.is_empty(), "a Wasm kit's grants may come later");
         assert!(err("p, anyone, webinars, *").await.contains("would also give admin"));
         assert!(err("p, anyone, webinars, admin").await.contains("give * as the app"));
         assert!(err("p, bob, webinars, kv-read").await.contains("is no one"));

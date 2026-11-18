@@ -78,7 +78,7 @@ pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Opt
     } else {
         // Nothing to report yet: how the first app gets here, and the rules
         // it will run under.
-        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk, &shell.kits.names()));
+        body += &format!(r#"<div class="start">{}{}</div>"#, first_deploy(url), guardrails(&shell.risk, &shell.kits.now().names()));
     }
     let title = match selected.and(chosen) {
         Some(app) => format!("{} · {} admin", app.name, shell.name),
@@ -246,6 +246,7 @@ mod tests {
             seen: None,
             tile: monograms([id])[0],
             limits: Default::default(),
+            waits: None,
         }
     }
 

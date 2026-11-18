@@ -1479,16 +1479,17 @@ impl Board<'_> {
             .iter()
             .map(|(at, heat, c)| format!(r#"<i class="{}" data-hint="{}"></i>"#, heat.class(), escape(&self.cell_hint(a, *at, c))))
             .collect();
+        let name = if a.is_kit() { format!("{} (kit)", a.name) } else { a.name.clone() };
         let why = match a.unseen().next().or(a.problems.first()) {
-            Some(p) => format!("{}: {}", a.name, p.text),
-            None => format!("{}: {}", a.name, a.line()),
+            Some(p) => format!("{name}: {}", p.text),
+            None => format!("{name}: {}", a.line()),
         };
         format!(
             r#"<div class="c-row{sel}" data-app="{id}" data-href="{select}" data-open="{open}" data-find="{find}" data-status="{word}"><span class="c-n d">{n}</span><a class="c-name {name_ink}" href="{href}"{current} data-hint="{why}">{name}</a>{group_html}{limits}<span class="c-st {tone}">{word}</span><span class="c-cells">{cells}</span><span class="c-rate">{rate}</span></div>"#,
             sel = if selected { " sel" } else { "" },
             current = if selected { r#" aria-current="true""# } else { "" },
             id = escape(&a.id),
-            name = escape(&a.name),
+            name = if a.is_kit() { format!(r#"{}<span class="d"> kit</span>"#, escape(&a.name)) } else { escape(&a.name) },
             n = i + 1,
             tone = ink.class(),
             name_ink = if ink == Ink::Dim { Ink::White } else { ink }.class(),
@@ -1653,6 +1654,7 @@ impl Board<'_> {
             (None, Some(v)) => format!("{} from its folder", escape(v)),
             (None, None) => "not live".to_string(),
         };
+        let state = if a.is_kit() { format!("kit · {state}") } else { state };
         let left = format!(r#"{}<span class="c">{state}</span>"#, self.who_line(a));
         let lines: String = self
             .timeline(a)
@@ -2096,6 +2098,13 @@ fn verdict(a: &App, owner: &str) -> (String, String) {
         }
         ProblemKind::TurnedOff => {
             (format!("{} is off: visitors get the “turned off” page.", a.name), format!("Left for you: turn it on (X) when it's fixed; tell {owner}."))
+        }
+        ProblemKind::Waits => {
+            let kit = a.waits.as_ref().map_or("a kit", |(kit, _)| kit.as_str());
+            (
+                format!("{} waits for {kit}, which it uses: visitors get the “waiting” page.", a.name),
+                format!("Left for you: turn {kit} on, or make a version of it live."),
+            )
         }
         ProblemKind::NotRunning => {
             ("The live version didn't start.".to_string(), "Left for you: see the shell's output, or make another version live (V).".to_string())

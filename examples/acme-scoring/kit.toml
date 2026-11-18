@@ -1,0 +1,19 @@
+# A Wasm kit for acme-platform: it scores Acme's customers from the CRM,
+# offers the scores to apps (acme:scoring/score, wit/scoring.wit) and
+# shows them at /scoring. `make build`, then `appos deploy` here, as for an
+# app.
+[kit]
+id = "scoring"
+name = "Customer scores"
+version = "0.1.0"
+owner = "Sales Ops <sales-ops@acme.com>"
+group = "Sales"
+wasm = "target/wasm32-wasip2/release/acme_scoring.wasm"
+wit = ["wit/scoring.wit"]    # what it offers
+
+[grants.scoring-read]
+allows = "Read customer scores"
+functions = ["acme:scoring/score#score"]
+
+[capabilities]
+grant = ["crm-read"]         # it calls the CRM
