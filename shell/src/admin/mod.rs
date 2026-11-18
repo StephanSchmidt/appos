@@ -368,7 +368,6 @@ fn back(referer: Option<&str>) -> String {
 /// in its `<main>` and the header's time.
 fn page(shell: &Shell, viewer: &Viewer, state: Tone, here: &str, title: &str, body: &str, live: Option<&str>) -> String {
     let now = chrono::Local::now();
-    let body = if viewer.changes { body.to_string() } else { look_only(body) };
     let layout = Layout {
         picked: (viewer.scheme != Scheme::System).then(|| viewer.scheme.name()),
         title,
@@ -386,7 +385,7 @@ fn page(shell: &Shell, viewer: &Viewer, state: Tone, here: &str, title: &str, bo
         scheme: &viewer.scheme,
         who: viewer.who.identity().map(|id| (id.email.as_str(), id.name.as_str())),
         changes: viewer.changes,
-        body: &body,
+        body,
     };
     layout.render().unwrap_or_else(|e| format!("The page could not be drawn: {e}"))
 }
@@ -421,24 +420,6 @@ struct Layout<'a> {
     who: Option<(&'a str, &'a str)>,
     changes: bool,
     body: &'a str,
-}
-
-/// The page for someone who may look, not change: every form that changes
-/// something is inert. The light or dark switch and the token are theirs.
-fn look_only(body: &str) -> String {
-    let mut out = String::with_capacity(body.len() + 256);
-    let mut rest = body;
-    while let Some(at) = rest.find("<form ") {
-        let (before, form) = rest.split_at(at);
-        let tag = &form[..form.find('>').map_or(form.len(), |end| end + 1)];
-        let action = tag.split_once(r#"action=""#).and_then(|(_, a)| a.split('"').next()).unwrap_or("");
-        let changes = tag.contains(r#"method="post""#) && action.starts_with("/admin/") && !["/admin/scheme", "/admin/token"].contains(&action);
-        out.push_str(before);
-        out.push_str(if changes { "<form inert " } else { "<form " });
-        rest = &form["<form ".len()..];
-    }
-    out.push_str(rest);
-    out
 }
 
 async fn icon(ask: Ask) -> Reply {
