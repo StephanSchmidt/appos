@@ -325,6 +325,9 @@ pub(super) struct Board<'a> {
     requests: (Vec<Request>, u32),
     /// The toast's change, while Undo can still reverse it.
     undo: Option<i64>,
+    /// Whether the viewer may change things (admin-write); else every
+    /// control that changes something is inert.
+    changes: bool,
 }
 
 /// The screen's inks: a word's or a light's colour, never colour alone.
@@ -462,6 +465,7 @@ impl<'a> Board<'a> {
             events: vec![],
             requests: (vec![], 0),
             undo,
+            changes: true,
         };
         board.order = board.sorted();
         board.chosen = selected.and_then(|id| apps.iter().find(|a| a.id == id)).or_else(|| board.order.first().copied()).or(apps.first());
@@ -482,6 +486,12 @@ impl<'a> Board<'a> {
             }
         }
         board
+    }
+
+    /// For a viewer who may look, not change (`may` false).
+    pub(super) fn changes(mut self, may: bool) -> Self {
+        self.changes = may;
+        self
     }
 
     /// The selected app; none while there are no apps.

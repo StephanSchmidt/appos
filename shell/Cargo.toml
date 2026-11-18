@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+# The admin screen's HTML (admin/, templates/admin/), as apps make theirs.
+askama = "0.16"
 axum = "0.8"
 # Signed session cookies.
 base64 = "0.22"

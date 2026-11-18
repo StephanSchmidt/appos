@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use askama::Template;
 use axum::extract::{RawQuery, State};
 use axum::response::sse::{self, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt};
@@ -352,99 +353,65 @@ fn back(referer: Option<&str>) -> String {
     admin_path(path.split(['?', '#']).next().unwrap_or("")).unwrap_or("/admin").to_string()
 }
 
-/// A page with the header; `state` is the most pressing tone, for the tab's
-/// icon; `here` is the section of NAV it is in. A `live` page fetches
+/// A page with the header (templates/admin/page.html); `state` is the most
+/// pressing tone, for the tab's icon; `here` is the section of NAV it is in. A `live` page fetches
 /// itself from that URL when the stream says something changed and swaps
 /// in its `<main>` and the header's time.
 fn page(shell: &Shell, viewer: &Viewer, state: Tone, here: &str, title: &str, body: &str, live: Option<&str>) -> String {
-    let scheme = viewer.scheme;
-    let picked = match scheme {
-        Scheme::System => String::new(),
-        s => format!(r#" data-scheme="{}""#, s.name()),
-    };
-    let switch: String = SCHEMES
-        .iter()
-        .map(|s| {
-            format!(
-                r#"<button name="scheme" value="{}" aria-pressed="{}" aria-label="{label}" title="{label}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{}</svg></button>"#,
-                s.name(),
-                *s == scheme,
-                s.icon(),
-                label = s.label()
-            )
-        })
-        .collect();
-    let nav: String = NAV
-        .iter()
-        .map(|(label, path)| {
-            let current = if *path == here { r#" aria-current="page""# } else { "" };
-            format!(r#"<a href="{path}"{current}>{label}</a>"#)
-        })
-        .collect();
-    // Who is signed in, and the way out; looking only, it says so.
-    let looks = match viewer.changes {
-        true => "",
-        false => r#"<span class="looks" title="policy.csv gives you admin-read, not admin-write: the controls show, they don't act">Look only</span>"#,
-    };
-    let user = match viewer.who.identity() {
-        Some(id) => format!(
-            r#"<span class="user">{looks}<span title="{}">{}</span><form method="post" action="/_auth/sign-out"><button>Sign out</button></form></span>"#,
-            escape(&id.email),
-            escape(&id.name)
-        ),
-        None => looks.to_string(),
-    };
-    let body = if viewer.changes { body.to_string() } else { look_only(body) };
     let now = chrono::Local::now();
-    let icon = style::favicon(state);
-    // Live: the scripts, the stream on <body> (never swapped, so it stays
-    // connected), and a hidden element that fetches the page.
-    let (scripts, stream, refresh, updated) = match live {
-        Some(url) => (
-            format!(
-                r#"<meta name="htmx-config" content='{{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyEnabled":false}}'>
-<script src="{HTMX_PATH}" defer></script>
-<script src="{SSE_PATH}" defer></script>
-<script type="module" src="/admin/assets/admin.js"></script>
-"#
-            ),
-            format!(r#" hx-ext="sse" sse-connect="/admin/stream?since={}""#, shell.platform.newest().unwrap_or_default()),
-            format!(
-                r##"<div id="refresh" hidden hx-get="{}" hx-trigger="sse:changed, refresh" hx-select-oob="#live,#updated" hx-swap="none"></div>"##,
-                escape(url)
-            ),
-            r#" id="updated""#,
-        ),
-        None => (String::new(), String::new(), String::new(), ""),
+    let body = if viewer.changes { body.to_string() } else { look_only(body) };
+    let layout = Layout {
+        picked: (viewer.scheme != Scheme::System).then(|| viewer.scheme.name()),
+        title,
+        icon: style::favicon(state),
+        css: style::CSS.as_str(),
+        live,
+        htmx: HTMX_PATH,
+        sse: SSE_PATH,
+        since: if live.is_some() { shell.platform.newest().unwrap_or_default().to_string() } else { String::new() },
+        name: &shell.name,
+        nav: NAV.iter().map(|&(label, path)| Nav { label, path, current: path == here }).collect(),
+        full: now.format("%A, %-d %B %Y, %H:%M:%S").to_string(),
+        time: now.format("%H:%M:%S").to_string(),
+        schemes: SCHEMES,
+        scheme: &viewer.scheme,
+        who: viewer.who.identity().map(|id| (id.email.as_str(), id.name.as_str())),
+        changes: viewer.changes,
+        body: &body,
     };
-    format!(
-        r#"<!doctype html>
-<html lang="en"{picked}>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<link rel="icon" href="{icon}">
-<style>{}</style>
-{scripts}</head>
-<body{stream}>
-<div class="wrap">
-<header><a class="brand" href="/admin"><span class="mark" aria-hidden="true"></span>AppOS</a><span class="platform" title="This platform">{name}</span>
-<nav aria-label="Admin">{nav}</nav>
-<span class="where"{updated} title="{full}"><span class="live">Live</span><span class="lost">Reconnecting</span><span class="stale">Stale</span><span>Updated {time}</span></span>
-<form class="scheme" method="post" action="/admin/scheme" aria-label="Light or dark">{switch}</form>{user}</header>
-{refresh}<main id="live" data-icon="{icon}">
-{body}
-</main>
-</div>
-</body>
-</html>"#,
-        style::CSS.as_str(),
-        title = escape(title),
-        name = escape(&shell.name),
-        time = now.format("%H:%M:%S"),
-        full = now.format("%A, %-d %B %Y, %H:%M:%S"),
-    )
+    layout.render().unwrap_or_else(|e| format!("The page could not be drawn: {e}"))
+}
+
+/// A section in the header.
+struct Nav {
+    label: &'static str,
+    path: &'static str,
+    current: bool,
+}
+
+/// The page around every admin page: the header, and with `live` the
+/// scripts, the stream on `<body>` (never swapped, so it stays connected)
+/// and a hidden element that fetches the page.
+#[derive(askama::Template)]
+#[template(path = "admin/page.html")]
+struct Layout<'a> {
+    picked: Option<&'static str>,
+    title: &'a str,
+    icon: String,
+    css: &'a str,
+    live: Option<&'a str>,
+    htmx: &'a str,
+    sse: &'a str,
+    since: String,
+    name: &'a str,
+    nav: Vec<Nav>,
+    full: String,
+    time: String,
+    schemes: [Scheme; 3],
+    scheme: &'a Scheme,
+    who: Option<(&'a str, &'a str)>,
+    changes: bool,
+    body: &'a str,
 }
 
 /// The page for someone who may look, not change: every form that changes

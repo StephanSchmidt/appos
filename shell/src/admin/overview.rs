@@ -55,7 +55,7 @@ pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Opt
     if let Some(id) = selected.filter(|id| !apps.iter().any(|a| a.id == *id)) {
         return missing(shell, viewer, state, &format!("No app {id}."));
     }
-    let board = Board::new(shell, &apps, &view, now, selected);
+    let board = Board::new(shell, &apps, &view, now, selected).changes(viewer.changes);
     let chosen = board.chosen();
     // What needs attention first, then the apps, then the platform's numbers.
     let mut body = String::new();
