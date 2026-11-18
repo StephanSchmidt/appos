@@ -16,7 +16,7 @@
 </head>
 <body{% if live.is_some() %} hx-ext="sse" sse-connect="/admin/stream?since={{ since }}"{% endif %}>
 <div class="wrap">
-<header><a class="brand" href="/admin"><span class="mark" aria-hidden="true"></span>AppOS</a><span class="platform" title="This platform">{{ name }}</span>
+<header><a class="brand" href="/admin"><svg class="mark" viewBox="2.5 11.5 45 25" aria-hidden="true"><path d="M26 17.5h13M26 24h21M26 30.5h9"/><rect x="4" y="13" width="22" height="22"/></svg>AppOS</a><span class="platform" title="This platform">{{ name }}</span>
 <nav aria-label="Admin">{% for n in nav %}<a href="{{ n.path }}"{% if n.current %} aria-current="page"{% endif %}>{{ n.label }}</a>{% endfor %}</nav>
 <span class="where"{% if live.is_some() %} id="updated"{% endif %} title="{{ full }}"><span class="live">Live</span><span class="lost">Reconnecting</span><span class="stale">Stale</span><span>Updated {{ time }}</span></span>
 <form class="scheme" method="post" action="/admin/scheme" aria-label="Light or dark">

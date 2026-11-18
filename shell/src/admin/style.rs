@@ -238,9 +238,9 @@ pub(super) fn favicon(state: Tone) -> String {
         Tone::Warning | Tone::Caution => Some(tokens::WARNING.step(tokens::Theme::Light, 9)),
         _ => None,
     };
-    let dot = dot.map(|c| format!("<circle cx='24' cy='24' r='7' fill='{c}' stroke='white' stroke-width='2.5'/>")).unwrap_or_default();
+    let dot = dot.map(|c| format!("<circle cx='37' cy='37' r='10' fill='{c}' stroke='white' stroke-width='3.5'/>")).unwrap_or_default();
     let svg = format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='3' y='3' width='22' height='22' rx='6' fill='#ffe45c' stroke='#2b2a26' stroke-width='2'/>{dot}</svg>"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M29 16h13M29 32h18' stroke='#2b2a26' stroke-width='5'/><rect x='3' y='10' width='28' height='28' fill='#ffe45c' stroke='#2b2a26' stroke-width='4'/>{dot}</svg>"
     );
     let svg = svg.replace('%', "%25").replace('#', "%23").replace('<', "%3C").replace('>', "%3E");
     format!("data:image/svg+xml,{svg}")
@@ -290,7 +290,9 @@ h1, h2, h3, .kpi b, .summary > p, .rules li > b { font-variant-numeric: proporti
 /* The header is quieter than the work below it: small, muted, one current section. */
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; font-size: 13.5px; color: var(--muted); }
 .brand { display: flex; align-items: center; gap: 12px; font-size: 28px; line-height: 1; color: var(--ink); }
-.mark { width: 24px; height: 24px; border-radius: 6px; background: var(--lemon); box-shadow: inset 0 0 0 1.5px var(--dark-text); }
+.mark { flex: none; width: 43px; height: 24px; }
+.mark path { stroke: var(--ink); stroke-width: 3; }
+.mark rect { fill: var(--lemon); stroke: var(--dark-text); stroke-width: 2.5; }
 .platform { margin-left: -8px; font-weight: 500; }
 .platform::before { content: "/"; margin-right: 12px; color: var(--gray-7); }
 nav { display: flex; gap: 4px; }
