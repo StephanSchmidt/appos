@@ -1,0 +1,21 @@
+{% extends "admin/console/screen.html" %}
+
+{% block tag %}Requests{% endblock %}
+
+{% block left -%}
+<span class="c-clock">{{ name }}</span><span class="b">{{ cell }}</span><span>{{ count }}</span>
+{%- if let Some((ink, text)) = flag %}<span class="{{ ink.class() }}">{{ text }}</span>{% endif -%}
+{%- endblock %}
+
+{% block right %}<span class="d">newest {{ rows.len() }} of {{ total }}</span>{% endblock %}
+
+{% block body -%}
+<div class="c-row c-req c-colhead d"><span>Time</span><span>Request</span><span>Status</span><span class="c-rate">Sec</span><span>of {{ limit }} s</span></div><div class="c-list c-reqs">
+{%- for r in rows -%}
+<div class="c-row c-req" data-hint="{{ r.time }} {{ r.route }} · {{ r.word }} · {{ r.wall }} s of {{ limit }} s{{ r.why }}"><span class="d">{{ r.time }}</span><span class="{{ r.tone }}">{{ r.route }}</span><span class="{{ r.tone }}">{{ r.word }}</span><span class="c-rate">{{ r.wall }}</span><span class="c-bar1"><i class="{{ r.bar }}" style="width: {{ r.share }}%"></i></span></div>
+{%- else -%}
+<p class="c-none">No requests in this {{ unit }}.</p>
+{%- endfor -%}
+</div>
+{%- if let Some((ink, text)) = insight %}<div class="c-insight {{ ink.class() }}">{{ text }}</div>{% endif -%}
+{%- endblock %}

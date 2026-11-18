@@ -1,0 +1,18 @@
+{% extends "admin/console/screen.html" %}
+{% import "admin/console/macros.html" as m %}
+
+{% block tag %}Story{% endblock %}
+
+{% block left %}{% call m::who(name, group, owner) %}{% endcall %}<span class="c">{{ state }}</span>{% endblock %}
+
+{% block right %}<span class="d">What happened</span>{% endblock %}
+
+{% block body -%}
+<div class="c-lines">
+{%- for (at, text, ink) in lines -%}
+<div class="c-line"><span class="d">{{ at }}</span><span class="{{ ink.class() }}">{{ text }}</span></div>
+{%- else -%}
+<p class="c-none">Nothing happened to it yet.</p>
+{%- endfor -%}
+</div><div class="c-verdict"><span>{{ now }}{{ seen }}</span><span class="c">{{ yours }}</span></div>
+{%- endblock %}

@@ -1,0 +1,2 @@
+{%- import "admin/console/macros.html" as m -%}
+<a class="c-key{% if flat %} flat{% endif %}{% if page %} pg{% endif %}{% if here %} here{% endif %}" href="{{ href }}"{% call m::shortcut(letter) %}{% endcall %}{% if here %} aria-current="page"{% endif %} data-hint="{{ hint }}">{% call m::corner(letter) %}{% endcall %}{{ label }}</a>

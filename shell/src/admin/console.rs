@@ -27,6 +27,8 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
+use askama::Template;
+
 use crate::manifest::{MAX_RISK, Risk};
 use crate::platform::{Cell, Event, Kind, Outcome, Request, Version, VersionStatus};
 use crate::runtime::{AdminLimits, Budget};
@@ -639,37 +641,31 @@ fn status(a: &App, sums: Sums, now: i64) -> (&'static str, Ink) {
 
 // ---- small parts ---------------------------------------------------------------
 
+/// A part's HTML, from its template (templates/admin/console/); one that
+/// can't be drawn says so.
+fn draw(part: &impl Template) -> String {
+    part.render().unwrap_or_else(|e| format!("<p>This part could not be drawn: {}</p>", escape(&e.to_string())))
+}
+
 /// Seconds like "0.4" or "2.0".
 fn secs(us: u64) -> String {
     format!("{:.1}", us as f64 / 1e6)
 }
 
 /// The screen's four readouts: label, value, below, and its colour.
+#[derive(Template)]
+#[template(path = "admin/console/readouts.html")]
+struct Readouts<'r> {
+    items: &'r [(String, String, String, Ink)],
+}
+
 fn readouts(items: &[(String, String, String, Ink)]) -> String {
-    let items: String = items
-        .iter()
-        .map(|(label, value, sub, ink)| {
-            format!(
-                r#"<div class="c-readout {}"><span class="c-rl">{}</span><b>{}</b><span class="c-rl">{}</span></div>"#,
-                ink.class(),
-                escape(label),
-                escape(value),
-                escape(sub)
-            )
-        })
-        .collect();
-    format!(r#"<div class="c-readouts">{items}</div>"#)
+    draw(&Readouts { items })
 }
-
-/// The screen's last line: what the pointer is on, or what keys do now.
-fn hint(text: &str) -> String {
-    format!(r#"<div class="c-hint" data-default="{0}">{0}</div>"#, escape(text))
-}
-
-/// The power symbol on the platform's and an app's power button.
-const POWER_ICON: &str = r#"<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v8"></path><path d="M6.6 7a7.5 7.5 0 1 0 10.8 0"></path></svg>"#;
 
 /// A slide switch with an LED at each end: a button that flips it.
+#[derive(Template)]
+#[template(path = "admin/console/slide.html")]
 struct Slide<'s> {
     /// On: the nub at the first end (left, or top when upright).
     on: bool,
@@ -686,57 +682,40 @@ struct Slide<'s> {
 
 impl Slide<'_> {
     fn html(&self) -> String {
-        let class = format!("{}{}{}", if self.on { "" } else { " off" }, if self.upright { " v" } else { "" }, if self.dead { " dead" } else { "" });
-        let dead = if self.dead { r#" type="button" aria-disabled="true""# } else { "" };
-        let (corner, shortcut) = corner(self.letter);
-        let caption = if self.caption.is_empty() { String::new() } else { format!(r#"<span class="c-silk dim">{}</span>"#, escape(self.caption)) };
-        let led = |c: &str| if c.is_empty() { String::new() } else { format!(" {c}") };
-        format!(
-            r#"<button class="c-slide{class}" role="switch" aria-checked="{on}"{dead} aria-label="{label}"{shortcut} data-hint="{hint}">{corner}<span class="c-ends"><span class="c-led{first}"></span><span class="c-led{second}"></span></span><span class="c-track"><span class="c-nub"></span></span>{caption}</button>"#,
-            on = self.on && !self.dead,
-            label = escape(self.label),
-            hint = escape(self.hint),
-            first = led(self.leds.0),
-            second = led(self.leds.1),
-        )
+        draw(self)
     }
-}
-
-/// A key's letter in its corner, and the attributes that bind it; both
-/// empty without one.
-fn corner(letter: &str) -> (String, String) {
-    if letter.is_empty() {
-        return (String::new(), String::new());
-    }
-    (
-        format!(r#"<span class="c-kh" aria-hidden="true">{}</span>"#, escape(&key_name(letter))),
-        format!(r#" data-key="{}" aria-keyshortcuts="{}""#, escape(letter), escape(&aria_key(letter))),
-    )
 }
 
 /// A key: a link, its keyboard letter in the corner, its hint. `flat` keys
 /// sit in a strip; a page's key (`here` is some) is lit while its page shows.
 fn key(label: &str, href: &str, letter: &str, hint: &str, flat: bool, here: Option<bool>) -> String {
-    let (corner, shortcut) = corner(letter);
-    let class = format!("{}{}{}", if flat { " flat" } else { "" }, if here.is_some() { " pg" } else { "" }, if here == Some(true) { " here" } else { "" });
-    let current = if here == Some(true) { r#" aria-current="page""# } else { "" };
-    format!(r#"<a class="c-key{class}" href="{}"{shortcut}{current} data-hint="{}">{corner}{label}</a>"#, escape(href), escape(hint))
+    draw(&Key { label, href, letter, hint, flat, page: here.is_some(), here: here == Some(true) })
 }
 
-/// A flat key that posts a form.
-fn post_key(label: &str, action: &str, fields: &[(&str, &str)], letter: &str, hint: &str) -> String {
-    let fields: String = fields.iter().map(|(k, v)| format!(r#"<input type="hidden" name="{k}" value="{}">"#, escape(v))).collect();
-    let (corner, shortcut) = corner(letter);
-    format!(
-        r#"<form class="c-keyform" method="post" action="{}">{fields}<button class="c-key flat"{shortcut} data-hint="{}">{corner}{label}</button></form>"#,
-        escape(action),
-        escape(hint)
-    )
+#[derive(Template)]
+#[template(path = "admin/console/key.html")]
+struct Key<'k> {
+    label: &'k str,
+    href: &'k str,
+    /// The keyboard's key that presses it; "" for none.
+    letter: &'k str,
+    hint: &'k str,
+    flat: bool,
+    /// A page's key, lit (`here`) while its page shows.
+    page: bool,
+    here: bool,
 }
 
-/// A key that does nothing now.
-fn dead_key(label: &str) -> String {
-    format!(r#"<span class="c-key flat off">{label}</span>"#)
+/// A flat key that posts a form; inert for a viewer who may only look.
+#[derive(Template)]
+#[template(path = "admin/console/post_key.html")]
+struct PostKey<'k> {
+    label: &'k str,
+    action: &'k str,
+    fields: &'k [(&'k str, &'k str)],
+    letter: &'k str,
+    hint: &'k str,
+    changes: bool,
 }
 
 /// A key as its corner says it.
@@ -801,6 +780,39 @@ struct Light {
     hint: String,
 }
 
+/// A knob as it is drawn: its look, the ring's and the pointer's angles in
+/// degrees, its slider, and its lights or detent dots where they sit.
+#[derive(Template)]
+#[template(path = "admin/console/knob.html")]
+struct KnobHtml<'k> {
+    k: &'k Knob<'k>,
+    class: &'static str,
+    ring: String,
+    angle: String,
+    slider: Option<Slider>,
+    lights: Vec<(&'k Light, Spot)>,
+    /// The lights' radius: smaller when there are many.
+    r: f64,
+    dots: Vec<Spot>,
+}
+
+/// A knob as a slider, for assistive tech and admin.js: its last stop, and
+/// each value, label, page and hint as a JSON list.
+struct Slider {
+    max: usize,
+    values: String,
+    labels: String,
+    hrefs: String,
+    hints: String,
+}
+
+/// Where a light or a dot sits round a knob, and whether it is lit.
+struct Spot {
+    x: String,
+    y: String,
+    on: bool,
+}
+
 impl Knob<'_> {
     fn html(&self) -> String {
         // The pointer: on the lit light or dot, else at `at`. Light k stands
@@ -814,96 +826,419 @@ impl Knob<'_> {
             (_, true, n) if n > 1 => self.current as f64 / (n - 1) as f64,
             _ => self.at.unwrap_or(0.0),
         };
-        let a = -135.0 + frac * 270.0;
-        // A slider for assistive tech and admin.js: where it is, and for
-        // each value its label, page and hint.
-        let data = if self.param.is_empty() {
-            String::new()
-        } else {
-            let json = |f: fn(&Stop) -> &str| escape(&serde_json::to_string(&self.stops.iter().map(f).collect::<Vec<_>>()).unwrap_or_default());
-            format!(
-                r#" role="slider" aria-valuemin="0" aria-valuemax="{}" aria-valuenow="{}" aria-valuetext="{}" data-knob="{}" data-at="{}" data-values="{}" data-labels="{}" data-hrefs="{}" data-hints="{}""#,
-                self.stops.len().saturating_sub(1),
-                self.current,
-                escape(&self.value),
-                self.param,
-                self.current,
-                json(|s| &s.value),
-                json(|s| &s.label),
-                json(|s| &s.href),
-                json(|s| &s.hint),
-            )
-        };
+        let json = |f: fn(&Stop) -> &str| serde_json::to_string(&self.stops.iter().map(f).collect::<Vec<_>>()).unwrap_or_default();
+        let slider = (!self.param.is_empty()).then(|| Slider {
+            max: self.stops.len().saturating_sub(1),
+            values: json(|s| &s.value),
+            labels: json(|s| &s.label),
+            hrefs: json(|s| &s.href),
+            hints: json(|s| &s.hint),
+        });
         let ring = match (self.at, self.detents) {
-            (Some(at), false) => format!(r#" style="--v: {:.0}deg""#, at * 270.0),
-            _ => r#" style="--v: 0deg""#.to_string(),
+            (Some(at), false) => format!("{:.0}", at * 270.0),
+            _ => "0".to_string(),
         };
-        let dots = if lights > 0 {
-            let r = if lights <= 16 { 3.0 } else { 2.2 };
-            let dots: String = self
-                .lights
-                .iter()
-                .enumerate()
-                .map(|(k, l)| {
-                    let ang = (-135.0 + if lights > 1 { k as f64 * 270.0 / (lights - 1) as f64 } else { 0.0 }).to_radians();
-                    let (x, y) = (64.0 + 60.0 * ang.sin(), 64.0 - 60.0 * ang.cos());
-                    format!(
-                        r#"<circle class="{}{}" cx="{x:.1}" cy="{y:.1}" r="{r}" data-from="{}" data-i="{}" data-hint="{}"></circle>"#,
-                        l.ink.class(),
-                        if k == lit_light { " on" } else { "" },
-                        l.from,
-                        l.at,
-                        escape(&l.hint)
-                    )
-                })
-                .collect();
-            format!(r#"<svg class="c-dots" viewBox="0 0 128 128" aria-hidden="true">{dots}</svg>"#)
-        } else if self.detents && self.stops.len() > 1 {
-            let n = self.stops.len();
-            let dots: String = (0..n)
-                .map(|k| {
-                    let ang = (-135.0 + k as f64 * 270.0 / (n - 1) as f64).to_radians();
-                    let (x, y) = (37.0 + 32.0 * ang.sin(), 37.0 - 32.0 * ang.cos());
-                    format!(r#"<circle cx="{x:.1}" cy="{y:.1}" r="2.6"{}></circle>"#, if k == self.current { r#" class="on""# } else { "" })
-                })
-                .collect();
-            format!(r#"<svg class="c-dots" viewBox="0 0 74 74" aria-hidden="true">{dots}</svg>"#)
-        } else {
-            String::new()
+        // Round the knob from -135° to 135°: the lights on a ring of 60 in
+        // 128, the detent dots on one of 32 in 74.
+        let spot = |k: usize, n: usize, centre: f64, radius: f64, on: bool| {
+            let ang = (-135.0 + if n > 1 { k as f64 * 270.0 / (n - 1) as f64 } else { 0.0 }).to_radians();
+            Spot { x: format!("{:.1}", centre + radius * ang.sin()), y: format!("{:.1}", centre - radius * ang.cos()), on }
         };
-        let class = match self.detents {
-            _ if lights > 0 => "c-det l",
-            true => "c-det",
-            false => "c-ring",
-        };
-        let lit = if self.lit { " lit" } else { "" };
-        let (_, shortcut) = corner(self.letter);
-        format!(
-            r#"<div class="c-enc"><span class="c-silk">{label}</span><a class="{class}{lit}" href="{href}" draggable="false"{shortcut}{ring}{data} data-hint="{hint}" aria-label="{label}">{dots}<span class="c-knob {size}" style="--a: {a:.0}deg"></span></a><span class="c-val">{value}</span><span class="c-silk dim">{sub}</span></div>"#,
-            label = self.label,
-            href = escape(&self.href),
-            hint = escape(&self.hint),
-            value = escape(&self.value),
-            size = self.size,
-            sub = self.sub,
-        )
+        let n = self.stops.len();
+        let dots = if lights == 0 && self.detents && n > 1 { (0..n).map(|k| spot(k, n, 37.0, 32.0, k == self.current)).collect() } else { vec![] };
+        draw(&KnobHtml {
+            k: self,
+            class: match self.detents {
+                _ if lights > 0 => "c-det l",
+                true => "c-det",
+                false => "c-ring",
+            },
+            ring,
+            angle: format!("{:.0}", -135.0 + frac * 270.0),
+            slider,
+            lights: self.lights.iter().enumerate().map(|(k, l)| (l, spot(k, lights, 64.0, 60.0, k == lit_light))).collect(),
+            r: if lights <= 16 { 3.0 } else { 2.2 },
+            dots,
+        })
     }
 }
 
 // ---- the console ---------------------------------------------------------------
 
+/// The console around the screen.
+#[derive(Template)]
+#[template(path = "admin/console/console.html")]
+struct Console<'a> {
+    app: &'a App,
+    page: &'static str,
+    platform: &'a str,
+    ticker: String,
+    left: String,
+    screen: String,
+    /// Under the screen: what the page shows, and what keys do.
+    about: String,
+    keys: String,
+    right: String,
+    bottom: String,
+}
+
+/// The ticker: ◀ ▶, what needs you, Open and Seen, Frozen, the load.
+#[derive(Template)]
+#[template(path = "admin/console/ticker.html")]
+struct Ticker<'a> {
+    prev: String,
+    next: String,
+    led: &'static str,
+    /// What needs you; none when nothing does.
+    item: Option<Item<'a>>,
+    /// Without one: how many apps, and how many run.
+    apps: String,
+    running: usize,
+    /// Deploys frozen: since when, and by whom.
+    frozen: Option<String>,
+    /// policy.csv refused: when.
+    policy: Option<String>,
+    /// The load's lit LEDs, the last minute's requests and the busiest
+    /// minute's this hour.
+    lit: usize,
+    cur: usize,
+    max: usize,
+}
+
+/// One that needs you: where in the inbox, the app and its group, its
+/// first problem and how many more, and its Open and Seen keys.
+struct Item<'a> {
+    at: usize,
+    of: usize,
+    name: &'a str,
+    group: String,
+    said: &'a str,
+    more: usize,
+    open: String,
+    seen: String,
+}
+
+/// The left column: the knobs and the List and Map keys.
+#[derive(Template)]
+#[template(path = "admin/console/left.html")]
+struct Left {
+    app: String,
+    group: String,
+    range: String,
+    list: String,
+    map: String,
+}
+
+/// The right column: the page keys, the on/off slide, the faders.
+#[derive(Template)]
+#[template(path = "admin/console/right.html")]
+struct Right<'a> {
+    name: &'a str,
+    story: String,
+    requests: String,
+    versions: String,
+    power: String,
+    /// Where the slide posts; none while the app isn't running.
+    action: Option<String>,
+    then: String,
+    changes: bool,
+    faders: String,
+}
+
+/// The three faders, each in a form that posts only its own value.
+#[derive(Template)]
+#[template(path = "admin/console/faders.html")]
+struct Faders {
+    faders: [String; 3],
+    action: String,
+    then: String,
+    changes: bool,
+}
+
+/// The platform's power button and Freeze switch.
+#[derive(Template)]
+#[template(path = "admin/console/platform.html")]
+struct Platform {
+    /// "on" or "off": the button's ring.
+    power: &'static str,
+    action: &'static str,
+    hint: String,
+    label: &'static str,
+    /// What the Freeze switch posts.
+    flip: &'static str,
+    then: String,
+    freeze: String,
+    changes: bool,
+}
+
+/// Below the device: the pins, the step keys and the platform.
+#[derive(Template)]
+#[template(path = "admin/console/bottom.html")]
+struct Bottom {
+    /// Where a pin jumps, `{id}` the app.
+    jump: String,
+    ago: &'static str,
+    unit: &'static str,
+    steps: Vec<Step>,
+    platform: String,
+}
+
+/// A step key: its cell's requests, and whether the screen shows them.
+struct Step {
+    href: String,
+    hint: String,
+    label: String,
+    shown: bool,
+}
+
+/// What a change did, with its Undo.
+#[derive(Template)]
+#[template(path = "admin/console/toast.html")]
+struct Toast<'a> {
+    msg: &'a str,
+    at: String,
+    failed: bool,
+    /// The event Undo reverses, and the page it comes back to.
+    undo: Option<(i64, String)>,
+    changes: bool,
+}
+
+/// The list page.
+#[derive(Template)]
+#[template(path = "admin/console/list.html")]
+struct List {
+    toast: String,
+    clock: String,
+    /// Group or find narrow it: blue.
+    narrowed: bool,
+    filter: String,
+    needs: usize,
+    find: String,
+    range: String,
+    by_name: SortBy,
+    by_group: SortBy,
+    by_status: SortBy,
+    by_cells: SortBy,
+    by_rate: SortBy,
+    lines: Vec<Line>,
+    /// Without apps: the list without find and group.
+    show_all: String,
+    minimap: String,
+    foot: String,
+    hint: String,
+}
+
+/// A column's head: a click sorts by it.
+struct SortBy {
+    class: &'static str,
+    href: String,
+    /// The list is sorted by it.
+    on: bool,
+    label: String,
+    text: String,
+}
+
+/// A line on the list: an app's row, or one between rows that says what
+/// follows, in its ink.
+enum Line {
+    Sep(&'static str, String),
+    Row(String),
+}
+
+/// An app's row on the list.
+#[derive(Template)]
+#[template(path = "admin/console/row.html")]
+struct Row<'a> {
+    app: &'a App,
+    n: usize,
+    selected: bool,
+    href: String,
+    select: String,
+    open: String,
+    find: String,
+    word: &'static str,
+    tone: &'static str,
+    name_ink: &'static str,
+    kit: bool,
+    why: String,
+    group: String,
+    limits: Vec<Limit>,
+    cells: Vec<(Heat, String)>,
+    rate: String,
+}
+
+/// A limit per request as a row shows it: cyan (`set`) where an admin set it.
+struct Limit {
+    what: &'static str,
+    value: String,
+    whose: String,
+    set: bool,
+}
+
+#[derive(Template)]
+#[template(path = "admin/console/minimap.html")]
+struct Minimap {
+    n: usize,
+    first: usize,
+    shown: usize,
+    /// The apps that aren't fine: their place and ink.
+    marks: Vec<(usize, Ink)>,
+}
+
+/// Find, in the list's first line: the rest of the view rides along.
+#[derive(Template)]
+#[template(path = "admin/console/find.html")]
+struct Find<'a> {
+    action: String,
+    q: &'a str,
+    hidden: Vec<(String, String)>,
+}
+
+/// The story page.
+#[derive(Template)]
+#[template(path = "admin/console/story.html")]
+struct Story<'a> {
+    toast: String,
+    name: &'a str,
+    group: String,
+    owner: String,
+    state: String,
+    lines: Vec<(String, String, Ink)>,
+    /// What is true now, seen when, and what is left for you.
+    now: String,
+    seen: String,
+    yours: String,
+    foot: String,
+    hint: &'static str,
+}
+
+/// The requests page.
+#[derive(Template)]
+#[template(path = "admin/console/log.html")]
+struct Log<'a> {
+    toast: String,
+    name: &'a str,
+    cell: String,
+    count: String,
+    /// Stopped at the limit, or failed.
+    flag: Option<(Ink, String)>,
+    total: u32,
+    limit: String,
+    rows: Vec<ReqRow<'a>>,
+    unit: &'static str,
+    insight: Option<(Ink, String)>,
+    foot: String,
+    hint: String,
+}
+
+/// A request's row: when, the route, how it went, how long, and how much
+/// of the limit as a bar.
+struct ReqRow<'a> {
+    time: String,
+    route: &'a str,
+    word: &'static str,
+    wall: String,
+    why: String,
+    tone: &'static str,
+    bar: &'static str,
+    share: String,
+}
+
+/// The versions page.
+#[derive(Template)]
+#[template(path = "admin/console/versions.html")]
+struct Versions<'a> {
+    toast: String,
+    name: &'a str,
+    group: String,
+    owner: String,
+    kept: usize,
+    live: Option<&'a str>,
+    rows: Vec<VersionRow<'a>>,
+    pick: Pick<'a>,
+    foot: String,
+    hint: &'static str,
+}
+
+/// A version's row; a click shows what changes if it goes live.
+struct VersionRow<'a> {
+    href: String,
+    open: String,
+    picked: bool,
+    version: &'a str,
+    at: String,
+    note: String,
+    tone: &'static str,
+}
+
+/// What the versions page says about the version it shows.
+enum Pick<'a> {
+    Refused {
+        version: &'a str,
+        reason: &'a str,
+    },
+    Live(&'a str),
+    /// Another one: how it compares with the live one.
+    Other(String),
+    Nothing,
+}
+
+/// A change on the screen: a button that says what it does, and Cancel.
+#[derive(Template)]
+#[template(path = "admin/console/form.html")]
+struct ActForm<'a> {
+    action: &'a str,
+    fields: Vec<(&'a str, &'a str)>,
+    button: &'a str,
+    cancel: String,
+    changes: bool,
+}
+
+/// The map page.
+#[derive(Template)]
+#[template(path = "admin/console/map.html")]
+struct Map<'a> {
+    toast: String,
+    groups: String,
+    apps: String,
+    range: String,
+    unit: &'static str,
+    rows: Vec<MapRow<'a>>,
+    foot: String,
+    hint: &'static str,
+}
+
+/// A group on the map: a square per app, and how many need you.
+struct MapRow<'a> {
+    sel: bool,
+    href: String,
+    name: String,
+    squares: Vec<Square<'a>>,
+    note: Option<(Ink, usize, String)>,
+}
+
+struct Square<'a> {
+    app: &'a App,
+    heat: Heat,
+    cur: bool,
+    href: String,
+    open: String,
+    what: String,
+    rate: String,
+}
+
 impl Board<'_> {
     /// The console, for the selected app; empty without apps.
     pub(super) fn html(&self) -> String {
         let Some(chosen) = self.chosen else { return String::new() };
-        let lcd = match self.view.page {
+        let screen = match self.view.page {
             Page::List => self.list(chosen),
             Page::Story => self.story(chosen),
             Page::Log => self.log(chosen),
             Page::Versions => self.versions(chosen),
             Page::Map => self.map(chosen),
         };
-        let foot = match self.view.page {
+        let (about, keys) = match self.view.page {
             Page::List => match self.view.sort {
                 Sort::Needs => ("Needs you first, then busiest".to_string(), format!("strip = all {}", self.order.len())),
                 Sort::Group => ("By group, needs you first in each".to_string(), format!("strip = all {}", self.order.len())),
@@ -914,32 +1249,18 @@ impl Board<'_> {
             Page::Map => ("One row per group, from app.toml".to_string(), "click a group = only its apps".to_string()),
             Page::Versions => ("Click a version to see what changes".to_string(), "nothing changes before you press the button".to_string()),
         };
-        let shell = self.shell;
-        format!(
-            r#"<section class="console" id="console" aria-label="Platform console" data-app="{id}" data-name="{name}" data-page="{page}" data-failed="✗ No answer from the shell: the screen shows what it had · try again">
-{ticker}
-<div class="c-device">
-<span class="c-screw tl"></span><span class="c-screw tr"></span><span class="c-screw bl"></span><span class="c-screw br"></span>
-<div class="c-top"><span class="c-model">APPOS-1</span><span class="c-silk dim">Platform console · {platform}</span><span class="c-grow"></span><span class="c-silk dim c-wide">Hover anything: the screen's last line explains it</span></div>
-<div class="c-body">
-{left}
-<div class="c-mid"><div class="c-bezel"><div class="c-lcd">{lcd}</div></div><div class="c-foot"><span class="c-silk dim">{f0}</span><span class="c-silk dim">{f1}</span></div></div>
-{right}
-</div>
-{bottom}
-</div>
-</section>"#,
-            id = escape(&chosen.id),
-            name = escape(&chosen.name),
-            page = self.view.page.name(),
-            ticker = self.ticker(chosen),
-            platform = escape(&shell.name),
-            left = self.left(chosen),
-            right = self.right(chosen),
-            bottom = self.bottom(chosen),
-            f0 = escape(&foot.0),
-            f1 = escape(&foot.1),
-        )
+        draw(&Console {
+            app: chosen,
+            page: self.view.page.name(),
+            platform: &self.shell.name,
+            ticker: self.ticker(chosen),
+            left: self.left(chosen),
+            screen,
+            about,
+            keys,
+            right: self.right(chosen),
+            bottom: self.bottom(chosen),
+        })
     }
 
     // ---- the ticker: the inbox ------------------------------------------------
@@ -949,67 +1270,50 @@ impl Board<'_> {
         // The selected app's item, else the first.
         let at = self.inbox.iter().position(|a| a.id == chosen.id).unwrap_or(0);
         let list = self.view.to(Page::List);
-        let (text, led, open, seen, prev, next) = match self.inbox.get(at) {
+        let (item, led, prev, next) = match self.inbox.get(at) {
             Some(a) => {
                 let unseen: Vec<&Problem> = a.unseen().collect();
                 let p = unseen[0];
-                let more = if unseen.len() > 1 { format!(" · {} more", unseen.len() - 1) } else { String::new() };
-                let group = group_of(a);
-                let group = if group.is_empty() { String::new() } else { format!(r#"<span class="c-idx">{}</span>"#, escape(&group)) };
-                let text = format!(
-                    r#"<span class="c-idx">{}/{n}</span><b>{}</b>{group}<span class="c-said">{}{more}</span>"#,
-                    at + 1,
-                    escape(&a.name),
-                    escape(&p.text)
-                );
                 let kinds: Vec<&str> = unseen.iter().map(|p| p.kind.as_str()).collect();
                 let then = list.path(Some(&a.id));
-                let open = key("Open", &self.view.to(Page::Story).link(Some(&a.id)), "", &format!("Open: {}'s story, from the event log", a.name), true, None);
-                let seen = post_key(
-                    "Seen",
-                    &format!("/admin/apps/{}/seen", form_urlencoded::byte_serialize(a.id.as_bytes()).collect::<String>()),
-                    &[("kinds", &kinds.join(",")), ("then", &then)],
-                    "s",
-                    &format!("Seen: {} leaves the inbox until something new happens; logged as admin", a.name),
-                );
+                let item = Item {
+                    at: at + 1,
+                    of: n,
+                    name: &a.name,
+                    group: group_of(a),
+                    said: &p.text,
+                    more: unseen.len() - 1,
+                    open: key("Open", &self.view.to(Page::Story).link(Some(&a.id)), "", &format!("Open: {}'s story, from the event log", a.name), true, None),
+                    seen: draw(&PostKey {
+                        label: "Seen",
+                        action: &format!("/admin/apps/{}/seen", form_urlencoded::byte_serialize(a.id.as_bytes()).collect::<String>()),
+                        fields: &[("kinds", &kinds.join(",")), ("then", &then)],
+                        letter: "s",
+                        hint: &format!("Seen: {} leaves the inbox until something new happens; logged as admin", a.name),
+                        changes: self.changes,
+                    }),
+                };
                 let prev = self.inbox[(at + n - 1) % n];
                 let next = self.inbox[(at + 1) % n];
                 let led = if a.off.is_some() { Ink::Coral } else { Ink::of(p.tone) };
-                (text, led, open, seen, list.link(Some(&prev.id)), list.link(Some(&next.id)))
+                (Some(item), led, list.link(Some(&prev.id)), list.link(Some(&next.id)))
             }
-            None => {
-                let running = self.apps.iter().filter(|a| a.running.is_some() && a.off.is_none()).count();
-                let text = format!(r#"<span class="c-said">Nothing needs you · {} · {running} running</span>"#, plural(self.apps.len(), "app"));
-                (text, Ink::Cyan, dead_key("Open"), dead_key("Seen"), list.link(Some(&chosen.id)), list.link(Some(&chosen.id)))
-            }
-        };
-        let led = led.led();
-        let (prev, next) = (escape(&prev), escape(&next));
-        let frozen = match &self.frozen {
-            Some(e) => format!(
-                r#"<span class="c-frozen" data-hint="Deploys frozen since {} {}: new deploys wait for an admin; the Freeze switch, bottom right, lets them go live">Frozen</span>"#,
-                clock(e.at),
-                escape(&super::model::by(e)),
-            ),
-            None => String::new(),
-        };
-        let policy = match &self.policy {
-            Some((at, _)) => format!(
-                r#"<a class="c-frozen" href="/admin/policy" data-hint="policy.csv changed at {} but has a mistake; the policy stays as it was">Policy refused</a>"#,
-                clock(*at)
-            ),
-            None => String::new(),
+            None => (None, Ink::Cyan, list.link(Some(&chosen.id)), list.link(Some(&chosen.id))),
         };
         let (lit, cur, max) = self.load();
-        let leds: String = (0..8).map(|i| format!(r#"<i class="c-led sq{}"></i>"#, if i < lit { " blue" } else { "" })).collect();
-        format!(
-            r#"<div class="c-ticker">
-<a class="c-key flat c-arrow" href="{prev}" data-key="p" data-hint="Previous that needs you (P)" aria-label="Previous that needs you">◀</a><a class="c-key flat c-arrow" href="{next}" data-key="n" data-hint="Next that needs you (N)" aria-label="Next that needs you">▶</a>
-<div class="c-tick" role="status"><span class="c-led {led}"></span>{text}</div>
-<span class="c-tacts">{open}{seen}</span>
-{frozen}{policy}<span class="c-load" data-hint="Load: {cur} requests in the last minute; the busiest minute this hour had {max}"><span class="c-silk dim">Load</span><span class="c-leds">{leds}</span></span>
-</div>"#
-        )
+        draw(&Ticker {
+            prev,
+            next,
+            led: led.led(),
+            item,
+            apps: plural(self.apps.len(), "app"),
+            running: self.apps.iter().filter(|a| a.running.is_some() && a.off.is_none()).count(),
+            frozen: self.frozen.as_ref().map(|e| format!("{} {}", clock(e.at), super::model::by(e))),
+            policy: self.policy.as_ref().map(|(at, _)| clock(*at)),
+            lit,
+            cur,
+            max,
+        })
     }
 
     /// The platform's load: the last minute's requests against the busiest
@@ -1138,15 +1442,11 @@ impl Board<'_> {
             Page::List if v.group.is_some() => v.with(|x| x.group = None),
             _ => v.to(Page::List),
         };
-        format!(
-            r#"<div class="c-left"><div class="c-grp"><span class="c-silk">Browse</span><span class="c-silk dim">which apps</span></div>
-<div class="c-big">{app}</div>
-<div class="c-knobs">{group}{range}</div>
-<div class="c-keys2">{list}{map}</div></div>"#,
-            app = app_knob.html(),
-            group = group_knob.html(),
-            range = range_knob.html(),
-            list = key(
+        draw(&Left {
+            app: app_knob.html(),
+            group: group_knob.html(),
+            range: range_knob.html(),
+            list: key(
                 "List",
                 &list.link(Some(&chosen.id)),
                 "Escape",
@@ -1154,9 +1454,8 @@ impl Board<'_> {
                 true,
                 Some(v.page == Page::List),
             ),
-            map =
-                key("Map", &v.to(Page::Map).link(Some(&chosen.id)), "m", "Map: every app on one screen, a row per group (M)", true, Some(v.page == Page::Map)),
-        )
+            map: key("Map", &v.to(Page::Map).link(Some(&chosen.id)), "m", "Map: every app on one screen, a row per group (M)", true, Some(v.page == Page::Map)),
+        })
     }
 
     // ---- the right column: what to do ----------------------------------------------
@@ -1164,15 +1463,13 @@ impl Board<'_> {
     fn right(&self, chosen: &App) -> String {
         let v = self.view;
         let id = chosen.id.as_str();
-        let then = escape(&v.path(Some(id)));
-        let action = |word: &str| escape(&format!("/admin/apps/{}/{word}", form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()));
         let name = chosen.name.as_str();
         // The app's on/off: green on the left while visitors get it, red on the right once off.
-        let power = if chosen.running.is_none() {
+        let (power, action) = if chosen.running.is_none() {
             let hint = format!("On/off: {name} isn't running, so there is nothing to turn off");
             let label = format!("{name} isn't running");
             let button = Slide { on: false, upright: false, dead: true, leds: ("", ""), label: &label, letter: "", caption: "not running", hint: &hint };
-            format!(r#"<div class="c-apwr">{}</div>"#, button.html())
+            (button.html(), None)
         } else {
             let off = chosen.off.is_some();
             let hint = if off {
@@ -1182,25 +1479,21 @@ impl Board<'_> {
             };
             let leds = if off { ("", "red") } else { ("green", "") };
             let button = Slide { on: !off, upright: false, dead: false, leds, label: name, letter: "x", caption: if off { "off" } else { "on" }, hint: &hint };
-            format!(
-                r#"<form class="c-apwr" method="post" action="{}"><input type="hidden" name="then" value="{then}">{}</form>"#,
-                action(if off { "on" } else { "off" }),
-                button.html()
-            )
+            let word = if off { "on" } else { "off" };
+            (button.html(), Some(format!("/admin/apps/{}/{word}", form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>())))
         };
         let page_key = |label: &str, page: Page, letter: &str, hint: &str| key(label, &v.to(page).link(Some(id)), letter, hint, false, Some(v.page == page));
-        format!(
-            r#"<div class="c-right"><div class="c-grp"><span class="c-silk">This app</span></div><span class="c-val c-this">{name}</span>
-<div class="c-col">{story}{requests}{versions}</div>
-{power}
-<div class="c-grp c-group"><span class="c-silk">Limits</span><span class="c-silk dim">per request</span></div>
-{faders}</div>"#,
-            name = escape(name),
-            faders = self.faders(chosen),
-            story = page_key("Story", Page::Story, "Enter", "Story: what happened to it, what is wrong now, what is left for you (↵)"),
-            requests = page_key("Requests", Page::Log, "r", "Requests: one minute's requests; the step keys below pick the minute (R)"),
-            versions = page_key("Versions", Page::Versions, "v", "Versions: every kept version; pick one to roll back to or make live (V)"),
-        )
+        draw(&Right {
+            name,
+            story: page_key("Story", Page::Story, "Enter", "Story: what happened to it, what is wrong now, what is left for you (↵)"),
+            requests: page_key("Requests", Page::Log, "r", "Requests: one minute's requests; the step keys below pick the minute (R)"),
+            versions: page_key("Versions", Page::Versions, "v", "Versions: every kept version; pick one to roll back to or make live (V)"),
+            power,
+            action,
+            then: v.path(Some(id)),
+            changes: self.changes,
+            faders: self.faders(chosen),
+        })
     }
 
     /// The app's limits per request as three faders: memory, time and fuel,
@@ -1255,29 +1548,33 @@ impl Board<'_> {
             },
         };
         // Each fader posts only its own value; the shell keeps the others.
-        let action = format!("/admin/apps/{}/limits", form_urlencoded::byte_serialize(chosen.id.as_bytes()).collect::<String>());
-        let then = escape(&self.view.path(Some(&chosen.id)));
-        let form = |f: &Fader| {
-            format!(r#"<form class="c-fdrf" method="post" action="{}"><input type="hidden" name="then" value="{then}">{}</form>"#, escape(&action), f.html())
-        };
-        format!(r#"<div class="c-faders">{}{}{}</div>"#, form(&mem), form(&time), form(&fuel))
+        draw(&Faders {
+            faders: [mem.html(), time.html(), fuel.html()],
+            action: format!("/admin/apps/{}/limits", form_urlencoded::byte_serialize(chosen.id.as_bytes()).collect::<String>()),
+            then: self.view.path(Some(&chosen.id)),
+            changes: self.changes,
+        })
     }
 
     /// The platform's controls, beside the pins and step keys: the power
     /// button (Stop all, Start all) and the Freeze switch. Both act at once.
     fn platform(&self, chosen: &App) -> String {
-        let v = self.view;
-        let id = chosen.id.as_str();
         let stopped = &self.stopped;
         let running = self.apps.iter().filter(|a| a.running.is_some() && a.off.is_none()).count();
-        let (power, power_action, power_hint) = if stopped.is_empty() {
+        let (power, action, hint, label) = if stopped.is_empty() {
             (
                 "on",
                 "/admin/stop-all",
                 format!("Power: {} on; press to turn every app off at once, visitors get a 503; undo from the toast", plural(running, "app")),
+                "Stop all apps",
             )
         } else {
-            ("off", "/admin/start-all", format!("Power: Stop all turned {} off; press to turn them back on", plural(stopped.len(), "app")))
+            (
+                "off",
+                "/admin/start-all",
+                format!("Power: Stop all turned {} off; press to turn them back on", plural(stopped.len(), "app")),
+                "Start the stopped apps",
+            )
         };
         let frozen = self.frozen.is_some();
         let held = self.apps.iter().flat_map(|a| &a.versions).filter(|x| x.status == VersionStatus::Waiting).count();
@@ -1291,32 +1588,23 @@ impl Board<'_> {
         };
         // Up and amber: deploys held. Down and green: deploys go live.
         let leds = if frozen { ("amber", "") } else { ("", "green") };
-        let freeze = Slide { on: frozen, upright: true, dead: false, leds, label: "Freeze deploys", letter: "f", caption: "", hint: &freeze_hint }.html();
-        format!(
-            r#"<div class="c-plat"><div class="c-grp"><span class="c-silk">Platform</span></div><div class="c-plat-row">
-<form class="c-ctl" method="post" action="{power_action}"><input type="hidden" name="then" value="{then}"><button class="c-power {power}" data-hint="{power_hint}" aria-label="{power_label}">{POWER_ICON}</button><span class="c-silk">Power</span></form>
-<form class="c-ctl" method="post" action="/admin/freeze"><input type="hidden" name="frozen" value="{flip}"><input type="hidden" name="then" value="{then}">{freeze}<span class="c-silk">Freeze</span></form>
-</div></div>"#,
-            power_hint = escape(&power_hint),
-            power_label = if stopped.is_empty() { "Stop all apps" } else { "Start the stopped apps" },
-            flip = if frozen { "0" } else { "1" },
-            then = escape(&v.path(Some(id))),
-        )
+        draw(&Platform {
+            power,
+            action,
+            hint,
+            label,
+            flip: if frozen { "0" } else { "1" },
+            then: self.view.path(Some(&chosen.id)),
+            freeze: Slide { on: frozen, upright: true, dead: false, leds, label: "Freeze deploys", letter: "f", caption: "", hint: &freeze_hint }.html(),
+            changes: self.changes,
+        })
     }
 
     // ---- the bottom: pins and step keys -----------------------------------------
 
     fn bottom(&self, chosen: &App) -> String {
         let v = self.view;
-        let pins: String = (1..=8)
-            .map(|i| {
-                format!(
-                    r#"<button type="button" class="c-key c-pin" data-pin="{i}" aria-keyshortcuts="{i}" data-hint="Pin {i}: empty; hold it to keep the selected app here"><span class="c-pinrow"><span class="c-led"></span><span class="c-pinno">{i}</span></span><span class="c-pinname"></span></button>"#
-                )
-            })
-            .collect();
-        // The pins live in the browser; admin.js fills these in: {i} the
-        // pin, {name} its app, {id} the app's id in a path.
+        // The pins live in the browser; admin.js puts the app's id in a path for {id}.
         let jump = v.with(|x| {
             x.version = None;
             x.at = None;
@@ -1325,69 +1613,40 @@ impl Board<'_> {
             q if q.is_empty() => "/admin/apps/{id}".to_string(),
             q => format!("/admin/apps/{{id}}?{q}"),
         };
-        let pin_texts = format!(
-            r#" data-jump="{}" data-set="Pin {{i}}: {{name}} · click jumps to it ({{i}}) · hold keeps the selected app here instead" data-pinned="Pinned {{name}} to {{i}}""#,
-            escape(&jump)
-        );
         let log_at = (v.page == Page::Log).then(|| self.log_cell(chosen));
-        let steps: String = self
+        let steps = self
             .row_cells(chosen)
             .iter()
             .enumerate()
-            .map(|(i, (start, _, c))| {
-                let back = (CELLS - 1 - i) as i64;
-                let (led, down) = if log_at == Some(*start) { (" orange", " down") } else { ("", "") };
-                let shown = if down.is_empty() { "" } else { r#" aria-current="true""# };
-                format!(
-                    r#"<div class="c-step"><span class="c-led{led}"></span><a class="c-key flat{down}" href="{}"{shown} data-hint="{} · click = its requests">{}</a></div>"#,
-                    escape(&v.to(Page::Log).with(|x| x.at = Some(*start)).link(Some(&chosen.id))),
-                    escape(&self.cell_hint(chosen, *start, c)),
-                    escape(&v.zoom.step(back)),
-                )
+            .map(|(i, (start, _, c))| Step {
+                href: v.to(Page::Log).with(|x| x.at = Some(*start)).link(Some(&chosen.id)),
+                hint: self.cell_hint(chosen, *start, c),
+                label: v.zoom.step((CELLS - 1 - i) as i64),
+                shown: log_at == Some(*start),
             })
             .collect();
-        let platform = self.platform(chosen);
-        let ago = match v.zoom {
-            Zoom::Min | Zoom::Five => "Minutes ago",
-            Zoom::Hour => "Hours ago",
-            Zoom::Day => "Days ago",
+        let (ago, unit) = match v.zoom {
+            Zoom::Min | Zoom::Five => ("Minutes ago", "minute"),
+            Zoom::Hour => ("Hours ago", "hour"),
+            Zoom::Day => ("Days ago", "day"),
         };
-        format!(
-            r#"<div class="c-lower"><div class="c-well"><div class="c-pins"{pin_texts}><div class="c-grp"><span class="c-silk dim">Pins · click = jump · hold = keep the selected app here</span></div><div class="c-pinkeys">{pins}</div></div><div class="c-grp"><span class="c-silk dim">{ago}</span><span class="c-silk dim">click = that {}'s requests</span></div><div class="c-steps">{steps}</div></div>{platform}</div>"#,
-            match v.zoom {
-                Zoom::Min | Zoom::Five => "minute",
-                Zoom::Hour => "hour",
-                Zoom::Day => "day",
-            }
-        )
+        draw(&Bottom { jump, ago, unit, steps, platform: self.platform(chosen) })
     }
 
     // ---- the screen's pages -----------------------------------------------------
 
-    /// The screen's first line: its page, what it shows, and on the right
-    /// more; under it the toast after a change.
-    fn head(&self, tag: &str, left: &str, right: &str) -> String {
-        format!(r#"<div class="c-head"><span class="c-tag">{tag}</span>{left}<span class="c-grow"></span>{right}</div>{}"#, self.toast())
-    }
-
     /// What a change did, for ten minutes, with its Undo while the server
-    /// can still reverse it.
+    /// can still reverse it; it shows under the screen's first line.
     fn toast(&self) -> String {
         let Some(done) = &self.view.done else { return String::new() };
         if self.now - done.at > UNDO_MS || done.at > self.now + MINUTE {
             return String::new();
         }
-        if done.failed {
-            return format!(r#"<div class="c-toast r" role="alert"><span>✗ {} · {}</span></div>"#, escape(&done.msg), hm(done.at));
-        }
-        let undo = match (self.undo, self.chosen) {
-            (Some(event), Some(a)) => format!(
-                r#"<form class="c-undo" method="post" action="/admin/undo"><input type="hidden" name="event" value="{event}"><input type="hidden" name="then" value="{}"><button data-key="u" aria-keyshortcuts="u" data-hint="Undo: reverses it, logged as admin (U)">U Undo</button></form>"#,
-                escape(&self.view.path(Some(&a.id)))
-            ),
-            _ => String::new(),
+        let undo = match (done.failed, self.undo, self.chosen) {
+            (false, Some(event), Some(a)) => Some((event, self.view.path(Some(&a.id)))),
+            _ => None,
         };
-        format!(r#"<div class="c-toast" role="status"><span>✓ {} · {} · admin</span><span class="c-grow"></span>{undo}</div>"#, escape(&done.msg), hm(done.at))
+        draw(&Toast { msg: &done.msg, at: hm(done.at), failed: done.failed, undo, changes: self.changes })
     }
 
     fn list(&self, chosen: &App) -> String {
@@ -1395,123 +1654,91 @@ impl Board<'_> {
         let total = self.order.len();
         let needs = self.order.iter().filter(|a| a.needs_you()).count();
         let found = if v.find.is_some() { " found" } else { "" };
-        let filter = match &v.group {
-            Some(g) => format!(r#"<span class="b">{} · {total}{found}</span>"#, escape(g)),
-            None if v.find.is_some() => format!(r#"<span class="b">All · {total}{found}</span>"#),
-            None => format!("<span>All · {total}</span>"),
-        };
-        let need = match needs {
-            0 => r#"<span class="d">Nothing needs you</span>"#.to_string(),
-            1 => r#"<span class="a">1 needs you</span>"#.to_string(),
-            n => format!(r#"<span class="a">{n} need you</span>"#),
-        };
-        let clock = format!(r#"<span class="c-clock">{}</span><span class="c">Live</span>"#, hm(self.now));
         let pos = self.order.iter().position(|a| a.id == chosen.id).unwrap_or(0);
         let first = pos.saturating_sub(ROWS - 1);
         let range = if total == 0 { "0/0".to_string() } else { format!("{}–{}/{total}", first + 1, (first + ROWS).min(total)) };
-        let right = format!(
-            r#"<span class="a c-held" hidden>Order held</span>{}<span class="d c-range" data-of="{{first}}–{{last}}/{{n}}">{range}</span>"#,
-            self.find_form(chosen)
-        );
-        let sort_link = |sort: Sort, text: &str, class: &str| {
-            let mark = if v.sort == sort { " ▾" } else { "" };
-            let current = if v.sort == sort { r#" aria-current="true""# } else { "" };
-            format!(
-                r#"<a class="{class}" href="{}"{current} data-hint="Sort by {}">{text}{mark}</a>"#,
-                escape(&v.with(|x| x.sort = sort).link(Some(&chosen.id))),
-                sort.label().to_lowercase()
-            )
+        let sort_by = |sort: Sort, text: &str, class: &'static str| SortBy {
+            class,
+            href: v.with(|x| x.sort = sort).link(Some(&chosen.id)),
+            on: v.sort == sort,
+            label: sort.label().to_lowercase(),
+            text: text.to_string(),
         };
         let (unit, _) = v.zoom.per();
-        let cols = format!(
-            r#"<div class="c-row c-colhead d"><span class="c-n">#</span><span class="c-kind" data-hint="An app, or a kit: apps call kits">Kind</span>{}{}<span class="c-lim">Mem</span><span class="c-lim">Time</span><span class="c-lim">Fuel</span>{}{}{}</div>"#,
-            sort_link(Sort::Az, "Name", "c-name"),
-            sort_link(Sort::Group, "Group", "c-gcol"),
-            sort_link(Sort::Needs, "Status", "c-st"),
-            sort_link(Sort::Failures, &format!("{} ······ {}", v.zoom.step(CELLS as i64 - 1), v.zoom.step(0)), "c-cells"),
-            sort_link(Sort::Busy, unit, "c-rate"),
-        );
-        let mut rows = String::new();
+        let mut lines = vec![];
         let mut last_group: Option<String> = None;
         for (i, a) in self.order.iter().enumerate() {
             if v.sort == Sort::Needs && i == needs && needs > 0 {
-                rows += &format!(r#"<div class="c-sep d"><span>{} more · busiest first</span></div>"#, total - needs);
+                lines.push(Line::Sep("d", format!("{} more · busiest first", total - needs)));
             }
             if v.sort == Sort::Group {
                 let g = group_of(a);
                 if last_group.as_deref().is_none_or(|l| !same_group(l, &g)) {
                     let n = self.order.iter().filter(|x| same_group(&group_of(x), &g)).count();
                     let name = if g.is_empty() { "No group".to_string() } else { g.clone() };
-                    rows += &format!(r#"<div class="c-sep b"><span>{} · {n}</span></div>"#, escape(&name));
+                    lines.push(Line::Sep("b", format!("{name} · {n}")));
                     last_group = Some(g);
                 }
             }
-            rows += &self.row(i, a, a.id == chosen.id);
+            lines.push(Line::Row(self.row(i, a, a.id == chosen.id)));
         }
-        if self.order.is_empty() {
-            rows = format!(
-                r#"<p class="c-none">No app matches. <a href="{}">Show all</a></p>"#,
-                escape(
-                    &v.with(|x| {
-                        x.find = None;
-                        x.group = None;
-                    })
-                    .link(Some(&chosen.id))
-                )
-            );
-        }
-        let body = format!(r#"{cols}<div class="c-listwrap"><div class="c-list">{rows}</div>{mini}</div>"#, mini = self.minimap(first));
-        format!(
-            "{}{body}<span class=\"c-grow\"></span>{}{}",
-            self.head("List", &format!("{clock}{filter}{need}"), &right),
-            self.app_readouts(chosen),
-            hint(&format!("↑↓ move · click a row = select it · ↵ its story · / find · N next that needs you · hover a cell = that {}", unit_word(v.zoom))),
-        )
+        draw(&List {
+            toast: self.toast(),
+            clock: hm(self.now),
+            narrowed: v.group.is_some() || v.find.is_some(),
+            filter: format!("{} · {total}{found}", v.group.as_deref().unwrap_or("All")),
+            needs,
+            find: self.find_form(chosen),
+            range,
+            by_name: sort_by(Sort::Az, "Name", "c-name"),
+            by_group: sort_by(Sort::Group, "Group", "c-gcol"),
+            by_status: sort_by(Sort::Needs, "Status", "c-st"),
+            by_cells: sort_by(Sort::Failures, &format!("{} ······ {}", v.zoom.step(CELLS as i64 - 1), v.zoom.step(0)), "c-cells"),
+            by_rate: sort_by(Sort::Busy, unit, "c-rate"),
+            lines,
+            show_all: v
+                .with(|x| {
+                    x.find = None;
+                    x.group = None;
+                })
+                .link(Some(&chosen.id)),
+            minimap: self.minimap(first),
+            foot: self.app_readouts(chosen),
+            hint: format!("↑↓ move · click a row = select it · ↵ its story · / find · N next that needs you · hover a cell = that {}", unit_word(v.zoom)),
+        })
     }
 
     fn row(&self, i: usize, a: &App, selected: bool) -> String {
         let v = self.view;
         let sums = self.sums(a);
         let (word, ink) = status(a, sums, self.now);
-        let href = escape(&v.link(Some(&a.id)));
-        // For admin.js: the page a click selects it on, the one ↵ opens,
-        // and what Find looks in, as the shell does.
-        let select = escape(&v.path(Some(&a.id)));
-        let open = escape(&v.to(Page::Story).path(Some(&a.id)));
         let kind = if a.is_kit() { "kit" } else { "app" };
-        let find = escape(&[a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), kind].map(str::to_lowercase).join("\n"));
-        let limits = limit_cells(a);
-        // The group in words; the Group knob narrows to it, a click on the row selects.
-        let group = group_of(a);
-        let group_html =
-            if group.is_empty() { r#"<span class="c-gcol d">—</span>"#.to_string() } else { format!(r#"<span class="c-gcol b">{}</span>"#, escape(&group)) };
-        let cells: String = self
-            .row_cells(a)
-            .iter()
-            .map(|(at, heat, c)| format!(r#"<i class="{}" data-hint="{}"></i>"#, heat.class(), escape(&self.cell_hint(a, *at, c))))
-            .collect();
         let name = if a.is_kit() { format!("{} (kit)", a.name) } else { a.name.clone() };
         let why = match a.unseen().next().or(a.problems.first()) {
             Some(p) => format!("{name}: {}", p.text),
             None => format!("{name}: {}", a.line()),
         };
-        format!(
-            r#"<div class="c-row{sel}" data-app="{id}" data-href="{select}" data-open="{open}" data-find="{find}" data-status="{word}"><span class="c-n d">{n}</span><span class="c-kind {kind_ink}">{kind}</span><a class="c-name {name_ink}" href="{href}"{current} data-hint="{why}">{name}</a>{group_html}{limits}<span class="c-st {tone}">{word}</span><span class="c-cells">{cells}</span><span class="c-rate">{rate}</span></div>"#,
-            sel = if selected { " sel" } else { "" },
-            current = if selected { r#" aria-current="true""# } else { "" },
-            id = escape(&a.id),
-            name = escape(&a.name),
-            kind_ink = if a.is_kit() { "k" } else { "d" },
-            n = i + 1,
-            tone = ink.class(),
-            name_ink = if ink == Ink::Dim { Ink::White } else { ink }.class(),
-            why = escape(&why),
-            rate = self.rate(sums.requests),
-        )
+        draw(&Row {
+            app: a,
+            n: i + 1,
+            selected,
+            href: v.link(Some(&a.id)),
+            select: v.path(Some(&a.id)),
+            open: v.to(Page::Story).path(Some(&a.id)),
+            find: [a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), kind].map(str::to_lowercase).join("\n"),
+            word,
+            tone: ink.class(),
+            name_ink: if ink == Ink::Dim { Ink::White } else { ink }.class(),
+            kit: a.is_kit(),
+            why,
+            // The group in words; the Group knob narrows to it, a click on the row selects.
+            group: group_of(a),
+            limits: limits(a),
+            cells: self.row_cells(a).iter().map(|(at, heat, c)| (*heat, self.cell_hint(a, *at, c))).collect(),
+            rate: self.rate(sums.requests),
+        })
     }
 
-    /// The strip beside the list: every app on it, problems marked, the
-    /// part on screen boxed (admin.js moves the box as the list scrolls).
     /// The App knob's apps: the list's, A to Z. A dial's marks stay where
     /// they are; an app that turns red keeps its place on it.
     fn dial(&self) -> Vec<&App> {
@@ -1545,21 +1772,20 @@ impl Board<'_> {
             .collect()
     }
 
+    /// The strip beside the list: every app on it, problems marked, the
+    /// part on screen boxed.
     fn minimap(&self, first: usize) -> String {
         let n = self.order.len().max(1);
-        let marks: String = self
+        let marks = self
             .order
             .iter()
             .enumerate()
             .filter_map(|(i, a)| match light(a) {
                 Ink::Cyan => None,
-                ink => Some(format!(r#"<rect class="{}" x="1" y="{i}" width="10" height="1"></rect>"#, ink.class())),
+                ink => Some((i, ink)),
             })
             .collect();
-        let shown = ROWS.min(n);
-        format!(
-            r#"<svg class="c-mini" viewBox="0 0 12 {n}" preserveAspectRatio="none" aria-label="Where the screen is among all {n} apps"><rect class="c-track" x="3" y="0" width="6" height="{n}"></rect>{marks}<rect class="c-win" x="0.5" y="{first}" width="11" height="{shown}"></rect></svg>"#
-        )
+        draw(&Minimap { n, first, shown: ROWS.min(n), marks })
     }
 
     fn find_form(&self, chosen: &App) -> String {
@@ -1567,14 +1793,11 @@ impl Board<'_> {
             x.page = Page::List;
             x.find = None;
         });
-        let hidden: String = form_urlencoded::parse(v.query().as_bytes())
-            .map(|(k, val)| format!(r#"<input type="hidden" name="{}" value="{}">"#, escape(&k), escape(&val)))
-            .collect();
-        format!(
-            r#"<form class="c-find" method="get" action="{}" role="search"><label for="c-q">Find</label><input id="c-q" name="q" value="{}" placeholder="name, owner, group" autocomplete="off" aria-keyshortcuts="Slash" data-hint="Find: narrows the list as you type a name, id, owner or group; Enter keeps it, Esc clears it (/)">{hidden}</form>"#,
-            escape(&format!("/admin/apps/{}", form_urlencoded::byte_serialize(chosen.id.as_bytes()).collect::<String>())),
-            escape(self.view.find.as_deref().unwrap_or("")),
-        )
+        draw(&Find {
+            action: format!("/admin/apps/{}", form_urlencoded::byte_serialize(chosen.id.as_bytes()).collect::<String>()),
+            q: self.view.find.as_deref().unwrap_or(""),
+            hidden: form_urlencoded::parse(v.query().as_bytes()).into_owned().collect(),
+        })
     }
 
     /// The selected app's numbers under the list.
@@ -1614,20 +1837,6 @@ impl Board<'_> {
         }
     }
 
-    /// The app's name, group and owner for a page's first line.
-    fn who_line(&self, a: &App) -> String {
-        let group = group_of(a);
-        let owner = owner_of(a);
-        let mut out = format!(r#"<span class="c-clock">{}</span>"#, escape(&a.name));
-        if !group.is_empty() {
-            out += &format!(r#"<span class="b">{}</span>"#, escape(&group));
-        }
-        if !owner.is_empty() {
-            out += &format!(r#"<span class="d">{}</span>"#, escape(&owner));
-        }
-        out
-    }
-
     /// What happened to the app, oldest first: its events, with how its
     /// requests went between them when the screen knows.
     fn timeline(&self, a: &App) -> Vec<(String, String, Ink)> {
@@ -1662,21 +1871,12 @@ impl Board<'_> {
         let owner = owner_of(a);
         let live = a.versions.iter().find(|x| x.status == VersionStatus::Live);
         let state = match (live, a.folder_version()) {
-            (Some(l), _) => format!("{} live", escape(&l.version)),
-            (None, Some(v)) => format!("{} from its folder", escape(v)),
+            (Some(l), _) => format!("{} live", l.version),
+            (None, Some(v)) => format!("{v} from its folder"),
             (None, None) => "not live".to_string(),
         };
         let state = if a.is_kit() { format!("kit · {state}") } else { state };
-        let left = format!(r#"{}<span class="c">{state}</span>"#, self.who_line(a));
-        let lines: String = self
-            .timeline(a)
-            .iter()
-            .map(|(at, text, ink)| {
-                format!(r#"<div class="c-line"><span class="d">{}</span><span class="{}">{}</span></div>"#, escape(at), ink.class(), escape(text))
-            })
-            .collect();
-        let lines = if lines.is_empty() { r#"<p class="c-none">Nothing happened to it yet.</p>"#.to_string() } else { lines };
-        let (now, left_for_you) = verdict(a, if owner.is_empty() { "the owner" } else { &owner });
+        let (now, yours) = verdict(a, if owner.is_empty() { "the owner" } else { &owner });
         let seen = match &a.seen {
             Some(e) if !a.problems.is_empty() && !a.needs_you() => format!(" Seen at {}.", hm(e.at)),
             _ => String::new(),
@@ -1687,29 +1887,33 @@ impl Board<'_> {
         let limit = a.limit_us();
         let slowest = a.reqs.iter().map(|r| r.wall_us).max().unwrap_or(0);
         let (risk, grant) = self.risk_line(a);
-        let keys = if a.needs_you() {
-            "S marks it seen · R its requests · V its versions · Esc the list"
-        } else {
-            "R its requests · V its versions · Esc the list"
-        };
-        format!(
-            r#"{}<div class="c-lines">{lines}</div><div class="c-verdict"><span>{}{}</span><span class="c">{}</span></div><span class="c-grow"></span>{}{}"#,
-            self.head("Story", &left, r#"<span class="d">What happened</span>"#),
-            escape(&now),
-            escape(&seen),
-            escape(&left_for_you),
-            readouts(&[
+        draw(&Story {
+            toast: self.toast(),
+            name: &a.name,
+            group: group_of(a),
+            owner,
+            state,
+            lines: self.timeline(a),
+            now,
+            seen,
+            yours,
+            foot: readouts(&[
                 ("Failed".to_string(), thousands(fails_hour as u64), "in the last hour".to_string(), if fails_hour > 0 { Ink::Coral } else { Ink::Dim }),
                 match recovered {
                     Some(r) => ("Recovered".to_string(), r, "after the 1st failure".to_string(), Ink::Cyan),
-                    None =>
-                        ("Now".to_string(), thousands(fails_now as u64), "failed in 15 min".to_string(), if fails_now > 0 { Ink::Coral } else { Ink::Cyan }),
+                    None => {
+                        ("Now".to_string(), thousands(fails_now as u64), "failed in 15 min".to_string(), if fails_now > 0 { Ink::Coral } else { Ink::Cyan })
+                    }
                 },
                 ("Slowest".to_string(), format!("{} s", secs(slowest)), format!("of {} s, last hour", secs(limit)), near(slowest, limit)),
                 ("Risk".to_string(), risk, grant, Ink::Blue),
             ]),
-            hint(keys),
-        )
+            hint: if a.needs_you() {
+                "S marks it seen · R its requests · V its versions · Esc the list"
+            } else {
+                "R its requests · V its versions · Esc the list"
+            },
+        })
     }
 
     /// The cell the log shows: as asked, else the newest with requests.
@@ -1728,22 +1932,9 @@ impl Board<'_> {
         let fails = reqs.iter().filter(|r| r.outcome.failed()).count();
         let stops = reqs.iter().filter(|r| r.outcome.stopped()).count();
         let slowest = reqs.iter().map(|r| r.wall_us).max().unwrap_or(0);
-        let left = format!(
-            r#"<span class="c-clock">{}</span><span class="b">{}</span><span>{}</span>{}"#,
-            escape(&a.name),
-            escape(&cell_label(at, self.cell)),
-            plural(total as usize, "request"),
-            match (fails, stops) {
-                (0, _) => String::new(),
-                (_, s) if s > 0 => format!(r#"<span class="a">{s} stopped at {} s</span>"#, secs(limit)),
-                (f, _) => format!(r#"<span class="r">{f} failed</span>"#),
-            }
-        );
-        let right = format!(r#"<span class="d">newest {} of {}</span>"#, reqs.len(), total);
-        let rows: String = reqs
+        let rows = reqs
             .iter()
             .map(|r| {
-                let share = (r.wall_us as f64 / limit.max(1) as f64 * 100.0).min(100.0);
                 let ink = if r.outcome.stopped() {
                     Ink::Amber
                 } else if r.outcome.failed() {
@@ -1751,47 +1942,50 @@ impl Board<'_> {
                 } else {
                     Ink::Cyan
                 };
-                let word = match r.outcome {
-                    Outcome::Timeout => "stopped",
-                    Outcome::OverBudget => "over budget",
-                    o => o.as_str(),
-                };
-                let why = r.error.as_deref().map(|e| format!(" · {}", first_line(e))).unwrap_or_default();
-                let tone = ink.class();
-                format!(
-                    r#"<div class="c-row c-req" data-hint="{} {} · {} · {} s of {} s{}"><span class="d">{}</span><span class="{tone}">{}</span><span class="{tone}">{word}</span><span class="c-rate">{}</span><span class="c-bar1"><i class="{}" style="width: {share:.0}%"></i></span></div>"#,
-                    local(r.at, "%H:%M:%S"),
-                    escape(&r.route),
-                    word,
-                    secs(r.wall_us),
-                    secs(limit),
-                    escape(&why),
-                    local(r.at, "%H:%M:%S"),
-                    escape(&r.route),
-                    secs(r.wall_us),
-                    if ink == Ink::Cyan { "" } else { tone },
-                )
+                ReqRow {
+                    time: local(r.at, "%H:%M:%S"),
+                    route: &r.route,
+                    word: match r.outcome {
+                        Outcome::Timeout => "stopped",
+                        Outcome::OverBudget => "over budget",
+                        o => o.as_str(),
+                    },
+                    wall: secs(r.wall_us),
+                    why: r.error.as_deref().map(|e| format!(" · {}", first_line(e))).unwrap_or_default(),
+                    tone: ink.class(),
+                    bar: if ink == Ink::Cyan { "" } else { ink.class() },
+                    share: format!("{:.0}", (r.wall_us as f64 / limit.max(1) as f64 * 100.0).min(100.0)),
+                }
             })
             .collect();
-        let rows = if rows.is_empty() { format!(r#"<p class="c-none">No requests in this {}.</p>"#, unit_word(self.view.zoom)) } else { rows };
-        let insight = insight(a, reqs, limit);
-        format!(
-            r#"{}<div class="c-row c-req c-colhead d"><span>Time</span><span>Request</span><span>Status</span><span class="c-rate">Sec</span><span>of {} s</span></div><div class="c-list c-reqs">{rows}</div>{insight}<span class="c-grow"></span>{}{}"#,
-            self.head("Requests", &left, &right),
-            secs(limit),
-            readouts(&[
+        draw(&Log {
+            toast: self.toast(),
+            name: &a.name,
+            cell: cell_label(at, self.cell),
+            count: plural(total as usize, "request"),
+            flag: match (fails, stops) {
+                (0, _) => None,
+                (_, s) if s > 0 => Some((Ink::Amber, format!("{s} stopped at {} s", secs(limit)))),
+                (f, _) => Some((Ink::Coral, format!("{f} failed"))),
+            },
+            total,
+            limit: secs(limit),
+            rows,
+            unit: unit_word(self.view.zoom),
+            insight: insight(a, reqs, limit),
+            foot: readouts(&[
                 ("Requests".to_string(), thousands(total as u64), cell_label(at, self.cell), Ink::White),
                 (
                     "Failed".to_string(),
                     fails.to_string(),
                     if stops > 0 { format!("{stops} at the limit") } else { format!("of the newest {}", reqs.len()) },
-                    if fails > 0 { Ink::Coral } else { Ink::Dim }
+                    if fails > 0 { Ink::Coral } else { Ink::Dim },
                 ),
                 ("Slowest".to_string(), format!("{} s", secs(slowest)), format!("of {} s", secs(limit)), near(slowest, limit)),
                 ("Version".to_string(), a.running.as_ref().map_or("—".to_string(), |r| r.manifest.app.version.clone()), "live now".to_string(), Ink::Blue),
             ]),
-            hint(&format!("↑↓ requests · ← → the {0} before or after · Esc the list", unit_word(self.view.zoom))),
-        )
+            hint: format!("↑↓ requests · ← → the {0} before or after · Esc the list", unit_word(self.view.zoom)),
+        })
     }
 
     /// The version the page shows: as picked, else the one an admin most
@@ -1809,10 +2003,7 @@ impl Board<'_> {
         let v = self.view;
         let live = a.versions.iter().find(|x| x.status == VersionStatus::Live);
         let picked = self.version_on_screen(a);
-        let kept = a.versions.iter().filter(|x| x.status != VersionStatus::Refused).count();
-        let left = format!(r#"{}<span>{kept} kept</span>"#, self.who_line(a));
-        let right = live.map_or(String::new(), |l| format!(r#"<span class="c">{} live</span>"#, escape(&l.version)));
-        let rows: String = a
+        let rows = a
             .versions
             .iter()
             .take(40)
@@ -1827,34 +2018,23 @@ impl Board<'_> {
                     VersionStatus::Refused => "refused, never stored".to_string(),
                     _ => "kept".to_string(),
                 };
-                let tone = Ink::of(Tone::of_version(x.status)).class();
-                let picked = picked.is_some_and(|p| p.id == x.id);
-                let (sel, current) = if picked { (" sel", r#" aria-current="true""#) } else { ("", "") };
                 let shown = v.with(|y| y.version = Some(x.label.clone()));
-                format!(
-                    r#"<a class="c-row c-ver{sel}" href="{}" data-open="{}"{current} data-hint="{} · click = what changes if it goes live"><span class="{tone}">{}</span><span class="b">{}</span><span class="{tone}">{}</span></a>"#,
-                    escape(&shown.link(Some(&a.id))),
-                    escape(&shown.path(Some(&a.id))),
-                    escape(&x.version),
-                    escape(&x.version),
-                    escape(&clock(x.deployed_at)),
-                    escape(&note),
-                )
+                VersionRow {
+                    href: shown.link(Some(&a.id)),
+                    open: shown.path(Some(&a.id)),
+                    picked: picked.is_some_and(|p| p.id == x.id),
+                    version: &x.version,
+                    at: clock(x.deployed_at),
+                    note,
+                    tone: Ink::of(Tone::of_version(x.status)).class(),
+                }
             })
             .collect();
-        let (compare, form) = match (picked, live) {
-            (Some(p), _) if p.status == VersionStatus::Refused => (
-                format!(
-                    r#"<div class="c-box"><div class="d">{} was refused: it was never stored, so it can't go live.</div><div>{}</div></div>"#,
-                    escape(&p.version),
-                    escape(first_line(p.reason.as_deref().unwrap_or("")))
-                ),
-                String::new(),
-            ),
-            (Some(p), Some(l)) if p.id == l.id => (
-                format!(r#"<div class="c-box"><div>{} is live. Click another version to roll back to it or make it live.</div></div>"#, escape(&p.version)),
-                String::new(),
-            ),
+        let (pick, form) = match (picked, live) {
+            (Some(p), _) if p.status == VersionStatus::Refused => {
+                (Pick::Refused { version: &p.version, reason: first_line(p.reason.as_deref().unwrap_or("")) }, String::new())
+            }
+            (Some(p), Some(l)) if p.id == l.id => (Pick::Live(&p.version), String::new()),
             (Some(p), live) => {
                 let button = match live {
                     Some(l) if p.deployed_at < l.deployed_at => format!("Roll back to {}", p.version),
@@ -1866,28 +2046,34 @@ impl Board<'_> {
                     &[("label", &p.label)],
                     &button,
                 );
-                (compare(&self.shell.risk, p, live, a, self.now), form)
+                (Pick::Other(compare(&self.shell.risk, p, live, a, self.now)), form)
             }
-            (None, _) => (r#"<div class="c-box">No versions kept.</div>"#.to_string(), String::new()),
+            (None, _) => (Pick::Nothing, String::new()),
         };
-        format!(
-            r#"{}<div class="c-list c-vers">{rows}</div>{compare}<span class="c-grow"></span>{form}{}"#,
-            self.head("Versions", &left, &right),
-            hint("Click a version to see what changes · the button makes it live · Esc the list"),
-        )
+        draw(&Versions {
+            toast: self.toast(),
+            name: &a.name,
+            group: group_of(a),
+            owner: owner_of(a),
+            kept: a.versions.iter().filter(|x| x.status != VersionStatus::Refused).count(),
+            live: live.map(|l| l.version.as_str()),
+            rows,
+            pick,
+            foot: form,
+            hint: "Click a version to see what changes · the button makes it live · Esc the list",
+        })
     }
 
     /// A change on the screen: a button that says what it does, and Cancel.
     fn form(&self, chosen: &App, action: &str, fields: &[(&str, &str)], button: &str) -> String {
         let then = self.view.to(Page::List).path(Some(&chosen.id));
-        let hidden: String =
-            fields.iter().chain(&[("then", then.as_str())]).map(|(k, val)| format!(r#"<input type="hidden" name="{k}" value="{}">"#, escape(val))).collect();
-        format!(
-            r#"<form class="c-act" method="post" action="{action}">{hidden}<div class="c-actrow"><button class="c-btn" data-hint="{button}: happens at once, logged as admin, undo for 10 min">{button}</button><a class="c-cancel" href="{cancel}" data-hint="Cancel: back to the list, nothing changes (Esc)">Cancel</a><span class="c-grow"></span><span class="d">Logged as admin · undo for 10 min</span></div></form>"#,
-            action = escape(action),
-            button = escape(button),
-            cancel = escape(&self.view.to(Page::List).link(Some(&chosen.id))),
-        )
+        draw(&ActForm {
+            action,
+            fields: fields.iter().copied().chain([("then", then.as_str())]).collect(),
+            button,
+            cancel: self.view.to(Page::List).link(Some(&chosen.id)),
+            changes: self.changes,
+        })
     }
 
     fn map(&self, chosen: &App) -> String {
@@ -1906,11 +2092,12 @@ impl Board<'_> {
         }
         groups.sort_by_cached_key(|(g, apps)| (Reverse(apps.iter().filter(|a| a.needs_you()).count()), g.is_empty(), g.to_lowercase()));
         let mine = group_of(chosen);
-        let rows: String = groups
+        let story = v.to(Page::Story);
+        let rows = groups
             .iter()
             .map(|(g, apps)| {
                 let busiest = apps.iter().map(|x| self.sums(x).requests).max().unwrap_or(1).max(1);
-                let squares: String = apps
+                let squares = apps
                     .iter()
                     .map(|a| {
                         let sums = self.sums(a);
@@ -1921,44 +2108,32 @@ impl Board<'_> {
                             (_, true) => Heat::Off,
                             _ => Heat::busy(sums.requests, busiest),
                         };
-                        let (cur, current) = if a.id == chosen.id { (" cur", r#" aria-current="true""#) } else { ("", "") };
-                        let what = if word.is_empty() { String::new() } else { format!(" · {word}") };
-                        let story = v.to(Page::Story);
-                        format!(
-                            r#"<a class="c-sq {}{cur}" href="{}" data-app="{}" data-open="{}"{current} data-hint="{}{} · {}{} · click = its story" aria-label="{}"></a>"#,
-                            heat.class(),
-                            escape(&story.link(Some(&a.id))),
-                            escape(&a.id),
-                            escape(&story.path(Some(&a.id))),
-                            escape(&a.name),
-                            escape(&what),
-                            self.rate(sums.requests),
-                            v.zoom.per().0,
-                            escape(&a.name),
-                        )
+                        Square {
+                            app: a,
+                            heat,
+                            cur: a.id == chosen.id,
+                            href: story.link(Some(&a.id)),
+                            open: story.path(Some(&a.id)),
+                            what: if word.is_empty() { String::new() } else { format!(" · {word}") },
+                            rate: self.rate(sums.requests),
+                        }
                     })
                     .collect();
                 let needs: Vec<&&App> = apps.iter().filter(|a| a.needs_you()).collect();
-                let note = match needs.first() {
-                    Some(a) => {
-                        let p = a.unseen().next().map_or("", |p| p.kind.chip());
-                        format!(r#"<span class="{}">{} {}</span>"#, Ink::of(a.first_tone()).class(), needs.len(), escape(&p.to_lowercase()))
-                    }
-                    None => String::new(),
-                };
-                let sel = if same_group(g, &mine) { " sel" } else { "" };
-                let name = if g.is_empty() { "No group".to_string() } else { g.clone() };
                 let only = v.to(Page::List).with(|x| {
                     x.group = Some(g.clone()).filter(|g| !g.is_empty());
                     x.find = None;
                 });
-                format!(
-                    r#"<div class="c-mrow{sel}"><a class="b" href="{}" data-hint="{}: click = only its apps, in the list">{}</a><span class="d c-rate">{}</span><span class="c-sqs">{squares}</span>{note}</div>"#,
-                    escape(&only.link(apps.first().map(|a| a.id.as_str()))),
-                    escape(&name),
-                    escape(&name),
-                    apps.len(),
-                )
+                MapRow {
+                    sel: same_group(g, &mine),
+                    href: only.link(apps.first().map(|a| a.id.as_str())),
+                    name: if g.is_empty() { "No group".to_string() } else { g.clone() },
+                    squares,
+                    note: needs.first().map(|a| {
+                        let p = a.unseen().next().map_or("", |p| p.kind.chip());
+                        (Ink::of(a.first_tone()), needs.len(), p.to_lowercase())
+                    }),
+                }
             })
             .collect();
         let theirs: Vec<&App> = self.apps.iter().filter(|a| same_group(&group_of(a), &mine)).collect();
@@ -1966,26 +2141,26 @@ impl Board<'_> {
         let needing: Vec<&&App> = theirs.iter().filter(|a| a.needs_you()).collect();
         let max_risk = theirs.iter().filter_map(|a| a.running.as_ref().and_then(|r| self.shell.risk.of_app(&r.manifest))).max();
         let (unit, _) = v.zoom.per();
-        format!(
-            r#"{}<div class="c-legend d"><span>Square = app</span><span>Brighter = busier</span><span class="a">Amber = needs a look</span><span class="r">Coral = broken or off</span><span>Hollow = not running</span></div><div class="c-list c-map">{rows}</div><span class="c-grow"></span>{}{}"#,
-            self.head(
-                "Map",
-                &format!(r#"<span class="c">By group</span><span>{} · {}</span>"#, plural(groups.len(), "group"), plural(self.apps.len(), "app")),
-                &format!(r#"<span class="d">Last {}</span>"#, escape(&v.zoom.range()))
-            ),
-            readouts(&[
+        draw(&Map {
+            toast: self.toast(),
+            groups: plural(groups.len(), "group"),
+            apps: plural(self.apps.len(), "app"),
+            range: v.zoom.range(),
+            unit,
+            rows,
+            foot: readouts(&[
                 (if mine.is_empty() { "No group".to_string() } else { mine.clone() }, theirs.len().to_string(), "apps".to_string(), Ink::White),
                 (format!("Req{unit}"), self.rate(reqs), format!("all {}", theirs.len()), Ink::Cyan),
                 (
                     "Needs you".to_string(),
                     needing.len().to_string(),
                     needing.first().map_or("none".to_string(), |a| a.name.clone()),
-                    if needing.is_empty() { Ink::Dim } else { Ink::Coral }
+                    if needing.is_empty() { Ink::Dim } else { Ink::Coral },
                 ),
                 ("Risk max".to_string(), max_risk.map_or("—".to_string(), |r| r.to_string()), "of its apps".to_string(), Ink::Blue),
             ]),
-            hint("↑↓ app · ↵ or click = its story · click a group = only its apps · Esc the list"),
-        )
+            hint: "↑↓ app · ↵ or click = its story · click a group = only its apps · Esc the list",
+        })
     }
 }
 
@@ -2013,38 +2188,47 @@ struct Fader<'f> {
     note: String,
 }
 
+/// A fader as it is drawn: the step it is at, its labels and hints as JSON
+/// lists for admin.js, the cap's height, a button per step (top first) and
+/// a tick per step (the default's marked) with its height.
+#[derive(Template)]
+#[template(path = "admin/console/fader.html")]
+struct FaderHtml<'f> {
+    f: &'f Fader<'f>,
+    at: usize,
+    max: usize,
+    value: String,
+    labels: String,
+    hints: String,
+    hint: String,
+    p: String,
+    zones: Vec<(usize, u32)>,
+    ticks: Vec<(bool, String)>,
+}
+
 impl Fader<'_> {
     fn html(&self) -> String {
         let n = self.steps.len();
         let at = self.steps.iter().position(|&x| x == self.now).unwrap_or(0);
         let def = self.steps.iter().position(|&x| x == self.default).unwrap_or(0);
-        let pos = |k: usize| (k as f64 + 0.5) * 100.0 / n as f64;
-        let zones: String = self
-            .steps
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(k, &x)| format!(r#"<button name="{}" value="{x}" tabindex="-1" aria-hidden="true" data-i="{k}"></button>"#, self.name))
-            .collect();
-        let ticks: String = (0..n).map(|k| format!(r#"<i class="{}" style="--y: {:.1}%"></i>"#, if k == def { "def" } else { "" }, pos(k))).collect();
+        let pos = |k: usize| format!("{:.1}", (k as f64 + 0.5) * 100.0 / n as f64);
         let labels: Vec<String> = self.steps.iter().map(|&x| (self.text)(x)).collect();
         let hints: Vec<String> = labels.iter().map(|l| format!("{}: {l} per request · set when it rests", self.what)).collect();
         let value = (self.text)(self.now);
         let whose = if self.set { format!("set by an admin, default {}", (self.text)(self.default)) } else { "the default".to_string() };
         let hint = format!("{}: {value} per request ({whose}); {}; drag or click the scale, it changes at once · ↑↓ when focused", self.what, self.note);
-        format!(
-            r#"<div class="c-fdr{set}" role="slider" tabindex="0" data-fader="{name}" data-at="{at}" aria-label="{what} per request" aria-valuemin="0" aria-valuemax="{max}" aria-valuenow="{at}" aria-valuetext="{value}" data-labels="{labels}" data-hints="{hints}" data-hint="{hint}"><span class="c-silk">{label}</span><span class="c-slot" style="--p: {p:.1}%">{zones}{ticks}<span class="c-cap"></span></span><span class="c-val">{value}</span></div>"#,
-            set = if self.set { " set" } else { "" },
-            label = self.label,
-            what = self.what,
-            max = n - 1,
-            value = escape(&value),
-            name = self.name,
-            labels = escape(&serde_json::to_string(&labels).unwrap_or_default()),
-            hints = escape(&serde_json::to_string(&hints).unwrap_or_default()),
-            hint = escape(&hint),
-            p = pos(at),
-        )
+        draw(&FaderHtml {
+            f: self,
+            at,
+            max: n - 1,
+            value,
+            labels: serde_json::to_string(&labels).unwrap_or_default(),
+            hints: serde_json::to_string(&hints).unwrap_or_default(),
+            hint,
+            p: pos(at),
+            zones: self.steps.iter().copied().enumerate().rev().collect(),
+            ticks: (0..n).map(|k| (k == def, pos(k))).collect(),
+        })
     }
 }
 
@@ -2075,7 +2259,7 @@ fn unit_word(zoom: Zoom) -> &'static str {
 
 /// An app's limits per request for its row, as its faders read: memory,
 /// time and fuel, cyan where an admin set them.
-fn limit_cells(a: &App) -> String {
+fn limits(a: &App) -> Vec<Limit> {
     let (now, set) = (a.budget(), a.limits);
     let default = Budget::with(a.toml_time(), AdminLimits::default());
     let mb = |b: usize| format!("{} MB", b >> 20);
@@ -2086,9 +2270,11 @@ fn limit_cells(a: &App) -> String {
         ("Fuel", super::format::fuel(now.fuel), super::format::fuel(default.fuel), set.fuel_m.is_some()),
     ]
     .into_iter()
-    .map(|(what, value, default, set)| {
-        let (ink, whose) = if set { ("c", format!("set by an admin, default {default}")) } else { ("d", "the default".to_string()) };
-        format!(r#"<span class="c-lim {ink}" data-hint="{what} per request: {value}, {whose}">{value}</span>"#)
+    .map(|(what, value, default, set)| Limit {
+        what,
+        value,
+        whose: if set { format!("set by an admin, default {default}") } else { "the default".to_string() },
+        set,
     })
     .collect()
 }
@@ -2155,63 +2341,76 @@ fn diff_words((gains, loses): &(Vec<&str>, Vec<&str>), gain: &str, lose: &str) -
     parts.join("; ")
 }
 
+/// A version against the live one, as the versions page says it.
+#[derive(Template)]
+#[template(path = "admin/console/compare.html")]
+struct Compare<'a> {
+    version: &'a str,
+    /// It was rolled back because it kept failing.
+    failed: bool,
+    /// The app an automatic rollback paused, and when.
+    paused: Option<(&'a str, String)>,
+    live: Option<Against<'a>>,
+    /// Its requests this hour: how many, the slowest, how many failed.
+    hour: Option<(String, String, usize)>,
+}
+
+/// What changes against the live version: its grants (amber when it gains
+/// some) and risk, its routes, and its owner and group where they change.
+struct Against<'a> {
+    version: &'a str,
+    grants: String,
+    gains: bool,
+    risk: (String, String),
+    routes: Option<String>,
+    /// Routes it drops answer 404.
+    dropped: bool,
+    changed: Vec<(&'static str, String, String)>,
+}
+
 /// `p` against the live version: what to know first, then grants, risk,
 /// routes, owner and group, its requests this hour, and the data.
 fn compare(risk: &Risk, p: &Version, live: Option<&Version>, a: &App, now: i64) -> String {
     let level = |x: &Version| risk.of_grants(&x.grants).map_or("?".to_string(), |l| l.to_string());
-    let mut lines = vec![];
-    // What to know before it goes live.
-    if p.status == VersionStatus::Failed {
-        lines.push(format!(
-            r#"<div class="a">{} was rolled back because it kept failing: make it live again only if what made it fail is fixed elsewhere.</div>"#,
-            escape(&p.version)
-        ));
-    }
-    if let Some(e) = &a.paused {
-        lines.push(format!(
-            r#"<div class="a">This ends the pause: {} rolled itself back at {}, so deploys wait; once a version is live here, they go live again.</div>"#,
-            escape(&a.name),
-            clock(e.at)
-        ));
-    }
-    match live {
-        Some(l) => {
-            lines.push(format!(r#"<div class="d">{} compared with live {}</div>"#, escape(&p.version), escape(&l.version)));
-            let grants = diff(&l.grants, &p.grants);
-            let words = match diff_words(&grants, "gains", "loses") {
+    let against = live.map(|l| {
+        let grants = diff(&l.grants, &p.grants);
+        let routes = diff(&l.routes, &p.routes);
+        Against {
+            version: &l.version,
+            grants: match diff_words(&grants, "gains", "loses") {
                 w if w.is_empty() => format!("Same grants: {}", if p.grants.is_empty() { "none".to_string() } else { p.grants.join(", ") }),
                 w => capitalize(&w),
-            };
-            let ink = if grants.0.is_empty() { "" } else { r#" class="a""# };
-            lines.push(format!(r#"<div{ink}>{} · risk {} → {}</div>"#, escape(&words), level(l), level(p)));
-            let routes = diff(&l.routes, &p.routes);
-            if !routes.0.is_empty() || !routes.1.is_empty() {
-                let dropped = if routes.1.is_empty() { "" } else { "; dropped routes answer 404" };
-                lines.push(format!("<div>Routes: {}{dropped}</div>", escape(&diff_words(&routes, "adds", "drops"))));
-            }
-            for (what, was, becomes) in [("Owner", &l.owner, &p.owner), ("Group", &l.group, &p.group)] {
-                if was != becomes {
-                    lines.push(format!(r#"<div class="a">{what}: {} → {}</div>"#, escape(&who(was)), escape(&who(becomes))));
-                }
-            }
+            },
+            gains: !grants.0.is_empty(),
+            risk: (level(l), level(p)),
+            routes: (!routes.0.is_empty() || !routes.1.is_empty()).then(|| diff_words(&routes, "adds", "drops")),
+            dropped: !routes.1.is_empty(),
+            changed: [("Owner", &l.owner, &p.owner), ("Group", &l.group, &p.group)]
+                .into_iter()
+                .filter(|(_, was, becomes)| was != becomes)
+                .map(|(what, was, becomes)| (what, who(was), who(becomes)))
+                .collect(),
         }
-        None => lines.push(format!(r#"<div class="d">{} · nothing is live</div>"#, escape(&p.version))),
-    }
+    });
     let reqs: Vec<&Request> = a.reqs.iter().filter(|r| *r.label == p.label && r.at >= now - HOUR).collect();
-    if !reqs.is_empty() {
+    let hour = (!reqs.is_empty()).then(|| {
         let slowest = reqs.iter().filter(|r| !r.outcome.failed()).map(|r| r.wall_us).max().unwrap_or(0);
-        let fails = reqs.iter().filter(|r| r.outcome.failed()).count();
-        lines.push(format!("<div>This hour: {} · slowest {} s · {} failed</div>", plural(reqs.len(), "request"), secs(slowest), fails));
-    }
-    lines.push(r#"<div class="d">The data stays: it belongs to the app, not the version.</div>"#.to_string());
-    format!(r#"<div class="c-box">{}</div>"#, lines.concat())
+        (plural(reqs.len(), "request"), secs(slowest), reqs.iter().filter(|r| r.outcome.failed()).count())
+    });
+    draw(&Compare {
+        version: &p.version,
+        failed: p.status == VersionStatus::Failed,
+        paused: a.paused.as_ref().map(|e| (a.name.as_str(), clock(e.at))),
+        live: against,
+        hour,
+    })
 }
 
-/// One line on a stretch of requests: a route that got slow since the live
-/// version, what failed, or that all is fine.
-fn insight(a: &App, reqs: &[Request], limit: u64) -> String {
+/// One line on a stretch of requests, in its ink: a route that got slow
+/// since the live version, what failed, or that all is fine.
+fn insight(a: &App, reqs: &[Request], limit: u64) -> Option<(Ink, String)> {
     if reqs.is_empty() {
-        return String::new();
+        return None;
     }
     let mean = |rs: &[&Request]| if rs.is_empty() { 0 } else { rs.iter().map(|r| r.wall_us).sum::<u64>() / rs.len() as u64 };
     // The slowest route here, on the version the requests ran on, against the
@@ -2227,16 +2426,16 @@ fn insight(a: &App, reqs: &[Request], limit: u64) -> String {
         let since = a.versions.iter().find(|v| v.label == *label);
         if then > 0 && now >= then * 3 / 2 && now - then >= 100_000 {
             let since = since.map(|v| format!(" since {} ({})", v.version, hm(v.deployed_at))).unwrap_or_default();
-            return format!(r#"<div class="c-insight a">{}: {} s on average{since}, {} s before</div>"#, escape(route), secs(now), secs(then));
+            return Some((Ink::Amber, format!("{route}: {} s on average{since}, {} s before", secs(now), secs(then))));
         }
     }
     let fails: Vec<&Request> = reqs.iter().filter(|r| r.outcome.failed()).collect();
     if let Some(f) = fails.first() {
         let why = f.error.as_deref().map(|e| format!(": {}", first_line(e))).unwrap_or_default();
-        return format!(r#"<div class="c-insight r">{} failed; the newest on {}{}</div>"#, fails.len(), escape(&f.route), escape(&why));
+        return Some((Ink::Coral, format!("{} failed; the newest on {}{why}", fails.len(), f.route)));
     }
     let slowest = reqs.iter().map(|r| r.wall_us).max().unwrap_or(0);
-    format!(r#"<div class="c-insight c">All fine · the slowest took {} of the {} limit</div>"#, duration(slowest), duration(limit))
+    Some((Ink::Cyan, format!("All fine · the slowest took {} of the {} limit", duration(slowest), duration(limit))))
 }
 
 /// The console's look: a dark-blue device in the dark scheme, a pale one in
@@ -2694,8 +2893,8 @@ mod tests {
         assert!(knob(3).contains("--a: 135deg"), "{}", knob(3));
         // Its values, labels and pages are JSON arrays, for admin.js; to
         // assistive tech it is a slider.
-        assert!(knob(0).contains(r#"data-values="[&quot;1m&quot;,&quot;5m&quot;,&quot;1h&quot;,&quot;1d&quot;]""#), "{}", knob(0));
-        assert!(knob(1).contains(r#"data-hrefs="[&quot;/1m&quot;,&quot;/5m&quot;,&quot;/1h&quot;,&quot;/1d&quot;]""#), "{}", knob(1));
+        assert!(knob(0).contains(r#"data-values="[&#34;1m&#34;,&#34;5m&#34;,&#34;1h&#34;,&#34;1d&#34;]""#), "{}", knob(0));
+        assert!(knob(1).contains(r#"data-hrefs="[&#34;/1m&#34;,&#34;/5m&#34;,&#34;/1h&#34;,&#34;/1d&#34;]""#), "{}", knob(1));
         assert!(knob(1).contains(r#"role="slider" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1""#), "{}", knob(1));
         assert_eq!(Zoom::ALL.map(Zoom::range), ["16 min", "80 min", "16 h", "16 days"]);
     }
@@ -2823,6 +3022,11 @@ mod tests {
     /// needs you), deploys frozen: the ticker's item, the list's separators
     /// and Frozen show.
     async fn every_page() -> Vec<(View, String)> {
+        pages(true).await
+    }
+
+    /// Every console page, for a viewer who may change (`changes`) or only look.
+    async fn pages(changes: bool) -> Vec<(View, String)> {
         use crate::platform::Actor;
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
@@ -2845,14 +3049,40 @@ mod tests {
             View { find: Some("nothing like it".into()), ..View::default() },
             View { page: Page::Versions, version: Some(first.app.label.clone()), ..View::default() },
         ]);
-        let mut pages: Vec<(View, String)> = views.into_iter().map(|v| (v.clone(), Board::new(&shell, &apps, &v, now, Some("test")).html())).collect();
+        let mut pages: Vec<(View, String)> =
+            views.into_iter().map(|v| (v.clone(), Board::new(&shell, &apps, &v, now, Some("test")).changes(changes).html())).collect();
         let view = View { page: Page::Log, ..View::default() };
-        let mut log = Board::new(&shell, &apps, &view, now, Some("test"));
+        let mut log = Board::new(&shell, &apps, &view, now, Some("test")).changes(changes);
         let request =
             |outcome| Request { at: now, label: first.app.label.clone().into(), route: "/".into(), outcome, wall_us: 1_000, fuel: 1, io: 0, error: None };
         log.requests = (vec![request(Outcome::Ok), request(Outcome::ServerError)], 2);
         pages.push((view.clone(), log.html()));
         pages
+    }
+
+    /// One who may only look gets every form that changes something
+    /// inert, Find and the rest as they are; one who may change gets none.
+    #[tokio::test]
+    async fn a_viewer_who_may_only_look_gets_inert_changes() {
+        for may in [true, false] {
+            for (view, html) in pages(may).await {
+                let forms: Vec<&str> = html.match_indices("<form").map(|(i, _)| &html[i..=i + html[i..].find('>').unwrap()]).collect();
+                let changes: Vec<&str> = forms
+                    .iter()
+                    .copied()
+                    .filter(|f| {
+                        let action = attr(f, "action").unwrap_or_default();
+                        f.contains(r#"method="post""#) && action.starts_with("/admin/") && !["/admin/scheme", "/admin/token"].contains(&action.as_str())
+                    })
+                    .collect();
+                assert!(!changes.is_empty(), "{view:?}");
+                for f in &changes {
+                    assert_eq!(f.starts_with("<form inert "), !may, "{view:?}: {f}");
+                }
+                let inert = forms.iter().filter(|f| f.starts_with("<form inert ")).count();
+                assert_eq!(inert, if may { 0 } else { changes.len() }, "{view:?}: {forms:?}");
+            }
+        }
     }
 
     /// The script's modules, one after another.
@@ -2871,11 +3101,18 @@ mod tests {
             .collect()
     }
 
-    /// An attribute's value in a tag, unescaped.
+    /// An attribute's value in a tag, unescaped: by name as the shell
+    /// escapes, by number as the templates do.
     fn attr(tag: &str, name: &str) -> Option<String> {
         let (_, rest) = tag.split_once(&format!(" {name}=\""))?;
         let value = &rest[..rest.find('"')?];
-        Some(value.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+        let mut value = value.to_string();
+        for (entity, c) in
+            [("&quot;", "\""), ("&#34;", "\""), ("&#39;", "'"), ("&lt;", "<"), ("&#60;", "<"), ("&gt;", ">"), ("&#62;", ">"), ("&amp;", "&"), ("&#38;", "&")]
+        {
+            value = value.replace(entity, c);
+        }
+        Some(value)
     }
 
     /// An attribute holding a JSON list of texts.

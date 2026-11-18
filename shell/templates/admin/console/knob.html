@@ -1,0 +1,9 @@
+{%- import "admin/console/macros.html" as m -%}
+<div class="c-enc"><span class="c-silk">{{ k.label }}</span><a class="{{ class }}{% if k.lit %} lit{% endif %}" href="{{ k.href }}" draggable="false"{% call m::shortcut(k.letter) %}{% endcall %} style="--v: {{ ring }}deg"
+{%- if let Some(s) = slider %} role="slider" aria-valuemin="0" aria-valuemax="{{ s.max }}" aria-valuenow="{{ k.current }}" aria-valuetext="{{ k.value }}" data-knob="{{ k.param }}" data-at="{{ k.current }}" data-values="{{ s.values }}" data-labels="{{ s.labels }}" data-hrefs="{{ s.hrefs }}" data-hints="{{ s.hints }}"{% endif %} data-hint="{{ k.hint }}" aria-label="{{ k.label }}">
+{%- if !lights.is_empty() -%}
+<svg class="c-dots" viewBox="0 0 128 128" aria-hidden="true">{% for (l, s) in lights %}<circle class="{{ l.ink.class() }}{% if s.on %} on{% endif %}" cx="{{ s.x }}" cy="{{ s.y }}" r="{{ r }}" data-from="{{ l.from }}" data-i="{{ l.at }}" data-hint="{{ l.hint }}"></circle>{% endfor %}</svg>
+{%- else if !dots.is_empty() -%}
+<svg class="c-dots" viewBox="0 0 74 74" aria-hidden="true">{% for s in dots %}<circle cx="{{ s.x }}" cy="{{ s.y }}" r="2.6"{% if s.on %} class="on"{% endif %}></circle>{% endfor %}</svg>
+{%- endif -%}
+<span class="c-knob {{ k.size }}" style="--a: {{ angle }}deg"></span></a><span class="c-val">{{ k.value }}</span><span class="c-silk dim">{{ k.sub }}</span></div>

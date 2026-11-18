@@ -1,0 +1,21 @@
+{% extends "admin/console/screen.html" %}
+
+{% block tag %}Map{% endblock %}
+
+{% block left %}<span class="c">By group</span><span>{{ groups }} · {{ apps }}</span>{% endblock %}
+
+{% block right %}<span class="d">Last {{ range }}</span>{% endblock %}
+
+{% block body -%}
+<div class="c-legend d"><span>Square = app</span><span>Brighter = busier</span><span class="a">Amber = needs a look</span><span class="r">Coral = broken or off</span><span>Hollow = not running</span></div><div class="c-list c-map">
+{%- for row in rows -%}
+<div class="c-mrow{% if row.sel %} sel{% endif %}"><a class="b" href="{{ row.href }}" data-hint="{{ row.name }}: click = only its apps, in the list">{{ row.name }}</a><span class="d c-rate">{{ row.squares.len() }}</span><span class="c-sqs">
+{%- for s in row.squares -%}
+<a class="c-sq {{ s.heat.class() }}{% if s.cur %} cur{% endif %}" href="{{ s.href }}" data-app="{{ s.app.id }}" data-open="{{ s.open }}"{% if s.cur %} aria-current="true"{% endif %} data-hint="{{ s.app.name }}{{ s.what }} · {{ s.rate }}{{ unit }} · click = its story" aria-label="{{ s.app.name }}"></a>
+{%- endfor -%}
+</span>
+{%- if let Some((ink, n, kind)) = row.note %}<span class="{{ ink.class() }}">{{ n }} {{ kind }}</span>{% endif -%}
+</div>
+{%- endfor -%}
+</div>
+{%- endblock %}

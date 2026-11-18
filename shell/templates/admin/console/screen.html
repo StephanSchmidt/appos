@@ -1,0 +1,2 @@
+{#- A page on the screen: its first line (the page, what it shows, and on the right more), the toast after a change, what it shows, then at the bottom its readouts or the button that changes something, and the hint line. -#}
+<div class="c-head"><span class="c-tag">{% block tag %}{% endblock %}</span>{% block left %}{% endblock %}<span class="c-grow"></span>{% block right %}{% endblock %}</div>{{ toast|safe }}{% block body %}{% endblock %}<span class="c-grow"></span>{{ foot|safe }}<div class="c-hint" data-default="{{ hint }}">{{ hint }}</div>

@@ -1,0 +1,13 @@
+{#- A row: the app, its group, limits and status, a cell per stretch of time and its rate. For admin.js: the page a click selects it on (data-href), the one ↵ opens (data-open), and what Find looks in (data-find). -#}
+<div class="c-row{% if selected %} sel{% endif %}" data-app="{{ app.id }}" data-href="{{ select }}" data-open="{{ open }}" data-find="{{ find }}" data-status="{{ word }}"><span class="c-n d">{{ n }}</span>
+{%- if kit %}<span class="c-kind k">kit</span>{% else %}<span class="c-kind d">app</span>{% endif -%}
+<a class="c-name {{ name_ink }}" href="{{ href }}"{% if selected %} aria-current="true"{% endif %} data-hint="{{ why }}">{{ app.name }}</a>
+{%- if group.is_empty() %}<span class="c-gcol d">—</span>{% else %}<span class="c-gcol b">{{ group }}</span>{% endif -%}
+{%- for l in limits -%}
+<span class="c-lim {% if l.set %}c{% else %}d{% endif %}" data-hint="{{ l.what }} per request: {{ l.value }}, {{ l.whose }}">{{ l.value }}</span>
+{%- endfor -%}
+<span class="c-st {{ tone }}">{{ word }}</span><span class="c-cells">
+{%- for (heat, hint) in cells -%}
+<i class="{{ heat.class() }}" data-hint="{{ hint }}"></i>
+{%- endfor -%}
+</span><span class="c-rate">{{ rate }}</span></div>

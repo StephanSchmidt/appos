@@ -1,0 +1,9 @@
+{%- if failed -%}
+<div class="c-toast r" role="alert"><span>✗ {{ msg }} · {{ at }}</span></div>
+{%- else -%}
+<div class="c-toast" role="status"><span>✓ {{ msg }} · {{ at }} · admin</span><span class="c-grow"></span>
+{%- if let Some((event, then)) = undo -%}
+<form{% if !changes %} inert{% endif %} class="c-undo" method="post" action="/admin/undo"><input type="hidden" name="event" value="{{ event }}"><input type="hidden" name="then" value="{{ then }}"><button data-key="u" aria-keyshortcuts="u" data-hint="Undo: reverses it, logged as admin (U)">U Undo</button></form>
+{%- endif -%}
+</div>
+{%- endif -%}

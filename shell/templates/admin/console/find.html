@@ -1,0 +1,5 @@
+<form class="c-find" method="get" action="{{ action }}" role="search"><label for="c-q">Find</label><input id="c-q" name="q" value="{{ q }}" placeholder="name, owner, group" autocomplete="off" aria-keyshortcuts="Slash" data-hint="Find: narrows the list as you type a name, id, owner or group; Enter keeps it, Esc clears it (/)">
+{%- for (name, value) in hidden -%}
+<input type="hidden" name="{{ name }}" value="{{ value }}">
+{%- endfor -%}
+</form>
