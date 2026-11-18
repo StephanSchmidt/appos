@@ -366,6 +366,10 @@ LOCAL DEVELOPMENT
   taken, appos dev says so before building; pick another with --addr. Run
   one appos dev per app: if it is already running for this app, appos dev
   says where and exits, because the running one picks up every change.
+  Nobody is signed in at first: Sign in, in the top bar, signs in the test
+  user (test@example.com) or whoever you type, with groups, so an app that
+  asks users::current sees someone; Sign out makes you anonymous again.
+  There is no policy: anyone may do anything.
 
 TESTING
   cargo test runs the app's unit tests on your machine, without the shell;
@@ -540,11 +544,15 @@ http://<addr>/<app-id>. Watches src/, templates/, wit/, .cargo/, app.toml,
 Cargo.toml, Cargo.lock, build.rs, rust-toolchain.toml, icon.svg and, for a
 TypeScript app, package.json, package-lock.json and tsconfig.json, for a Zig
 app build.zig and build.zig.zon, for a Java app pom.xml, for a kit api/ and
-kit.toml. File edits,
-additions and deletions rebuild and reload the app. If a build fails, the last good version keeps
-running. kv data is kept in ./appos-data, with each route's last request
-that worked, for appos review. Stop with Ctrl-C; in the background, with
-kill and the process id it prints when it starts.
+kit.toml. File edits, additions and deletions rebuild and reload the app. If
+a build fails, the last good version keeps running. kv data is kept in
+./appos-data, with each route's last request that worked, for appos review.
+Stop with Ctrl-C; in the background, with kill and the process id it prints
+when it starts.
+
+Nobody is signed in at first. Sign in, in the top bar, signs in the test
+user (test@example.com) or whoever you type, with groups; Sign out makes you
+anonymous again. There is no policy: anyone may do anything.
 
 It warns when the SDK (src/appos.rs, src/appos.ts or
 src/main/java/app/Appos.java) or wit/ differ from this appos's; `appos

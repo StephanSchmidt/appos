@@ -51,6 +51,7 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
         auth: None,
         policy: None,
         no_auth: false,
+        dev_sign_in: false,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -150,7 +151,7 @@ mod tests {
     fn dev_serves_the_apps_given() {
         let Run::Dev(opts) = parse(["--dev", "a", "b"].into_iter().map(String::from)).unwrap() else { panic!("not dev") };
         assert_eq!(opts.apps, [PathBuf::from("a"), PathBuf::from("b")]);
-        assert!(opts.no_auth && !opts.platform_api);
+        assert!(opts.no_auth && opts.dev_sign_in && !opts.platform_api);
         assert!(parse(["--dev"].into_iter().map(String::from)).is_err());
     }
 

@@ -219,6 +219,13 @@ impl Auth {
         Ok(Auth::token_with(secret, origin, key))
     }
 
+    /// The dev sign-in of `appos dev`, where anyone signs in as anyone,
+    /// a test user filled in (dev.rs). The session key lives in `data`.
+    pub fn dev(origin: &str, data: &Path) -> anyhow::Result<Auth> {
+        let cookies = Cookies::new(Cookies::load_key(data)?, origin.starts_with("https://"));
+        Ok(Auth { provider: Provider::Dev, cookies, session_secs: DEFAULT_HOURS * 3600 })
+    }
+
     pub fn token_with(secret: String, origin: &str, key: [u8; 32]) -> Auth {
         let cookies = Cookies::new(key, origin.starts_with("https://"));
         Auth { provider: Provider::Token(token::Token::new(secret)), cookies, session_secs: DEFAULT_HOURS * 3600 }

@@ -79,6 +79,10 @@ pub struct Options {
     /// No sign-in and no policy: anyone may use every grant an app holds,
     /// and the admin screen. Only when asked for (`--no-auth`, `appos dev`).
     pub no_auth: bool,
+    /// `appos dev`: no policy, as with `no_auth`, but the dev sign-in
+    /// (auth/dev.rs) with a test user filled in, so pages can be tried
+    /// signed in and anonymous.
+    pub dev_sign_in: bool,
 }
 
 /// A platform: the shell and its kits, what apps call besides the page
@@ -174,6 +178,7 @@ impl Options {
             auth: None,
             policy: None,
             no_auth: true,
+            dev_sign_in: true,
         }
     }
 }
@@ -231,9 +236,6 @@ pub async fn serve(opts: Options) -> anyhow::Result<()> {
 async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     check_auth(&opts)?;
     opts.risk.check(&kits)?;
-    if opts.no_auth {
-        println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too");
-    }
     let engine = runtime::engine()?;
     let db = tx::open_db(&opts.data.join("appos.db"))?;
     // No platform.db yet: the first start, with no last one to compare with.
@@ -247,11 +249,17 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     }
 
     let origin = opts.origin.clone().unwrap_or_else(|| format!("http://{}", opts.addr));
+    match (opts.no_auth, opts.dev_sign_in) {
+        (true, true) => println!("no policy: anyone may do anything. Anonymous until you sign in, as a test user or anyone: {origin}/_auth/sign-in"),
+        (true, false) => println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too"),
+        _ => {}
+    }
     // Neither --auth nor --no-auth: the token sign-in (auth/token.rs).
     let token = (opts.auth.is_none() && !opts.no_auth).then(|| auth::session::random(24));
     let auth = match (&opts.auth, &token) {
         (Some(path), _) => Some(auth::Auth::load(path, &origin, &opts.data, &opts.addr)?),
         (None, Some(secret)) => Some(auth::Auth::token(secret.clone(), &origin, &opts.data)?),
+        (None, None) if opts.dev_sign_in => Some(auth::Auth::dev(&origin, &opts.data)?),
         (None, None) => None,
     };
     let policy = match &opts.policy {
@@ -378,6 +386,7 @@ mod check_auth_tests {
             auth: auth.then(|| "auth.toml".into()),
             policy: policy.then(|| "policy.csv".into()),
             no_auth,
+            dev_sign_in: false,
         };
         assert!(check_auth(&opts(true, true, false)).is_ok());
         assert!(check_auth(&opts(false, false, true)).is_ok());
@@ -405,6 +414,7 @@ mod check_auth_tests {
             auth: None,
             policy: None,
             no_auth: false,
+            dev_sign_in: false,
         };
         for ok in [opts("127.0.0.1:8080", None, None), opts("localhost:8080", Some("[::1]:9090"), Some("http://localhost:8080"))] {
             assert!(check_auth(&ok).is_ok());
