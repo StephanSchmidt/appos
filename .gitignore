@@ -95,6 +95,31 @@ appos-data/
 # Java examples: the Maven build.
 !/examples/*/pom.xml
 
+# Kitewell, a SaaS on AppOS: the platform (the booking kit and its pages)
+# and the apps of the booking flow, one folder each.
+!/kitewell/Cargo.toml
+!/kitewell/README.md
+!/kitewell/policy.csv
+!/kitewell/rustfmt.toml
+!/kitewell/src/**
+!/kitewell/templates/**
+!/kitewell/wit/*.wit
+!/kitewell/screenshots/*.png
+!/kitewell/*/.gitignore
+!/kitewell/*/request.md
+!/kitewell/*/app.toml
+!/kitewell/*/Cargo.toml
+!/kitewell/*/Cargo.lock
+!/kitewell/*/Makefile
+!/kitewell/*/clippy.toml
+!/kitewell/*/rust-toolchain.toml
+!/kitewell/*/wit/**
+!/kitewell/*/src/**
+!/kitewell/*/templates/**
+!/kitewell/*/package.json
+!/kitewell/*/package-lock.json
+!/kitewell/*/tsconfig.json
+
 # Releases: the binaries for macOS and Linux, and the Homebrew formula.
 !/.github/workflows/*.yml
 !/.github/homebrew/*

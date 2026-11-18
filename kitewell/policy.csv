@@ -1,0 +1,17 @@
+# Who may do what on Kitewell's platform (kitewell --auth auth.toml
+# --policy policy.csv). Customers book without signing in, so the booking's
+# grants are anyone's, each only in the app that holds it: the sales app
+# can't set the workspace, the product app can't change the terms. The
+# platform's own booking pages are at /book. The admin screen is the
+# platform team's (admin-read to look, admin-write to change); support may
+# look at it but change nothing.
+p, anyone, packages, booking-read
+p, anyone, packages, booking-choose
+p, anyone, packages, booking-terms
+p, anyone, workspace, booking-read
+p, anyone, workspace, booking-configure
+p, anyone, workspace, booking-setup
+p, anyone, workspace, kv-*
+p, anyone, book, booking-book
+p, group:platform, *, admin-*
+p, group:support, *, admin-read

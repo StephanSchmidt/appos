@@ -1,0 +1,7 @@
+<ol class="steps" aria-label="Booking steps">
+  <li{% if step == 1 %} class="now" aria-current="step"{% else if step > 1 %} class="done"{% endif %}><span>Package</span></li>
+  <li{% if step == 2 %} class="now" aria-current="step"{% else if step > 2 %} class="done"{% endif %}><span>Workspace</span></li>
+  <li{% if step == 3 %} class="now" aria-current="step"{% else if step > 3 %} class="done"{% endif %}><span>Terms</span></li>
+  <li{% if step == 4 %} class="now" aria-current="step"{% else if step > 4 %} class="done"{% endif %}><span>Review</span></li>
+  <li{% if step == 5 %} class="now" aria-current="step"{% endif %}><span>Set up</span></li>
+</ol>

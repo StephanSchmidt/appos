@@ -1,0 +1,29 @@
+<div class="flow">
+  {% include "steps.html" %}
+
+  <header class="intro">
+    <h1>Your workspace</h1>
+    <p class="lead">{{ package }} for {{ users }} people.</p>
+  </header>
+
+  <div class="split">
+    <form class="card" method="post" action="{{ action }}">
+      <fieldset class="group">
+        <legend>Add-ons</legend>
+        {% for add_on in add_ons %}
+        <label class="choice"><input type="checkbox" name="add-on" value="{{ add_on.value }}"{% if add_on.checked %} checked{% endif %}{% if add_on.fixed %} disabled{% endif %}><span><strong>{{ add_on.label }}</strong><small>{{ add_on.note }}</small></span></label>
+        {% endfor %}
+      </fieldset>
+      <fieldset class="group">
+        <legend>Your first project</legend>
+        {% for template in templates %}
+        <label class="choice"><input type="radio" name="template" value="{{ template.value }}"{% if template.checked %} checked{% endif %}><span><strong>{{ template.label }}</strong><small>{{ template.note }}</small></span></label>
+        {% endfor %}
+      </fieldset>
+      <p class="error">{{ error }}</p>
+      <div class="actions"><button>Continue</button><a class="back" href="{{ back }}">Back</a></div>
+    </form>
+
+    <aside class="card quote summary">{% include "quote.html" %}</aside>
+  </div>
+</div>

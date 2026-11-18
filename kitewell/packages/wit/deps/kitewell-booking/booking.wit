@@ -1,0 +1,189 @@
+package kitewell:booking@0.1.0;
+
+/// The booking flow: a customer books a Kitewell package in five slots,
+/// in this order:
+///
+///   choose     sales        the package and the number of users, or an offer
+///   configure  product      add-ons and a starter template
+///   terms      sales        billing, contract length, payment terms
+///   review     engineering  the quote, the customer's details, book
+///   setup      product      the workspace: members and invite links
+///
+/// Review is the platform's own page, /book/<draft>. Each other slot is an
+/// app's page, and the platform has a plain page of its own for it
+/// (/book/<draft>/<slot>) that takes over while that app doesn't serve.
+///
+/// A draft is the booking in progress. The platform keeps it under an id
+/// that is hard to guess: whoever has the id may change the draft, so the
+/// slots pass it on in their links. Each slot's functions are their own
+/// interface with their own grant, so an app changes only the slots
+/// policy.csv gives it. Prices are always the platform's: no function
+/// takes one.
+interface flow {
+    enum plan { starter, team, business }
+
+    enum billing { monthly, quarterly, yearly }
+
+    enum payment-terms { net30, net45, net60 }
+
+    enum slot { choose, configure, terms, review, setup }
+
+    record plan-info {
+        plan: plan,
+        name: string,
+        /// Per user per month when billed monthly, in cents: 2900 for $29.
+        monthly-cents: u32,
+        /// The users the plan is for.
+        min-users: u32,
+        max-users: u32,
+        /// It bills at least this many users: 10 for Business.
+        billed-minimum: u32,
+        features: list<string>,
+    }
+
+    record add-on-info {
+        id: string,
+        name: string,
+        /// Per user per month when billed monthly, in cents.
+        monthly-cents: u32,
+        /// The plans it comes with at no cost.
+        included-in: list<plan>,
+    }
+
+    record template-info {
+        id: string,
+        name: string,
+        description: string,
+    }
+
+    record catalog-info {
+        plans: list<plan-info>,
+        add-ons: list<add-on-info>,
+        templates: list<template-info>,
+        /// More users than this get no package: they talk to sales.
+        enterprise-from: u32,
+    }
+
+    record line {
+        /// Like "Team, 24 users, yearly" or "Offer KW-ACME-2026, 18% off".
+        label: string,
+        /// Per year; negative for a discount.
+        cents: s64,
+    }
+
+    record quote {
+        lines: list<line>,
+        /// Users billed: at least the plan's minimum.
+        billed-users: u32,
+        per-year-cents: u64,
+        /// All years of the contract.
+        contract-cents: u64,
+        /// One invoice: a month, a quarter or a year.
+        per-invoice-cents: u64,
+        /// Why it can't be booked yet, in words; empty when it can.
+        problems: list<string>,
+    }
+
+    record draft {
+        id: string,
+        /// The package's name as sales shows it, like "Team" or "Agency
+        /// package"; empty until chosen.
+        %package: string,
+        plan: option<plan>,
+        users: u32,
+        add-ons: list<string>,
+        template: option<string>,
+        billing: billing,
+        years: u8,
+        payment-terms: payment-terms,
+        /// The offer that set the package and the terms; they can't be
+        /// changed then.
+        offer: option<string>,
+        quote: quote,
+    }
+
+    record member {
+        name: string,
+        email: string,
+        /// The link that lets them in. Kitewell sends no email: the
+        /// customer passes it on.
+        invite: string,
+    }
+
+    record booking {
+        /// The draft's id.
+        id: string,
+        company: string,
+        %package: string,
+        users: u32,
+        /// The workspace's address.
+        workspace: string,
+        members: list<member>,
+        /// The first project, made from the template.
+        project: option<string>,
+        /// What finance invoices. Invoices go out elsewhere.
+        quote: quote,
+    }
+
+    /// Plans, add-ons and templates. Grant booking-read.
+    catalog: func() -> catalog-info;
+    /// A draft; none for an unknown id. Grant booking-read.
+    get: func(id: string) -> option<draft>;
+    /// The path of a slot for a draft, to link to it: the app's page, or
+    /// the platform's own while the app doesn't serve. Grant booking-read.
+    link: func(id: string, to: slot) -> string;
+    /// The path of the slot after `after`, to send the customer on. Grant
+    /// booking-read.
+    next: func(id: string, after: slot) -> string;
+    /// The booking, once the customer booked on the review page; none
+    /// before. Grant booking-read.
+    booked: func(id: string) -> option<booking>;
+}
+
+/// Slot 1, sales. Grant booking-choose.
+interface choose {
+    use flow.{plan, draft};
+
+    /// A new draft, with nothing chosen.
+    start: func() -> draft;
+    /// Sets the plan and the users, and drops an offer. `package` is the
+    /// name sales shows. Errs with the reason in words, like "Starter is
+    /// for up to 10 users".
+    with-plan: func(id: string, plan: plan, users: u32, %package: string) -> result<draft, string>;
+    /// Applies an approved offer by its code: it sets the package, the
+    /// users and the terms it was approved for. Errs for an unknown or
+    /// expired code.
+    with-offer: func(id: string, code: string) -> result<draft, string>;
+}
+
+/// Slot 2, product. Grant booking-configure.
+interface configure {
+    use flow.{draft};
+
+    /// Turns an add-on on or off. Errs for an unknown add-on.
+    with-add-on: func(id: string, add-on: string, on: bool) -> result<draft, string>;
+    /// The starter template, or none. Errs for an unknown template.
+    with-template: func(id: string, template: option<string>) -> result<draft, string>;
+}
+
+/// Slot 3, sales. Grant booking-terms.
+interface terms {
+    use flow.{billing, payment-terms, draft};
+
+    /// Errs when the terms aren't allowed: without an offer, monthly
+    /// billing is for one year, and payment is Net 30; with one, the
+    /// offer's terms stand.
+    with-terms: func(id: string, billing: billing, years: u8, payment-terms: payment-terms) -> result<draft, string>;
+}
+
+/// Slot 5, product. Grant booking-setup.
+interface setup {
+    use flow.{member};
+
+    /// Adds a member to a booked workspace and answers with their invite
+    /// link. Someone whose email is in already comes back as they are, so
+    /// a repeat is harmless. Errs, with the reason in words, for a full
+    /// workspace, an email that doesn't look like one, or an unknown
+    /// booking.
+    add-member: func(booking: string, name: string, email: string) -> result<member, string>;
+}

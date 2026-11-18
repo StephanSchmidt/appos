@@ -1,0 +1,13 @@
+<h2>Your price</h2>
+<table>
+  {% for (label, amount) in quote.lines %}
+  <tr><td>{{ label }}</td><td>{{ amount }}</td></tr>
+  {% endfor %}
+  <tr class="total"><td>Per year</td><td>{{ quote.per_year }}</td></tr>
+</table>
+<p class="note">{{ quote.invoices }}{% if quote.years > 1 %} Over the {{ quote.years }} years: {{ quote.contract }}.{% endif %} Prices without VAT.</p>
+{% if !quote.problems.is_empty() %}
+<ul class="problems">
+  {% for problem in quote.problems %}<li>{{ problem }}</li>{% endfor %}
+</ul>
+{% endif %}

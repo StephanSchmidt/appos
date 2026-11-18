@@ -1,0 +1,10 @@
+[app]
+id = "workspace"
+name = "Workspace"
+version = "0.1.0"
+owner = "Jonas Berg <jonas.berg@example.com>"
+group = "Product"
+wasm = "target/workspace.wasm"
+
+[capabilities]
+grant = ["booking-read", "booking-configure", "booking-setup", "kv-read", "kv-write"]

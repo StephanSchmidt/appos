@@ -1,0 +1,10 @@
+[app]
+id = "packages"
+name = "Packages"
+version = "0.1.0"
+owner = "Hannah Boateng <hannah.boateng@example.com>"
+group = "Sales"
+wasm = "target/wasm32-wasip2/release/packages.wasm"
+
+[capabilities]
+grant = ["booking-read", "booking-choose", "booking-terms"]

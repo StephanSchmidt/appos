@@ -1459,6 +1459,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitewell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "appos-shell",
+ "askama",
+ "chrono",
+ "getrandom 0.4.3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
 name = "leb128"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

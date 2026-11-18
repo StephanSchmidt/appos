@@ -1,0 +1,43 @@
+<div class="flow">
+  {% include "steps.html" %}
+
+  <header class="intro">
+    <h1>How you pay</h1>
+    <p class="lead">{{ package }} for {{ users }} people. We send you invoices, so there is nothing to pay today.</p>
+  </header>
+
+  <div class="split">
+    {% if offer.is_empty() %}
+    <form class="card" method="post" action="{{ base }}/terms" hx-post="{{ base }}/terms" hx-trigger="change" hx-swap="none">
+      <input type="hidden" name="draft" value="{{ draft }}">
+      <fieldset class="group">
+        <legend>Billing</legend>
+        <div class="segments">
+          <label><input type="radio" name="billing" value="yearly"{% if !monthly %} checked{% endif %}><span>Yearly<small class="save">2 months free</small></span></label>
+          <label><input type="radio" name="billing" value="monthly"{% if monthly %} checked{% endif %}><span>Monthly<small>1-year contract</small></span></label>
+        </div>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Contract</legend>
+        <div class="segments">
+          {% for year in years %}
+          <label><input type="radio" name="years" value="{{ year.value }}"{% if year.selected %} checked{% endif %}><span>{{ year.label }}</span></label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <p class="error" id="terms_error" aria-live="polite">{% block terms_error %}{{ error }}{% endblock %}</p>
+      <p class="note">Payment: by invoice, Net 30.</p>
+      <div class="actions"><button>Continue</button><a class="back" href="{{ back }}">Back</a></div>
+    </form>
+    {% else %}
+    <div class="card">
+      <span class="badge">Offer {{ offer }}</span>
+      <h2>These terms come with your offer {{ offer }}</h2>
+      <p>{{ offer_terms }}</p>
+      <div class="actions"><a class="button" href="{{ next }}">Continue</a><a class="back" href="{{ back }}">Back</a></div>
+    </div>
+    {% endif %}
+
+    <aside class="card quote summary" id="quote">{% block quote_block %}{% include "quote.html" %}{% endblock %}</aside>
+  </div>
+</div>

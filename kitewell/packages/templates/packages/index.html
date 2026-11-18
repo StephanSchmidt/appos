@@ -1,0 +1,69 @@
+<div class="flow">
+  {% include "steps.html" %}
+
+  <header class="intro">
+    <h1>Choose your package</h1>
+    <p class="lead">Kitewell plans your team's projects, time and people in one place. Tell us your team size and we show what fits.</p>
+  </header>
+
+  <form class="card size" method="get" action="{{ base }}" hx-get="{{ base }}" hx-trigger="submit" hx-swap="none">
+    <input type="hidden" id="draft_field" name="draft" value="{{ draft }}">
+    <label for="users">How many people are on your team?</label>
+    <div class="size-field" id="users_box">{% block users_box %}<input id="users" name="users" type="text" inputmode="numeric" enterkeyhint="done" autocomplete="off" spellcheck="false" maxlength="10" value="{{ users }}" hx-get="{{ base }}" hx-trigger="input changed delay:250ms" hx-include="#draft_field" hx-swap="none"><span aria-hidden="true">people</span>{% endblock %}</div>
+    <div class="slider">
+      <div id="slider_box">{% block slider_box %}<input type="range" name="slider" form="no-form" min="0" max="{{ slider_last }}" step="1" value="{{ slider }}" tabindex="-1" aria-hidden="true" hx-get="{{ base }}" hx-trigger="input throttle:80ms, change" hx-include="#draft_field" hx-sync="this:queue last" hx-swap="none">{% endblock %}</div>
+      <div class="marks" aria-hidden="true">{% for mark in marks %}<span style="--at: {{ mark.at }}">{{ mark.label }}</span>{% endfor %}</div>
+    </div>
+    <noscript><button>Show packages</button></noscript>
+  </form>
+
+  <div id="cards">{% block cards %}
+    {% if !error.is_empty() %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if let Some(largest) = largest %}
+    <article class="card talk">
+      <h2>More than {{ largest }} people?</h2>
+      <p>Then we make you an offer of your own, with a price for your team.</p>
+      <a class="button" href="mailto:{{ sales }}">Talk to sales</a>
+      <p class="note">Or write to {{ sales }} and say how many you are.</p>
+    </article>
+    {% else %}
+    <div class="packages">
+      {% for card in cards %}
+      <form class="package{% if card.featured %} featured{% endif %}{% if !card.why_not.is_empty() %} off{% endif %}" method="post" action="{{ base }}/choose">
+        <div class="package-head">
+          <h2>{{ card.name }}</h2>
+          {% if card.chosen %}<span class="badge">Your choice</span>{% else if !card.badge.is_empty() %}<span class="badge">{{ card.badge }}</span>{% endif %}
+        </div>
+        <p class="pitch">{{ card.pitch }}</p>
+        <div class="price">
+          <p><span class="amount">{{ card.monthly }}</span> <span class="unit">per user per month</span></p>
+          <p class="saving">Two months free when billed yearly</p>
+        </div>
+        <div class="bill">
+          <p><strong>{{ card.yearly }}</strong> per user per year, billed yearly</p>
+          {% if !card.minimum.is_empty() %}<p>{{ card.minimum }}</p>{% endif %}
+        </div>
+        <div>
+          {% if card.why_not.is_empty() %}<button{% if !card.featured %} class="quiet"{% endif %}>Choose {{ card.name }}</button>{% else %}<p class="why">{{ card.why_not }}</p>{% endif %}
+        </div>
+        <ul class="features">{% for feature in card.features %}<li>{{ feature }}</li>{% endfor %}</ul>
+        <input type="hidden" name="draft" value="{{ draft }}">
+        <input type="hidden" name="users" value="{{ users }}">
+        <input type="hidden" name="package" value="{{ card.name }}">
+      </form>
+      {% endfor %}
+    </div>
+    {% endif %}
+  {% endblock %}</div>
+
+  <form class="card offer" method="post" action="{{ base }}/offer">
+    <input type="hidden" name="draft" value="{{ draft }}">
+    <label for="code">Got an offer code from your account executive?</label>
+    <div class="row">
+      <input id="code" type="text" name="code" value="{{ code }}" placeholder="KW-ACME-2026" autocomplete="off" aria-describedby="code_error">
+      <button class="quiet">Use the offer</button>
+    </div>
+    <p class="error" id="code_error">{{ code_error }}</p>
+    <p class="note">The offer sets the package, the team size and the terms we agreed on.</p>
+  </form>
+</div>

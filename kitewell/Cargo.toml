@@ -1,0 +1,26 @@
+# Kitewell's platform: the AppOS shell with Kitewell's booking flow as a
+# kit. The apps in packages/, workspace/ and book/ build against it and
+# run in it. See src/main.rs.
+[package]
+name = "kitewell"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+askama = "0.16"
+appos-shell = { path = "../shell" }
+chrono = "0.4"
+getrandom = "0.4"
+rusqlite = { version = "0.42", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The derives for WIT records (Draft, Booking, ...) expand to wasmtime paths.
+wasmtime = "50"

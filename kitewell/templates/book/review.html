@@ -1,0 +1,49 @@
+<div class="flow">
+  {% include "steps.html" %}
+
+  <header class="intro">
+    <h1>Review and book</h1>
+    <p class="lead">Check what you book. We send the invoices to the email address below, so there is nothing to pay today.</p>
+  </header>
+
+  <div class="split">
+    <div class="main">
+      <section class="card">
+        <h2>Your booking</h2>
+        <dl class="rows">
+          {% for (label, value, change) in rows %}
+          <div><dt>{{ label }}</dt><dd>{{ value }}</dd><a href="{{ change }}" aria-label="Change {{ label }}">Change</a></div>
+          {% endfor %}
+        </dl>
+      </section>
+
+      {% if quote.problems.is_empty() %}
+      <form class="card" method="post" action="{{ action }}">
+        <h2>Who books</h2>
+        <div class="field">
+          <label for="company">Company</label>
+          <input id="company" type="text" name="company" value="{{ company }}" autocomplete="organization" aria-describedby="company_error">
+          <p class="error" id="company_error">{{ company_error }}</p>
+        </div>
+        <div class="field">
+          <label for="name">Your name</label>
+          <input id="name" type="text" name="name" value="{{ name }}" autocomplete="name" aria-describedby="name_error">
+          <p class="error" id="name_error">{{ name_error }}</p>
+        </div>
+        <div class="field">
+          <label for="email">Your email</label>
+          <input id="email" type="email" name="email" value="{{ email }}" autocomplete="email" aria-describedby="email_error">
+          <p class="error" id="email_error">{{ email_error }}</p>
+        </div>
+        <label class="choice"><input type="checkbox" name="consent" value="yes"><span>{{ consent }}</span></label>
+        <p class="error">{{ consent_error }}</p>
+        <div class="actions"><button>Book now</button></div>
+      </form>
+      {% else %}
+      <p class="error">Fix what the price says first. The Change links go to each step.</p>
+      {% endif %}
+    </div>
+
+    <aside class="card quote summary">{% include "quote.html" %}</aside>
+  </div>
+</div>
