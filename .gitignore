@@ -16,6 +16,7 @@ appos-data/
 !/risk.toml
 !/rustfmt.toml
 !/docs/*.png
+!/docs/*.svg
 
 !/wit/*.wit
 !/wit-auth/*.wit

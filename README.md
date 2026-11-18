@@ -12,6 +12,11 @@ apps: it sees every app, who owns it, what it may do and how it runs,
 checks its packages for known vulnerabilities (`appos audit`, Rust and
 TypeScript apps for now), and can limit it, roll it back or turn it off.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/marketing-ships-dark.svg">
+  <img alt="How marketing ships with AppOS. Marketing describes an idea to its AI agent, which writes a web app. The app is built to WebAssembly and deployed to AppOS. An automatic review, for example with appfuzz, checks it; once it passes, it runs in a sandbox that users reach. Platform engineering sets the rules for that step." src="docs/marketing-ships-light.svg">
+</picture>
+
 ![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
 
 A shell that runs WebAssembly apps, written by anyone (or their agents),
@@ -483,6 +488,16 @@ imports its interface and calls its functions like its own; `appos sync`
 brings the kit's WIT into the app's `wit/`, and the bindings in each
 language come from it. AppOS checks the app's grant and the policy before
 a call reaches the kit; a kit never checks permissions itself.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/kits-dark.svg">
+  <img alt="How the shell, apps and kits work together, in an illustration. A browser reaches the AppOS shell, which engineering runs. Its router sends /accounts to the sales team&#x27;s accounts app and /webinars to the marketing team&#x27;s webinars app, each in a fresh WebAssembly sandbox, and /crm to the CRM kit&#x27;s own page. Every call from an app passes the shell&#x27;s check: the app holds the grant and the policy lets the person use it. A query answers at once and only reads; a command, like the webinars app adding a note to a customer, goes out after the app&#x27;s request commits. The kits: acme:crm, Rust compiled into the platform, with get, search and notes behind crm-read and the command add-note behind crm-write, over Acme&#x27;s CRM; acme:scoring, Wasm deployed like an app, with score behind scoring-read, which calls the CRM kit and may fetch only from the hosts in its kit.toml; and kv and users, built into AppOS. Apps hold what one team changes often: pages, forms, workflow. Kits hold what must stay right: shared data, prices, rules and other systems." src="docs/kits-light.svg">
+</picture>
+
+An illustration with two kits like [acme-platform](examples/acme-platform)'s
+CRM kit and [acme-scoring](examples/acme-scoring). Solid arrows are queries,
+which answer at once and only read; the dashed arrow is a command, which goes
+out after the app's request commits.
 
 A kit is one of two things:
 
