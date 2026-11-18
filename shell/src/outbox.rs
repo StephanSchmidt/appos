@@ -106,16 +106,13 @@ impl Deliver {
 async fn deliver(to: Deliver, wake: Arc<Notify>) {
     let (db, interface) = (&to.db, &to.interface);
     loop {
-        let kit = match to.kit() {
-            Ok(kit) => kit,
-            Err(_) => {
-                tokio::select! {
-                    _ = wake.notified() => {}
-                    _ = tokio::time::sleep(WAITING) => {}
-                }
-                continue;
+        if to.kit().is_err() {
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(WAITING) => {}
             }
-        };
+            continue;
+        }
         let batch = {
             let (db, interface) = (db.clone(), interface.clone());
             tokio::task::spawn_blocking(move || tx::due(&db, &interface, now_ms(), BATCH)).await
@@ -123,7 +120,9 @@ async fn deliver(to: Deliver, wake: Arc<Notify>) {
         match batch {
             Ok(Ok(batch)) if !batch.is_empty() => {
                 for message in batch {
-                    if let Err(e) = try_one(&to, kit.clone(), message).await {
+                    // Its kit may have gone off while the batch was read.
+                    let Ok(kit) = to.kit() else { break };
+                    if let Err(e) = try_one(&to, kit, message).await {
                         eprintln!("{interface}: the outbox could not be updated: {e}");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
