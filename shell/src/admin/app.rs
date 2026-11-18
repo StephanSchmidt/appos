@@ -9,7 +9,6 @@ use crate::manifest::Band;
 use crate::platform::{Kind, Request, Version, VersionStatus, now_ms};
 use crate::runtime::IO_BUDGET;
 use crate::shell::Shell;
-use crate::web::escape;
 
 use super::charts::{Mark, app_chart, column};
 use super::format::{FULL, and, capitalize, clock, duration, first_line, fuel, local, ms, plural, thousands};
@@ -17,7 +16,7 @@ use super::log::{from_event, of_app, of_app_kinds};
 use super::model::{App, Tone, VERSIONS, by, kind_label, risk_changes, risk_of, stats};
 use super::overview::{Selected, dashboard};
 use super::style::{POWER_PATH, badge, grant_chip, icon_html, owner_html, path_icon, tone_icon};
-use super::{Ask, read};
+use super::{Ask, html, read};
 
 /// Versions shown before "All versions".
 const SHOWN: usize = 10;
@@ -32,82 +31,218 @@ pub(super) async fn app_page(ask: Ask) -> Reply {
     read(shell, move |shell| dashboard(shell, &viewer, &url, Some(Selected { id: &id, all_versions }), &query)).await
 }
 
-/// A button that changes the app at once: a form posting to `action`,
-/// back to the app's page.
-fn act(a: &App, action: &str, fields: &[(&str, &str)], button: &str) -> String {
-    let path = format!("/admin/apps/{}", form_urlencoded::byte_serialize(a.id.as_bytes()).collect::<String>());
-    let fields: String =
-        fields.iter().chain(&[("then", path.as_str())]).map(|(k, v)| format!(r#"<input type="hidden" name="{k}" value="{}">"#, escape(v))).collect();
-    format!(r#"<form method="post" action="{}">{fields}{button}</form>"#, escape(&format!("{path}/{action}")))
+/// The app's section (templates/admin/app.html): its header, requests
+/// with its changes, routes, kits, risk, versions and last failures.
+#[derive(askama::Template)]
+#[template(path = "admin/app.html")]
+struct Detail<'a> {
+    icon: String,
+    name: &'a str,
+    id: &'a str,
+    /// Its page, which its forms post under and return to.
+    path: String,
+    group: Option<&'a str>,
+    owner: Option<String>,
+    requests: String,
+    log: String,
+    running: Option<Running>,
+    limits: Option<Limits>,
+    switch: Switch,
+    chart: Option<String>,
+    routes: Routes,
+    kits: Option<KitsPart>,
+    risk: RiskPart,
+    versions: Option<Versions>,
+    failures: Vec<Failure>,
+    shown: usize,
+    power: String,
+    warn: String,
+    critical: String,
+    /// Its buttons act (admin-write).
+    changes: bool,
+}
+
+struct Running {
+    label: String,
+    grants: String,
+    risk: Option<String>,
+    origin: String,
+}
+
+struct Limits {
+    time: String,
+    fuel: String,
+    io: u32,
+    mb: usize,
+    /// Set by an admin, not the defaults.
+    set: bool,
+}
+
+/// The kill switch: off in the header, on in the banner while off (when,
+/// by whom, why).
+enum Switch {
+    Off,
+    On(String, String, Option<String>),
+    Nothing,
+}
+
+/// The routes; none while it doesn't run (true when an earlier version
+/// could be made live).
+enum Routes {
+    None(bool),
+    Some(Vec<Route>),
+}
+
+/// A route's last hour; a dash where nothing ran.
+struct Route {
+    route: String,
+    requests: String,
+    bad: bool,
+    failures: String,
+    median: String,
+    p95: Option<String>,
+    max: String,
+    fuel: String,
+    io: String,
+}
+
+/// The kits it uses, and for a kit what uses it.
+struct KitsPart {
+    uses: Vec<Uses>,
+    users: Option<Vec<User>>,
+}
+
+struct Uses {
+    name: Link,
+    from: String,
+    grants: Vec<String>,
+    through: Option<String>,
+    now: String,
+}
+
+/// A Wasm kit's page, or a Rust kit's name.
+enum Link {
+    App(String, String),
+    Code(String),
+}
+
+struct User {
+    id: String,
+    name: String,
+    kind: &'static str,
+    grants: Vec<String>,
+    now: String,
+}
+
+/// Why it is as risky as it is (none while it doesn't run), its grants,
+/// and the log of risk changes.
+struct RiskPart {
+    why: Option<String>,
+    rows: Vec<GrantRow>,
+    changes: String,
+}
+
+struct GrantRow {
+    grant: String,
+    chip: String,
+    allows: String,
+    /// It sets the app's risk.
+    sets: bool,
+    since: Option<Since>,
+}
+
+/// The risk file's change that gave a grant its level, in the log.
+struct Since {
+    href: String,
+    full: String,
+    clock: String,
+}
+
+/// The versions shown; `hold` while deploys wait (when, why).
+struct Versions {
+    hold: Option<(String, Option<String>)>,
+    rows: Vec<VersionRow>,
+    more: More,
+}
+
+struct VersionRow {
+    label: String,
+    badge: String,
+    full: String,
+    clock: String,
+    took: String,
+    live: bool,
+    /// Make live, primary for a waiting version.
+    make_live: Option<bool>,
+    reason: Option<String>,
+    /// The reason's first line.
+    line: String,
+}
+
+/// A link to more versions, or back to the newest.
+enum More {
+    Nothing,
+    Newest,
+    All(String),
+}
+
+struct Failure {
+    full: String,
+    time: String,
+    route: String,
+    badge: String,
+    label: String,
+    error: Option<String>,
 }
 
 /// The app: its header, its requests with its changes, routes, versions
 /// and last failures.
-pub(super) fn detail(shell: &Shell, apps: &[App], a: &App, marks: &[Mark], all_versions: bool) -> String {
-    let requests = plural(a.reqs.len(), "request");
-    let log = escape(&of_app(&a.id));
-    let group = a.group().map(|g| format!("{} · ", escape(g))).unwrap_or_default();
-    let owner = format!("{group}{}", a.owner().map(|o| format!("owned by {} · ", owner_html(o))).unwrap_or_default());
-    let (sub, limits) = match &a.running {
-        Some(r) => {
-            let grants = &r.manifest.capabilities.grant;
-            let grants = if grants.is_empty() { "nothing".to_string() } else { grants.join(", ") };
-            (
-                format!(
-                    r#"{owner}{requests} in the last hour · live <code>{}</code> · grants {} · {} · <a href="{log}">its log</a> · <a href="{}/{}">open the app</a>"#,
-                    escape(&r.label),
-                    escape(&grants),
-                    risk_of(&shell.risk, a).map(|r| format!(r##"<a href="#risk">{r}</a>"##)).unwrap_or_default(),
-                    escape(&shell.origin),
-                    escape(&a.id)
-                ),
-                {
-                    let b = a.budget();
-                    let set = if a.limits == Default::default() { "" } else { " (set by an admin)" };
-                    format!(
-                        r#"<span class="limits">limits {}, {} fuel, {IO_BUDGET} I/O, {} MB{set}</span>"#,
-                        duration(a.limit_us()),
-                        fuel(b.fuel),
-                        b.memory >> 20
-                    )
-                },
-            )
+pub(super) fn detail(shell: &Shell, apps: &[App], a: &App, marks: &[Mark], all_versions: bool, changes: bool) -> String {
+    let now = now_ms();
+    let running = a.running.as_ref().map(|r| {
+        let grants = &r.manifest.capabilities.grant;
+        Running {
+            label: r.label.clone(),
+            grants: if grants.is_empty() { "nothing".to_string() } else { grants.join(", ") },
+            risk: risk_of(&shell.risk, a),
+            origin: shell.origin.clone(),
         }
-        None => (format!(r#"{owner}{requests} in the last hour · not running · <a href="{log}">its log</a>"#), String::new()),
+    });
+    let limits = a.running.as_ref().map(|_| {
+        let b = a.budget();
+        Limits { time: duration(a.limit_us()), fuel: fuel(b.fuel), io: IO_BUDGET, mb: b.memory >> 20, set: a.limits != Default::default() }
+    });
+    let switch = match (&a.running, &a.off) {
+        (Some(_), None) => Switch::Off,
+        (_, Some(e)) => Switch::On(clock(e.at), by(e), e.reason.clone()),
+        (None, None) => Switch::Nothing,
     };
-    // The kill switch: off in the header, on in the banner while off.
-    let (switch, off) = match (&a.running, &a.off) {
-        (Some(_), None) => (act(a, "off", &[], &format!(r#"<button class="button switch">{}Turn off</button>"#, path_icon(POWER_PATH, 16))), String::new()),
-        (_, Some(e)) => (
-            String::new(),
-            format!(
-                r#"<div class="warn tone-warning banner">{}<p><b>Turned off</b> at {} {}{}. Visitors get a page saying so; nothing runs.</p>{}</div>"#,
-                tone_icon(Tone::Warning, 16),
-                clock(e.at),
-                escape(&by(e)),
-                e.reason.as_deref().map(|r| format!(": {}", escape(r))).unwrap_or_default(),
-                act(a, "on", &[], r#"<button class="primary">Turn on</button>"#),
-            ),
-        ),
-        (None, None) => (String::new(), String::new()),
-    };
-    format!(
-        r#"<section class="detail" aria-labelledby="dt-h"><div class="dhead">{icon}<span class="dname"><h3 id="dt-h">{name}</h3><span class="sub">{sub}</span></span>{limits}{switch}</div>{off}
-{chart}{routes}{kits}{risk}{versions}{failures}</section>"#,
-        icon = icon_html(a, 48),
-        // Nothing to draw for an app that isn't running and had nothing happen.
-        chart = if a.running.is_some() || !marks.is_empty() || a.reqs.iter().any(|r| column(r.at, now_ms()).is_some()) {
-            app_chart(a, marks, now_ms())
-        } else {
-            String::new()
-        },
-        name = escape(&a.name),
-        routes = routes_table(a),
-        kits = kits_part(shell, apps, a),
-        risk = risk_table(shell, a),
-        versions = versions_table(shell, a, all_versions),
-        failures = last_failures(a),
-    )
+    // Nothing to draw for an app that isn't running and had nothing happen.
+    let drawn = a.running.is_some() || !marks.is_empty() || a.reqs.iter().any(|r| column(r.at, now).is_some());
+    html(&Detail {
+        icon: icon_html(a, 48),
+        name: &a.name,
+        id: &a.id,
+        path: format!("/admin/apps/{}", form_urlencoded::byte_serialize(a.id.as_bytes()).collect::<String>()),
+        group: a.group(),
+        owner: a.owner().map(owner_html),
+        requests: plural(a.reqs.len(), "request"),
+        log: of_app(&a.id),
+        running,
+        limits,
+        switch,
+        chart: drawn.then(|| app_chart(a, marks, now)),
+        routes: routes(a),
+        kits: kits_part(shell, apps, a),
+        risk: risk_part(shell, a),
+        versions: versions(shell, a, all_versions),
+        failures: last_failures(a),
+        shown: SHOWN,
+        power: path_icon(POWER_PATH, 16),
+        warn: tone_icon(Tone::Warning, 16),
+        critical: tone_icon(Tone::Critical, 16),
+        changes,
+    })
 }
 
 /// A kit it uses: through its own grants, or through another kit's.
@@ -144,12 +279,6 @@ fn used(kits: &Kits, grants: &[String]) -> Vec<Used> {
     all
 }
 
-/// A kit's or an app's name, linked to its page.
-fn named(apps: &[App], id: &str) -> String {
-    let name = apps.iter().find(|x| x.id == id).map_or(id, |x| x.name.as_str());
-    format!(r#"<a href="/admin/apps/{}">{}</a>"#, escape(id), escape(name))
-}
-
 /// Whether it serves now, or what keeps it from serving.
 fn serving(off: bool, up: bool, waits: Option<&str>) -> String {
     match (up, off, waits) {
@@ -162,12 +291,12 @@ fn serving(off: bool, up: bool, waits: Option<&str>) -> String {
 
 /// The kits it uses, by the grants it holds and through those kits; for a
 /// kit, also what uses it, which waits while it is off.
-pub(super) fn kits_part(shell: &Shell, apps: &[App], a: &App) -> String {
-    let Some(r) = &a.running else { return String::new() };
+fn kits_part(shell: &Shell, apps: &[App], a: &App) -> Option<KitsPart> {
+    let r = a.running.as_ref()?;
     let (kits, live) = (shell.kits.now(), shell.state.live(None));
-    let codes = |grants: &[String]| grants.iter().map(|g| format!("<code>{}</code>", escape(g))).collect::<Vec<_>>().join(" ");
-    let rows: String = used(&kits, &r.manifest.capabilities.grant)
-        .iter()
+    let name_of = |id: &str| apps.iter().find(|x| x.id == id).map_or(id, |x| x.name.as_str()).to_string();
+    let uses = used(&kits, &r.manifest.capabilities.grant)
+        .into_iter()
         .map(|u| {
             let o = &u.offer;
             let (name, from) = match &o.wasm {
@@ -175,58 +304,36 @@ pub(super) fn kits_part(shell: &Shell, apps: &[App], a: &App) -> String {
                     let kit = apps.iter().find(|x| x.id == *id);
                     let live = kit.and_then(|k| k.versions.iter().find(|v| v.status == VersionStatus::Live)).map(|v| format!("Deployed, {} live", v.version));
                     let folder = kit.and_then(App::folder_version).map(|v| format!("From its folder, {v}"));
-                    (named(apps, id), live.or(folder).unwrap_or_else(|| "Deployed, none live".into()))
+                    (Link::App(id.clone(), name_of(id)), live.or(folder).unwrap_or_else(|| "Deployed, none live".into()))
                 }
-                None => (format!("<code>{}</code>", escape(&o.name)), if o.builtin { "Built into AppOS" } else { "In the platform" }.to_string()),
-            };
-            let through = match &u.through {
-                Some(via) => {
-                    format!(r#" <span class="none">through {}</span>"#, apps.iter().find(|x| x.id == *via).map_or_else(|| escape(via), |x| escape(&x.name)))
-                }
-                None => String::new(),
+                None => (Link::Code(o.name.clone()), if o.builtin { "Built into AppOS" } else { "In the platform" }.to_string()),
             };
             let off = o.wasm.as_deref().is_some_and(|id| shell.state.is_off(id));
             let now = serving(off, o.up, live.kit_waits(&kits, &o.calls).as_deref());
-            format!(r#"<tr><td>{name}</td><td>{}</td><td>{}{through}</td><td>{now}</td></tr>"#, escape(&from), codes(&u.grants))
+            Uses { name, from, through: u.through.as_deref().map(name_of), grants: u.grants, now }
         })
         .collect();
-    let head = r#"<thead><tr><th scope="col">Kit</th><th scope="col">From</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead>"#;
-    let uses = if rows.is_empty() {
-        r#"<p class="empty">It uses no kit: it holds no grant.</p>"#.to_string()
-    } else {
-        format!(
-            r#"<div class="scroll"><table class="uses" aria-labelledby="kits-h">{head}<tbody>{rows}</tbody></table></div><p class="partfoot">While a kit it uses is off or not loaded, it waits: visitors get a page saying so.</p>"#
-        )
-    };
-    let mut part = format!(r#"<div class="part" id="kits"><h4 id="kits-h">Kits it uses <small>· by the grants it holds</small></h4>{uses}</div>"#);
-    if let Some(offers) = &r.manifest.kit {
+    let users = r.manifest.kit.as_ref().map(|offers| {
         let offered: Vec<&str> = offers.grants.iter().map(|g| g.name.as_str()).collect();
-        let rows: String = apps
-            .iter()
+        apps.iter()
             .filter(|b| b.id != a.id)
             .filter_map(|b| {
                 let grants: Vec<String> = b.running.as_ref()?.manifest.capabilities.grant.iter().filter(|g| offered.contains(&g.as_str())).cloned().collect();
-                (!grants.is_empty()).then(|| {
-                    let now = serving(b.off.is_some(), true, b.waits.as_ref().map(|(k, _)| k.as_str()));
-                    let kind = if b.is_kit() { "Kit" } else { "App" };
-                    format!(r#"<tr><td>{}</td><td>{kind}</td><td>{}</td><td>{now}</td></tr>"#, named(apps, &b.id), codes(&grants))
+                (!grants.is_empty()).then(|| User {
+                    id: b.id.clone(),
+                    name: b.name.clone(),
+                    kind: if b.is_kit() { "Kit" } else { "App" },
+                    grants,
+                    now: serving(b.off.is_some(), true, b.waits.as_ref().map(|(k, _)| k.as_str())),
                 })
             })
-            .collect();
-        let users = if rows.is_empty() {
-            r#"<p class="empty">Nothing uses it now.</p>"#.to_string()
-        } else {
-            format!(
-                r#"<div class="scroll"><table class="uses" aria-labelledby="users-h"><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead><tbody>{rows}</tbody></table></div>"#
-            )
-        };
-        part += &format!(r#"<div class="part" id="users"><h4 id="users-h">Used by <small>· these wait while it is off</small></h4>{users}</div>"#);
-    }
-    part
+            .collect()
+    });
+    Some(KitsPart { uses, users })
 }
 
 /// Per route, the last hour, all versions.
-pub(super) fn routes_table(a: &App) -> String {
+fn routes(a: &App) -> Routes {
     let mut routes: Vec<(String, Vec<&Request>)> = a.running.iter().flat_map(|r| r.routes.iter().map(|x| (x.pattern(), vec![]))).collect();
     for r in &a.reqs {
         match routes.iter_mut().find(|(p, _)| **p == *r.route) {
@@ -235,50 +342,33 @@ pub(super) fn routes_table(a: &App) -> String {
         }
     }
     if routes.is_empty() {
-        let next = if a.versions.iter().any(|v| matches!(v.status, VersionStatus::Retired | VersionStatus::Failed)) {
-            "Make an earlier version live below, or deploy a fixed one."
-        } else {
-            "Deploy a fixed one with <code>appos deploy</code>."
-        };
-        return format!(r#"<div class="part"><h4>Routes</h4><p class="empty">Not running, so no routes. {next}</p></div>"#);
+        return Routes::None(a.versions.iter().any(|v| matches!(v.status, VersionStatus::Retired | VersionStatus::Failed)));
     }
-    let rows: String = routes
-        .iter()
-        .map(|(route, reqs)| {
-            let s = stats(reqs);
-            let ran = s.requests > s.failures;
-            let or_dash = |v: String| if ran { v } else { "—".to_string() };
-            let max = reqs.iter().filter(|r| !r.outcome.failed()).map(|r| r.wall_us).max().map_or("—".to_string(), ms);
-            format!(
-                r#"<tr><td><code>{}</code></td><td class="num">{}</td><td class="num{}">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{max}</td><td class="num">{}</td><td class="num">{}</td></tr>"#,
-                escape(route),
-                thousands(s.requests as u64),
-                if s.failures > 0 { " bad" } else { "" },
-                thousands(s.failures as u64),
-                or_dash(ms(s.wall_us.0)),
-                or_dash(format!("<b>{}</b>", ms(s.wall_us.1))),
-                or_dash(fuel(s.fuel.1)),
-                or_dash(s.io.1.to_string()),
-            )
-        })
-        .collect();
-    format!(
-        r#"<div class="part"><h4 id="routes-h">Routes <small>· last hour</small></h4><div class="scroll"><table class="routes" aria-labelledby="routes-h"><thead><tr><th scope="col">Route</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Failed</th><th scope="col" class="num">Median ms</th><th scope="col" class="num">p95 ms</th><th scope="col" class="num">Max ms</th><th scope="col" class="num">Fuel p95</th><th scope="col" class="num">I/O p95</th></tr></thead><tbody>{rows}</tbody></table></div></div>"#
-    )
+    let row = |(route, reqs): (String, Vec<&Request>)| {
+        let s = stats(&reqs);
+        let ran = s.requests > s.failures;
+        let or_dash = |v: String| if ran { v } else { "—".to_string() };
+        Route {
+            route,
+            requests: thousands(s.requests as u64),
+            bad: s.failures > 0,
+            failures: thousands(s.failures as u64),
+            median: or_dash(ms(s.wall_us.0)),
+            p95: ran.then(|| ms(s.wall_us.1)),
+            max: reqs.iter().filter(|r| !r.outcome.failed()).map(|r| r.wall_us).max().map_or("—".to_string(), ms),
+            fuel: or_dash(fuel(s.fuel.1)),
+            io: or_dash(s.io.1.to_string()),
+        }
+    };
+    Routes::Some(routes.into_iter().map(row).collect())
 }
 
 /// Each grant with what it lets the app do and its level, riskiest first;
 /// the ones that set the app's risk are tinted. Since: when the risk file
 /// gave the grant its level, linked to that change in the log.
-pub(super) fn risk_table(shell: &Shell, a: &App) -> String {
-    let log = format!(
-        r#"<p class="partfoot">Levels come from the platform's risk file; an app can't change them. <a href="{}">Its log</a> · <a href="{}">Risk changes</a></p>"#,
-        escape(&of_app(&a.id)),
-        escape(&of_app_kinds(PLATFORM, Pick::One(Kind::RiskChanged))),
-    );
-    let Some(r) = &a.running else {
-        return format!(r#"<div class="part" id="risk"><h4>Risk</h4><p class="empty">Not running, so it can touch nothing.</p>{log}</div>"#);
-    };
+fn risk_part(shell: &Shell, a: &App) -> RiskPart {
+    let changes = of_app_kinds(PLATFORM, Pick::One(Kind::RiskChanged));
+    let Some(r) = &a.running else { return RiskPart { why: None, rows: vec![], changes } };
     let level = shell.risk.of_app(&r.manifest);
     let mut grants: Vec<(&str, Option<u8>)> = r.manifest.capabilities.grant.iter().map(|g| (g.as_str(), shell.risk.of(g))).collect();
     // Unrated first, it makes the app's risk unknown; then riskiest first.
@@ -292,47 +382,27 @@ pub(super) fn risk_table(shell: &Shell, a: &App) -> String {
         }
         (None, None) => "unrated".to_string(),
     };
-    let changes = risk_changes(shell);
-    let rows: String = grants
+    let since = risk_changes(shell);
+    let kits = shell.kits.now();
+    let rows = grants
         .iter()
-        .map(|(g, l)| {
-            let since = changes.get(*g).map_or_else(
-                || r#"<span class="none">—</span>"#.to_string(),
-                |e| {
-                    format!(
-                        r#"<a class="when" href="{}" title="{} in the log">{}</a>"#,
-                        escape(&from_event(e.id, Some(PLATFORM))),
-                        local(e.at, FULL),
-                        clock(e.at)
-                    )
-                },
-            );
-            format!(
-                r#"<tr{}><td><code>{}</code></td><td>{}</td><td>{}</td><td>{since}</td></tr>"#,
-                if *l == level { r#" class="sets""# } else { "" },
-                escape(g),
-                grant_chip(*l),
-                escape(shell.kits.now().allows(g)),
-            )
+        .map(|(g, l)| GrantRow {
+            grant: g.to_string(),
+            chip: grant_chip(*l),
+            allows: kits.allows(g).to_string(),
+            sets: *l == level,
+            since: since.get(*g).map(|e| Since { href: from_event(e.id, Some(PLATFORM)), full: local(e.at, FULL), clock: clock(e.at) }),
         })
         .collect();
-    let table = if rows.is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#"<div class="scroll"><table class="grants" aria-labelledby="risk-h"><thead><tr><th scope="col">Grant</th><th scope="col">Risk</th><th scope="col">Lets the app</th><th scope="col">Since</th></tr></thead><tbody>{rows}</tbody></table></div>"#
-        )
-    };
-    format!(r#"<div class="part" id="risk"><h4 id="risk-h">Risk <small>· {why}</small></h4>{table}{log}</div>"#, why = escape(&why))
+    RiskPart { why: Some(why), rows, changes }
 }
 
 /// The live version first and marked, then the others newest first: when
 /// each was deployed, how long it took to go live, why one failed or was
-/// refused, and "Make live".
-pub(super) fn versions_table(shell: &Shell, a: &App, all: bool) -> String {
+/// refused, and "Make live"; none when it was loaded from a folder.
+fn versions(shell: &Shell, a: &App, all: bool) -> Option<Versions> {
     if a.versions.is_empty() {
-        return r#"<div class="part" id="versions"><h4>Versions</h4><p class="empty">None to go back to: loaded from a folder when the shell started. Deployed with <code>appos deploy</code>, every version is kept.</p></div>"#
-            .into();
+        return None;
     }
     let every;
     let versions = if all {
@@ -347,96 +417,57 @@ pub(super) fn versions_table(shell: &Shell, a: &App, all: bool) -> String {
         VersionStatus::Waiting => 1,
         _ => 2,
     };
-    let mut rows: Vec<&Version> = versions.iter().collect();
-    rows.sort_by_key(rank);
+    let mut shown: Vec<&Version> = versions.iter().collect();
+    shown.sort_by_key(rank);
     if !all {
-        rows.truncate(SHOWN);
+        shown.truncate(SHOWN);
     }
     let live = a.running.as_ref().map(|r| r.label.as_str());
-    let html: String = rows
+    let rows = shown
         .iter()
-        .map(|v| {
+        .map(|v| VersionRow {
+            label: v.label.clone(),
+            badge: badge(Tone::of_version(v.status), &capitalize(v.status.as_str()), false),
+            full: local(v.deployed_at, FULL),
+            clock: clock(v.deployed_at),
+            // A refused or waiting version never went live.
+            took: if matches!(v.status, VersionStatus::Refused | VersionStatus::Waiting) {
+                "—".to_string()
+            } else {
+                duration(v.took_ms.max(0) as u64 * 1000)
+            },
+            live: v.status == VersionStatus::Live,
             // Making a waiting version live is what ends a pause: the one
             // thing to do here then.
-            let action = if matches!(v.status, VersionStatus::Retired | VersionStatus::Failed | VersionStatus::Waiting) && live != Some(v.label.as_str()) {
-                let primary = if v.status == VersionStatus::Waiting { r#" class="primary""# } else { "" };
-                act(a, "rollback", &[("label", &v.label)], &format!("<button{primary}>Make live</button>"))
-            } else {
-                String::new()
-            };
-            // A refused or waiting version never went live.
-            let took =
-                if matches!(v.status, VersionStatus::Refused | VersionStatus::Waiting) { "—".to_string() } else { duration(v.took_ms.max(0) as u64 * 1000) };
-            // Why it failed or was refused, under it at the table's width.
-            let reason = v
-                .reason
-                .as_deref()
-                .map(|r| {
-                    format!(r#"<tr class="reason"><td></td><td colspan="4" title="{}"><div>{}</div></td></tr>"#, escape(r), escape(&capitalize(first_line(r))))
-                })
-                .unwrap_or_default();
-            let class = match (v.status == VersionStatus::Live, v.reason.is_some()) {
-                (true, _) => r#" class="live""#,
-                (false, true) => r#" class="has-reason""#,
-                _ => "",
-            };
-            format!(
-                r#"<tr{class}><td><code>{}</code></td><td>{}</td><td title="{}">{}</td><td class="num">{took}</td><td class="act">{action}</td></tr>{reason}"#,
-                escape(&v.label),
-                badge(Tone::of_version(v.status), &capitalize(v.status.as_str()), false),
-                local(v.deployed_at, FULL),
-                clock(v.deployed_at),
-            )
+            make_live: (matches!(v.status, VersionStatus::Retired | VersionStatus::Failed | VersionStatus::Waiting) && live != Some(v.label.as_str()))
+                .then_some(v.status == VersionStatus::Waiting),
+            reason: v.reason.clone(),
+            line: v.reason.as_deref().map(|r| capitalize(first_line(r))).unwrap_or_default(),
         })
         .collect();
     let more = if all && versions.len() > SHOWN {
-        format!(r#"<a class="more" href="/admin/apps/{}#versions">The newest {SHOWN} only</a>"#, escape(&a.id))
+        More::Newest
     } else if versions.len() > SHOWN {
-        let n = if versions.len() < VERSIONS as usize { format!("all {}", versions.len()) } else { "all".to_string() };
-        format!(r#"<a class="more" href="/admin/apps/{}?versions=all#versions">Show {n} versions</a>"#, escape(&a.id))
+        More::All(if versions.len() < VERSIONS as usize { format!("all {}", versions.len()) } else { "all".to_string() })
     } else {
-        String::new()
+        More::Nothing
     };
-    let hold = match &a.paused {
-        Some(e) => format!(
-            r#"<div class="warn tone-critical banner">{}<p><b>Deploys wait.</b> {} rolled itself back at {}{}. New deploys are stored but not live until someone makes a version live here.</p></div>"#,
-            tone_icon(Tone::Critical, 16),
-            escape(&a.name),
-            clock(e.at),
-            e.reason.as_deref().map(|r| format!(" ({})", escape(r))).unwrap_or_default(),
-        ),
-        None => String::new(),
-    };
-    format!(
-        r#"<div class="part" id="versions"><h4>Versions</h4>{hold}<div class="scroll"><table class="versions"><thead><tr><th scope="col">Version</th><th scope="col">Status</th><th scope="col">Deployed</th><th scope="col" class="num">Live in</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead><tbody>{html}</tbody></table></div>{more}</div>"#
-    )
+    Some(Versions { hold: a.paused.as_ref().map(|e| (clock(e.at), e.reason.clone())), rows, more })
 }
 
-pub(super) fn last_failures(a: &App) -> String {
-    let rows: String = a
-        .reqs
+/// Its last five failed requests.
+fn last_failures(a: &App) -> Vec<Failure> {
+    a.reqs
         .iter()
         .filter(|r| r.outcome.failed())
         .take(5)
-        .map(|r| {
-            // The error, under its row like a version's reason.
-            let error =
-                r.error.as_deref().map(|e| format!(r#"<tr class="reason"><td></td><td colspan="3"><pre>{}</pre></td></tr>"#, escape(e))).unwrap_or_default();
-            format!(
-                r#"<tr{}><td title="{}">{}</td><td><code>{}</code></td><td>{}</td><td><code>{}</code></td></tr>{error}"#,
-                if error.is_empty() { "" } else { r#" class="has-reason""# },
-                local(r.at, FULL),
-                local(r.at, "%H:%M:%S"),
-                escape(&r.route),
-                badge(Tone::of_outcome(r.outcome), kind_label(r.outcome), false),
-                escape(&r.label),
-            )
+        .map(|r| Failure {
+            full: local(r.at, FULL),
+            time: local(r.at, "%H:%M:%S"),
+            route: r.route.to_string(),
+            badge: badge(Tone::of_outcome(r.outcome), kind_label(r.outcome), false),
+            label: r.label.to_string(),
+            error: r.error.clone(),
         })
-        .collect();
-    if rows.is_empty() {
-        return String::new();
-    }
-    format!(
-        r#"<div class="part"><h4>Last failures</h4><div class="scroll"><table class="failures"><thead><tr><th scope="col">Time</th><th scope="col">Route</th><th scope="col">What happened</th><th scope="col">Version</th></tr></thead><tbody>{rows}</tbody></table></div></div>"#
-    )
+        .collect()
 }

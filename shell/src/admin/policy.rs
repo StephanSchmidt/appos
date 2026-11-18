@@ -8,12 +8,11 @@ use crate::access::{ADMIN_PREFIX, grants_of};
 use crate::auth::{ANYONE, SIGNED_IN};
 use crate::platform::now_ms;
 use crate::shell::Shell;
-use crate::web::escape;
 
 use super::format::{clock, plural};
 use super::model::{App, Tone, load, name_of, state};
 use super::style::{grant_label, tone_icon};
-use super::{Ask, Viewer, page, read};
+use super::{Ask, Viewer, html, page, read};
 use crate::kit::Reply;
 
 /// `GET /admin/policy`.
@@ -24,52 +23,75 @@ pub(super) async fn policy_page(ask: Ask) -> Reply {
 
 fn policy_html(shell: &Shell, viewer: &Viewer) -> Reply {
     let (apps, _) = load(shell, now_ms());
-    let head = r#"<div class="cardhead"><h2 id="policy-h">Policy <small>· who may use the apps' grants, and the admin screen</small></h2></div>"#;
-    let body = match &shell.policy {
-        Some(policies) => {
-            let policy = policies.current();
-            let (rules, members) = policy.lines();
-            let file = escape(&policies.file_name());
-            let refused = match policies.refused() {
-                Some((at, why)) => format!(
-                    r#"<div class="warn tone-warning banner">{}<p><b>{file} not taken</b> at {}: {}. The rules below stay in force until the file is fixed.</p></div>"#,
-                    tone_icon(Tone::Warning, 16),
-                    clock(at),
-                    escape(&why)
-                ),
-                None => String::new(),
-            };
-            let list = if rules.is_empty() && members.is_empty() {
-                format!(r#"<p class="empty">{file} has no rules: nobody may use a grant, and nobody may use the admin screen.</p>"#)
-            } else {
-                table(shell, &apps, rules, members)
-            };
-            let foot = match policies.path() {
-                Some(path) => format!(
-                    "{} from <code>{}</code>, read at {}. The shell checks the file every 2 seconds; what no line allows is denied.",
-                    plural(policy.rules(), "line"),
-                    escape(&path.display().to_string()),
-                    clock(policies.since()),
-                ),
-                None => format!(
-                    "Built in: the shell started without <code>--auth</code> and <code>--policy</code>, so the link it printed signs in as <b>{}</b>, who may do everything, and nobody else may do anything. Start it with <code>--auth auth.toml --policy policy.csv</code> to say who may do what.",
-                    crate::auth::token::EMAIL
-                ),
-            };
-            format!(r#"<section class="card logcard policy" aria-labelledby="policy-h">{head}{refused}{list}<p class="foot">{foot}</p></section>"#)
+    let file = shell.policy.as_ref().map(|policies| {
+        let policy = policies.current();
+        let (rules, members) = policy.lines();
+        File {
+            name: policies.file_name(),
+            refused: policies.refused().map(|(at, why)| (clock(at), why)),
+            rows: rows(shell, &apps, rules, members),
+            path: policies.path().map(|p| p.display().to_string()),
+            lines: plural(policy.rules(), "line"),
+            since: clock(policies.since()),
         }
-        None => format!(
-            r#"<section class="card logcard policy" aria-labelledby="policy-h">{head}<p class="empty">The shell runs with <code>--no-auth</code>: no sign-in and no policy, so anyone may use every grant an app holds, and this screen. Start it with <code>--auth auth.toml --policy policy.csv</code> to say who may do what.</p></section>"#
-        ),
-    };
+    });
+    let body = html(&Policy { file, warn: tone_icon(Tone::Warning, 16), email: crate::auth::token::EMAIL });
     Reply::document(page(shell, viewer, state(&apps), "/admin/policy", &format!("Policy · {} admin", shell.name), &body, None))
+}
+
+/// The page's card (templates/admin/policy.html); no file with `--no-auth`.
+#[derive(askama::Template)]
+#[template(path = "admin/policy.html")]
+struct Policy {
+    file: Option<File>,
+    warn: String,
+    /// Who the built-in policy lets in.
+    email: &'static str,
+}
+
+/// The policy in force: the file's name, why a newer one wasn't taken,
+/// the rows, where it is (none when built in), its lines and when read.
+struct File {
+    name: String,
+    refused: Option<(String, String)>,
+    rows: Vec<Row>,
+    path: Option<String>,
+    lines: String,
+    since: String,
+}
+
+/// One subject: its name, what it is, what it may.
+struct Row {
+    name: String,
+    what: String,
+    may: Vec<Rule>,
+}
+
+/// One rule as a sentence: the grants (their labels; none when no kit
+/// offers them), the pattern as written when it says more, and where.
+struct Rule {
+    grants: Option<String>,
+    what: String,
+    pattern: bool,
+    place: Place,
+}
+
+enum Place {
+    /// admin-read, admin-write: the platform's.
+    Platform,
+    Every,
+    Group(String),
+    /// A typo shows: no app of that id is here.
+    Unknown(String),
+    /// Its path segment and its name.
+    App(String, String),
 }
 
 /// What the file says about one subject.
 #[derive(Default)]
 struct About {
-    /// Its rules, as sentences.
-    may: Vec<String>,
+    /// Its rules.
+    may: Vec<Rule>,
     /// For a group: who the file puts in it.
     members: Vec<String>,
     /// The groups the file puts it in.
@@ -86,7 +108,7 @@ fn rank(who: &str) -> (u8, String) {
     }
 }
 
-fn table(shell: &Shell, apps: &[App], rules: &[Vec<String>], members: &[Vec<String>]) -> String {
+fn rows(shell: &Shell, apps: &[App], rules: &[Vec<String>], members: &[Vec<String>]) -> Vec<Row> {
     let mut about: BTreeMap<(u8, String), (String, About)> = BTreeMap::new();
     fn of<'a>(about: &'a mut BTreeMap<(u8, String), (String, About)>, who: &str) -> &'a mut About {
         &mut about.entry(rank(who)).or_insert_with(|| (who.to_string(), About::default())).1
@@ -98,21 +120,11 @@ fn table(shell: &Shell, apps: &[App], rules: &[Vec<String>], members: &[Vec<Stri
         of(&mut about, &m[1]).members.push(m[0].clone());
         of(&mut about, &m[0]).groups.push(m[1].trim_start_matches("group:").to_string());
     }
-    let rows: String = about
-        .values()
-        .map(|(who, a)| {
-            let may = match a.may.as_slice() {
-                [] => r#"<span class="quiet">Nothing of its own</span>"#.to_string(),
-                may => format!("<ul>{}</ul>", may.iter().map(|m| format!("<li>{m}</li>")).collect::<String>()),
-            };
-            format!(r#"<tr><th scope="row">{}</th><td class="may">{may}</td></tr>"#, subject(who, a))
-        })
-        .collect();
-    format!(r#"<div class="scroll"><table><thead><tr><th scope="col">Who</th><th scope="col">May</th></tr></thead><tbody>{rows}</tbody></table></div>"#)
+    about.into_values().map(|(who, a)| subject(&who, a)).collect()
 }
 
 /// Who, in words, with the groups the file links it to.
-fn subject(who: &str, a: &About) -> String {
+fn subject(who: &str, a: About) -> Row {
     let (name, what) = match who {
         ANYONE => ("Anyone".to_string(), "Signed in or not".to_string()),
         SIGNED_IN => ("Everyone signed in".to_string(), String::new()),
@@ -127,32 +139,27 @@ fn subject(who: &str, a: &About) -> String {
         (true, false) => format!("In {}", a.groups.join(", ")),
         (false, false) => format!("{what}; in {}", a.groups.join(", ")),
     };
-    let what = if what.is_empty() { String::new() } else { format!(r#"<span class="id">{}</span>"#, escape(&what)) };
-    format!(r#"<span class="names"><span>{}</span>{what}</span>"#, escape(&name))
+    Row { name, what, may: a.may }
 }
 
-/// One rule as a sentence: the grants (with their risk) and where.
-fn may(shell: &Shell, apps: &[App], app: &str, what: &str) -> String {
+/// One rule: the grants (with their risk) and where.
+fn may(shell: &Shell, apps: &[App], app: &str, what: &str) -> Rule {
     let names = shell.kits.now().names();
     let offered = grants_of(what, &names);
-    // A Wasm kit's grant, while the kit isn't deployed, or a typo.
-    let grants: String = match offered.is_empty() {
-        true => format!(r#"<b>{}</b> <span class="quiet">(no kit offers it now)</span>"#, escape(what)),
-        false => offered.iter().map(|g| grant_label(g, shell.risk.of(g))).collect(),
-    };
-    let pattern = if offered.is_empty() || offered == [what] { String::new() } else { format!(r#" <span class="quiet">({})</span>"#, escape(what)) };
     let place = match app {
-        // admin-read, admin-write: the platform's.
-        "*" if !offered.is_empty() && offered.iter().all(|g| g.starts_with(ADMIN_PREFIX)) => "the admin screen and the platform API".to_string(),
-        "*" => "every app".to_string(),
+        "*" if !offered.is_empty() && offered.iter().all(|g| g.starts_with(ADMIN_PREFIX)) => Place::Platform,
+        "*" => Place::Every,
         _ => match app.strip_prefix("apps:") {
-            Some(group) => format!("the apps of group <b>{}</b>", escape(group)),
-            // A typo shows: the app isn't here.
-            None if !apps.iter().any(|a| a.id == app) => format!(r#"<b>{}</b> <span class="quiet">(no app of that id here)</span>"#, escape(app)),
-            None => {
-                format!(r#"<a href="/admin/apps/{}">{}</a>"#, form_urlencoded::byte_serialize(app.as_bytes()).collect::<String>(), escape(name_of(apps, app)))
-            }
+            Some(group) => Place::Group(group.to_string()),
+            None if !apps.iter().any(|a| a.id == app) => Place::Unknown(app.to_string()),
+            None => Place::App(form_urlencoded::byte_serialize(app.as_bytes()).collect(), name_of(apps, app).to_string()),
         },
     };
-    format!("{grants}{pattern} in {place}")
+    Rule {
+        // A Wasm kit's grant, while the kit isn't deployed, or a typo.
+        grants: (!offered.is_empty()).then(|| offered.iter().map(|g| grant_label(g, shell.risk.of(g))).collect()),
+        what: what.to_string(),
+        pattern: !offered.is_empty() && offered != [what],
+        place,
+    }
 }

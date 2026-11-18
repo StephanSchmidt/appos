@@ -1,0 +1,25 @@
+<section class="card logcard policy" aria-labelledby="messages-h"><div class="cardhead"><h2 id="messages-h">Messages <small>· commands on their way from apps to kits</small></h2></div>
+{%- match list -%}
+{%- when Err(why) %}<p class="empty">The outbox could not be read: {{ why }}</p>
+{%- when Ok(groups) -%}
+{%- if groups.is_empty() %}<p class="empty">No command waits: each one reached its kit.</p>
+{%- else %}<div class="scroll"><table><thead><tr><th scope="col">Command</th><th scope="col">State</th></tr></thead><tbody>
+{%- for g in groups -%}
+<tr><th scope="rowgroup" colspan="2"><span class="names"><span>{{ g.interface }}</span><span class="id">{{ g.count }}{% if g.failed > 0 %}, {{ g.failed }} failed{% endif %}</span></span></th></tr>
+{%- for r in g.rows -%}
+<tr><td><span class="names"><span><code>{{ r.function }}</code></span><span class="id">from <a href="/admin/apps/{{ r.app_path }}">{{ r.app_name }}</a>{% if let Some(email) = r.user %} for {{ email }}{% endif %}, sent {{ r.sent }}</span></span></td><td class="may">
+{%- match r.state -%}
+{%- when State::Waits(id, attempts) -%}
+<form{% if !changes %} inert{% endif %} method="post" action="/admin/messages/{{ id }}/retry"><span class="names"><span>Failed {{ attempts }} times, waits for you <button type="submit">Retry</button></span>{% if let Some(e) = r.error %}<span class="id">{{ e }}</span>{% endif %}</span></form>
+{%- when State::OnItsWay -%}
+<span class="quiet">On its way</span>
+{%- when State::Again(times, secs) -%}
+<span class="names"><span>Failed {{ times }}, next try in {{ secs }} s</span>{% if let Some(e) = r.error %}<span class="id">{{ e }}</span>{% endif %}</span>
+{%- endmatch -%}
+</td></tr>
+{%- endfor -%}
+{%- endfor -%}
+</tbody></table></div>
+{%- endif -%}
+{%- endmatch -%}
+<p class="foot">An app's command waits here from the app's commit until its kit ran it. A failed one is tried again after 1 s, 2 s, 4 s and so on up to 5 minutes; after {{ attempts }} tries it waits for you.</p></section>

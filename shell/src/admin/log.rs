@@ -10,12 +10,11 @@ use crate::log_filter::{Filters, PLATFORM, Pick};
 use crate::platform::{Actor, Event, Kind, Severity, now_ms};
 use crate::shell::Shell;
 use crate::usage::{self, KEEP};
-use crate::web::escape;
 
 use super::format::{FULL, capitalize, duration, first_line, local, plural, span, thousands};
 use super::model::{App, Tone, by, icon, kind_label, load, message, state, word};
 use super::style::{badge, icon_html, path_icon, risk_chip};
-use super::{Ask, Viewer, page, plain, read};
+use super::{Ask, Viewer, html, page, plain, read};
 
 /// Events on a page; older ones are a link away.
 const PAGE: u32 = 100;
@@ -41,28 +40,112 @@ fn log_html(shell: &Shell, viewer: &Viewer, filters: &Filters, before: Option<i6
     events.truncate(PAGE as usize);
     let filtered = *filters != Filters::default();
     let list = match (events.is_empty(), filtered, before.is_some()) {
-        (false, ..) => table(shell, &apps, &events, now),
-        (true, false, false) => {
-            r#"<p class="empty">Nothing has happened yet. Every deploy, refusal, rollback, limit hit and switch shows up here, and stays.</p>"#.to_string()
-        }
-        (true, false, true) => r#"<p class="empty">Nothing older.</p>"#.to_string(),
-        (true, true, older) => {
-            format!(r#"<p class="empty">No {}events match these filters. <a href="/admin/log">Clear the filters</a></p>"#, if older { "older " } else { "" })
-        }
+        (false, ..) => List::Days(days(shell, &apps, &events, now)),
+        (true, false, false) => List::Fresh,
+        (true, false, true) => List::NothingOlder,
+        (true, true, older) => List::NoMatch(if older { "older " } else { "" }),
     };
-    let form = if events.is_empty() && !filtered && before.is_none() { String::new() } else { form(filters, &apps) };
-    let mut pages = vec![];
-    if before.is_some() {
-        pages.push(format!(r#"<a class="button" href="{}">Newest</a>"#, escape(&href(filters, None))));
-    }
-    if let Some(id) = older {
-        pages.push(format!(r#"<a class="button" href="{}">Older</a>"#, escape(&href(filters, Some(id)))));
-    }
-    let pages = if pages.is_empty() { String::new() } else { format!(r#"<div class="pages">{}</div>"#, pages.concat()) };
-    let body = format!(
-        r#"<section class="card logcard" aria-labelledby="log-h"><div class="cardhead"><h2 id="log-h">Log <small>· every deploy, refusal, rollback, limit hit and switch, newest first, kept for good</small></h2></div>{form}{list}{pages}</section>"#
-    );
+    let body = html(&Log {
+        form: (!events.is_empty() || filtered || before.is_some()).then(|| form(filters, &apps)),
+        list,
+        newest: before.map(|_| href(filters, None)),
+        older: older.map(|id| href(filters, Some(id))),
+    });
     Reply::document(page(shell, viewer, state(&apps), "/admin/log", &format!("Log · {} admin", shell.name), &body, None))
+}
+
+/// The page's card (templates/admin/log.html): the filters, the events by
+/// day, and links to the newest and older pages.
+#[derive(askama::Template)]
+#[template(path = "admin/log.html")]
+struct Log {
+    form: Option<Form>,
+    list: List,
+    newest: Option<String>,
+    older: Option<String>,
+}
+
+enum List {
+    Days(Vec<Day>),
+    /// Nothing has happened yet.
+    Fresh,
+    NothingOlder,
+    /// No event matches the filters; "older " on a later page.
+    NoMatch(&'static str),
+}
+
+struct Day {
+    name: String,
+    rows: Vec<Row>,
+}
+
+/// One event; it opens to the whole reason, the facts and the requests
+/// behind it.
+struct Row {
+    id: i64,
+    full: String,
+    time: String,
+    tone: &'static str,
+    icon: String,
+    word: String,
+    app: Who,
+    message: String,
+    reason: Option<String>,
+    label: String,
+    severity: String,
+    by: String,
+    /// The reason, when it is longer than its first line.
+    whole: Option<String>,
+    when: String,
+    risk: Option<String>,
+    recovery: Option<String>,
+    behind: Behind,
+}
+
+enum Who {
+    /// Its id, icon and name.
+    App(String, String, String),
+    Platform,
+    /// An app no longer here.
+    Unknown(String),
+}
+
+/// The failed requests behind a limit hit or an automatic rollback.
+enum Behind {
+    Nothing,
+    /// No longer kept: how many platform.db keeps.
+    Gone(String),
+    /// What they are, how many of them show when not all, and those.
+    Listed(String, Option<u32>, Vec<Req>),
+}
+
+struct Req {
+    time: String,
+    route: String,
+    took: String,
+    error: String,
+}
+
+/// The filters in a row above the table, a label over each.
+struct Form {
+    text: String,
+    selects: Vec<Select>,
+    dates: Vec<(&'static str, &'static str, String)>,
+    clear: bool,
+}
+
+/// A select's name, label and options, and a group of options after them.
+struct Select {
+    name: &'static str,
+    label: &'static str,
+    options: Vec<Opt>,
+    group: Option<(&'static str, Vec<Opt>)>,
+}
+
+struct Opt {
+    value: String,
+    label: String,
+    on: bool,
 }
 
 /// The log of one app.
@@ -91,55 +174,42 @@ fn href(f: &Filters, before: Option<i64>) -> String {
     f.at("/admin/log", before)
 }
 
-/// The filters in a row above the table, a label over each.
-fn form(f: &Filters, apps: &[App]) -> String {
-    let option =
-        |value: &str, label: &str, on: bool| format!(r#"<option value="{}"{}>{}</option>"#, escape(value), if on { " selected" } else { "" }, escape(label));
+fn form(f: &Filters, apps: &[App]) -> Form {
+    let option = |value: &str, label: &str, on: bool| Opt { value: value.to_string(), label: label.to_string(), on };
     let mut named: Vec<&App> = apps.iter().collect();
     named.sort_by_key(|a| a.name.to_lowercase());
-    let mut app = option("", "All apps", f.app.is_none());
-    for a in named {
-        app += &option(&a.id, &a.name, f.app.as_deref() == Some(&a.id));
-    }
+    let mut app = vec![option("", "All apps", f.app.is_none())];
+    app.extend(named.iter().map(|a| option(&a.id, &a.name, f.app.as_deref() == Some(&a.id))));
     if let Some(id) = f.app.as_deref().filter(|id| !id.is_empty() && !apps.iter().any(|a| a.id == *id)) {
-        app += &option(id, id, true);
+        app.push(option(id, id, true));
     }
-    app += &option(PLATFORM, "Platform", f.app.as_deref() == Some(""));
-    let mut kind = option("", "All events", f.pick.is_none());
-    kind += &option("failures", "Failures", f.pick == Some(Pick::Failures));
-    kind += &option("changes", "Changes", f.pick == Some(Pick::Changes));
-    kind += r#"<optgroup label="One kind">"#;
-    for k in Kind::ALL {
-        kind += &option(k.as_str(), kind_name(k), f.pick == Some(Pick::One(k)));
-    }
-    kind += "</optgroup>";
-    let mut severity = option("", "Any", f.severity.is_none());
+    app.push(option(PLATFORM, "Platform", f.app.as_deref() == Some("")));
+    let kind = vec![
+        option("", "All events", f.pick.is_none()),
+        option("failures", "Failures", f.pick == Some(Pick::Failures)),
+        option("changes", "Changes", f.pick == Some(Pick::Changes)),
+    ];
+    let kinds = Kind::ALL.into_iter().map(|k| option(k.as_str(), kind_name(k), f.pick == Some(Pick::One(k)))).collect();
+    let mut severity = vec![option("", "Any", f.severity.is_none())];
     for s in &Severity::ALL[1..] {
         let label = if *s == Severity::Critical { "Critical".to_string() } else { format!("{} or worse", capitalize(s.as_str())) };
-        severity += &option(s.as_str(), &label, f.severity == Some(*s));
+        severity.push(option(s.as_str(), &label, f.severity == Some(*s)));
     }
-    let mut by = option("", "Anyone", f.by.is_none());
-    for a in Actor::ALL {
-        by += &option(a.as_str(), actor(a), f.by == Some(a));
+    let mut by = vec![option("", "Anyone", f.by.is_none())];
+    by.extend(Actor::ALL.into_iter().map(|a| option(a.as_str(), actor(a), f.by == Some(a))));
+    let select = |name, label, options| Select { name, label, options, group: None };
+    let date = |d: Option<NaiveDate>| d.map(|d| d.to_string()).unwrap_or_default();
+    Form {
+        text: f.text.clone().unwrap_or_default(),
+        selects: vec![
+            select("app", "App", app),
+            Select { name: "kind", label: "Event", options: kind, group: Some(("One kind", kinds)) },
+            select("severity", "Severity", severity),
+            select("by", "By", by),
+        ],
+        dates: vec![("from", "From", date(f.from)), ("to", "To", date(f.to))],
+        clear: *f != Filters::default(),
     }
-    let select = |name: &str, label: &str, options: &str| {
-        format!(r#"<label class="field"><span>{label}</span><span class="select"><select name="{name}">{options}</select></span></label>"#)
-    };
-    let date = |name: &str, label: &str, d: Option<NaiveDate>| {
-        let value = d.map(|d| d.to_string()).unwrap_or_default();
-        format!(r#"<label class="field"><span>{label}</span><input type="date" name="{name}" value="{value}"></label>"#)
-    };
-    let clear = if *f == Filters::default() { String::new() } else { r#"<a href="/admin/log">Clear</a>"#.to_string() };
-    format!(
-        r#"<form class="filters" method="get" action="/admin/log" role="search" aria-label="Filter the log"><label class="field grow"><span>Search</span><input type="search" name="q" value="{text}" placeholder="Text or version"></label>{app}{kind}{severity}{by}{from}{to}<div class="go"><button class="primary">Filter</button>{clear}</div></form>"#,
-        text = escape(f.text.as_deref().unwrap_or("")),
-        app = select("app", "App", &app),
-        kind = select("kind", "Event", &kind),
-        severity = select("severity", "Severity", &severity),
-        by = select("by", "By", &by),
-        from = date("from", "From", f.from),
-        to = date("to", "To", f.to),
-    )
 }
 
 /// A kind as the Event filter lists it.
@@ -165,27 +235,19 @@ fn kind_name(k: Kind) -> &'static str {
     }
 }
 
-/// The events by day, a row each.
-fn table(shell: &Shell, apps: &[App], events: &[Event], now: i64) -> String {
-    let mut days = String::new();
-    let mut day = String::new();
+/// The events by day.
+fn days(shell: &Shell, apps: &[App], events: &[Event], now: i64) -> Vec<Day> {
+    let mut days: Vec<(String, Day)> = vec![];
     for e in events {
         let d = local(e.at, "%F");
-        if d != day {
-            if !day.is_empty() {
-                days += "</tbody>";
-            }
-            days += &format!(r#"<tbody><tr class="day"><th colspan="7" scope="rowgroup">{}</th></tr>"#, day_name(e.at, now));
-            day = d;
+        if days.last().is_none_or(|(day, _)| *day != d) {
+            days.push((d, Day { name: day_name(e.at, now), rows: vec![] }));
         }
-        days += &row(shell, apps, e);
+        if let Some((_, day)) = days.last_mut() {
+            day.rows.push(row(shell, apps, e));
+        }
     }
-    if !day.is_empty() {
-        days += "</tbody>";
-    }
-    format!(
-        r#"<div class="scroll"><table class="log"><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">App</th><th scope="col">What happened</th><th scope="col">Version</th><th scope="col">Severity</th><th scope="col">By</th></tr></thead>{days}</table></div>"#
-    )
+    days.into_iter().map(|(_, day)| day).collect()
 }
 
 /// "Today", "Yesterday", "Wednesday, November 11", with the year when it
@@ -231,28 +293,32 @@ fn severity(s: Severity) -> String {
     }
 }
 
-fn row(shell: &Shell, apps: &[App], e: &Event) -> String {
+fn row(shell: &Shell, apps: &[App], e: &Event) -> Row {
     let app = match apps.iter().find(|a| a.id == e.app_id) {
-        Some(a) => format!(r#"<a class="who-app" href="/admin/apps/{}#detail">{}<span>{}</span></a>"#, escape(&a.id), icon_html(a, 20), escape(&a.name)),
-        None if e.app_id.is_empty() => r#"<span class="quiet">Platform</span>"#.to_string(),
-        None => escape(&e.app_id),
+        Some(a) => Who::App(a.id.clone(), icon_html(a, 20), a.name.clone()),
+        None if e.app_id.is_empty() => Who::Platform,
+        None => Who::Unknown(e.app_id.clone()),
     };
     let (message, reason) = said(e);
-    let reason = reason.map(|r| format!(r#"<span class="because">{}</span>"#, escape(r))).unwrap_or_default();
-    let label = if e.label.is_empty() { r#"<span class="quiet">—</span>"#.to_string() } else { format!("<code>{}</code>", escape(&e.label)) };
-    format!(
-        r#"<tr id="event-{id}"><td class="time" title="{full}">{time}</td><td><span class="event tone-{tone}">{icon}{word}</span></td><td>{app}</td><td class="what"><details><summary><span class="msg">{message}</span>{reason}</summary>{more}</details></td><td>{label}</td><td>{severity}</td><td>{by}</td></tr>"#,
-        id = e.id,
-        full = local(e.at, FULL),
-        time = local(e.at, "%H:%M:%S"),
-        tone = Tone::of_event(e.kind).name(),
-        word = word(e),
-        icon = path_icon(icon(e), 16),
-        message = escape(&message),
-        more = more(shell, e),
-        severity = severity(e.severity),
-        by = escape(&who(e)),
-    )
+    Row {
+        id: e.id,
+        full: local(e.at, FULL),
+        time: local(e.at, "%H:%M:%S"),
+        tone: Tone::of_event(e.kind).name(),
+        icon: path_icon(icon(e), 16),
+        word: word(e).to_string(),
+        app,
+        message,
+        reason: reason.map(Into::into),
+        label: e.label.clone(),
+        severity: severity(e.severity),
+        by: who(e),
+        whole: e.reason.clone().filter(|r| r.trim_end().contains('\n')),
+        when: local(e.at, "%A, %B %-d, %Y, %H:%M:%S (UTC%:z)"),
+        risk: (!e.app_id.is_empty()).then(|| risk_chip(e.risk)),
+        recovery: e.recovery_ms.map(span),
+        behind: behind(shell, e),
+    }
 }
 
 /// What happened in a line, and why in another: the message without the
@@ -269,32 +335,12 @@ fn said(e: &Event) -> (String, Option<&str>) {
     (rest.map_or(message.clone(), capitalize), reason)
 }
 
-/// What a row opens to: the reason when it is longer than its first line,
-/// the facts, and for a limit hit the requests behind it.
-fn more(shell: &Shell, e: &Event) -> String {
-    let mut out = String::new();
-    if let Some(r) = e.reason.as_deref().filter(|r| r.trim_end().contains('\n')) {
-        out += &format!("<pre>{}</pre>", escape(r));
-    }
-    let mut facts = vec![("When", local(e.at, "%A, %B %-d, %Y, %H:%M:%S (UTC%:z)"))];
-    if !e.app_id.is_empty() {
-        facts.push(("App's risk then", risk_chip(e.risk)));
-    }
-    if let Some(ms) = e.recovery_ms {
-        facts.push(("First failure to rolled back", span(ms)));
-    }
-    let facts: String = facts.iter().map(|(k, v)| format!("<dt>{k}</dt><dd>{v}</dd>")).collect();
-    out += &format!(r#"<dl class="facts">{facts}</dl>"#);
-    out += &behind(shell, e);
-    format!(r#"<div class="whole">{out}</div>"#)
-}
-
 /// The failed requests behind a limit hit (the log gets one event for all
 /// in its 10 minutes) or an automatic rollback (the failures it counted).
-fn behind(shell: &Shell, e: &Event) -> String {
-    let Ok(Some((reqs, n))) = usage::behind(&shell.platform, e, BEHIND) else { return String::new() };
+fn behind(shell: &Shell, e: &Event) -> Behind {
+    let Ok(Some((reqs, n))) = usage::behind(&shell.platform, e, BEHIND) else { return Behind::Nothing };
     if n == 0 {
-        return format!(r#"<p class="quiet">The requests behind it are no longer kept: platform.db keeps the newest {} per app.</p>"#, thousands(KEEP as u64));
+        return Behind::Gone(thousands(KEEP as u64));
     }
     let what = match e.outcome {
         Some(outcome) if e.kind == Kind::LimitHit => {
@@ -302,20 +348,16 @@ fn behind(shell: &Shell, e: &Event) -> String {
         }
         _ => format!("{} up to the rollback.", plural(n as usize, "failed request")),
     };
-    let first = if n > BEHIND { format!(" The first {BEHIND}:") } else { String::new() };
-    let items: String = reqs
+    let reqs = reqs
         .iter()
-        .map(|r| {
-            format!(
-                r#"<li><span>{}</span><code>{}</code><span>{}</span><span class="err">{}</span></li>"#,
-                local(r.at, "%H:%M:%S"),
-                escape(&r.route),
-                duration(r.wall_us),
-                escape(first_line(r.error.as_deref().unwrap_or("")))
-            )
+        .map(|r| Req {
+            time: local(r.at, "%H:%M:%S"),
+            route: r.route.to_string(),
+            took: duration(r.wall_us),
+            error: first_line(r.error.as_deref().unwrap_or("")).to_string(),
         })
         .collect();
-    format!(r#"<p>{what}{first}</p><ul class="behind">{items}</ul>"#)
+    Behind::Listed(what, (n > BEHIND).then_some(BEHIND), reqs)
 }
 
 #[cfg(test)]

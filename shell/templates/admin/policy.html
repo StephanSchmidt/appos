@@ -1,0 +1,32 @@
+<section class="card logcard policy" aria-labelledby="policy-h"><div class="cardhead"><h2 id="policy-h">Policy <small>· who may use the apps' grants, and the admin screen</small></h2></div>
+{%- match file -%}
+{%- when None %}<p class="empty">The shell runs with <code>--no-auth</code>: no sign-in and no policy, so anyone may use every grant an app holds, and this screen. Start it with <code>--auth auth.toml --policy policy.csv</code> to say who may do what.</p>
+{%- when Some(f) -%}
+{%- if let Some((at, why)) = f.refused %}<div class="warn tone-warning banner">{{ warn|safe }}<p><b>{{ f.name }} not taken</b> at {{ at }}: {{ why }}. The rules below stay in force until the file is fixed.</p></div>{% endif -%}
+{%- if f.rows.is_empty() %}<p class="empty">{{ f.name }} has no rules: nobody may use a grant, and nobody may use the admin screen.</p>
+{%- else %}<div class="scroll"><table><thead><tr><th scope="col">Who</th><th scope="col">May</th></tr></thead><tbody>
+{%- for r in f.rows -%}
+<tr><th scope="row"><span class="names"><span>{{ r.name }}</span>{% if !r.what.is_empty() %}<span class="id">{{ r.what }}</span>{% endif %}</span></th><td class="may">
+{%- if r.may.is_empty() %}<span class="quiet">Nothing of its own</span>{% else %}<ul>
+{%- for m in r.may -%}
+<li>{% match m.grants %}{% when Some(labels) %}{{ labels|safe }}{% when None %}<b>{{ m.what }}</b> <span class="quiet">(no kit offers it now)</span>{% endmatch %}{% if m.pattern %} <span class="quiet">({{ m.what }})</span>{% endif %} in {% match m.place -%}
+{%- when Place::Platform %}the admin screen and the platform API
+{%- when Place::Every %}every app
+{%- when Place::Group(group) %}the apps of group <b>{{ group }}</b>
+{%- when Place::Unknown(app) %}<b>{{ app }}</b> <span class="quiet">(no app of that id here)</span>
+{%- when Place::App(path, name) %}<a href="/admin/apps/{{ path }}">{{ name }}</a>
+{%- endmatch %}</li>
+{%- endfor -%}
+</ul>{% endif -%}
+</td></tr>
+{%- endfor -%}
+</tbody></table></div>
+{%- endif -%}
+<p class="foot">
+{%- match f.path -%}
+{%- when Some(path) %}{{ f.lines }} from <code>{{ path }}</code>, read at {{ f.since }}. The shell checks the file every 2 seconds; what no line allows is denied.
+{%- when None %}Built in: the shell started without <code>--auth</code> and <code>--policy</code>, so the link it printed signs in as <b>{{ email }}</b>, who may do everything, and nobody else may do anything. Start it with <code>--auth auth.toml --policy policy.csv</code> to say who may do what.
+{%- endmatch -%}
+</p>
+{%- endmatch -%}
+</section>

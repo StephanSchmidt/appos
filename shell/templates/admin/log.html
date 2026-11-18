@@ -1,0 +1,47 @@
+<section class="card logcard" aria-labelledby="log-h"><div class="cardhead"><h2 id="log-h">Log <small>· every deploy, refusal, rollback, limit hit and switch, newest first, kept for good</small></h2></div>
+{%- if let Some(f) = form -%}
+<form class="filters" method="get" action="/admin/log" role="search" aria-label="Filter the log"><label class="field grow"><span>Search</span><input type="search" name="q" value="{{ f.text }}" placeholder="Text or version"></label>
+{%- for s in f.selects -%}
+<label class="field"><span>{{ s.label }}</span><span class="select"><select name="{{ s.name }}">
+{%- for o in s.options %}<option value="{{ o.value }}"{% if o.on %} selected{% endif %}>{{ o.label }}</option>{% endfor -%}
+{%- if let Some((label, group)) = s.group %}<optgroup label="{{ label }}">{% for o in group %}<option value="{{ o.value }}"{% if o.on %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</optgroup>{% endif -%}
+</select></span></label>
+{%- endfor -%}
+{%- for (name, label, value) in f.dates %}<label class="field"><span>{{ label }}</span><input type="date" name="{{ name }}" value="{{ value }}"></label>{% endfor -%}
+<div class="go"><button class="primary">Filter</button>{% if f.clear %}<a href="/admin/log">Clear</a>{% endif %}</div></form>
+{%- endif -%}
+{%- match list -%}
+{%- when List::Fresh %}<p class="empty">Nothing has happened yet. Every deploy, refusal, rollback, limit hit and switch shows up here, and stays.</p>
+{%- when List::NothingOlder %}<p class="empty">Nothing older.</p>
+{%- when List::NoMatch(older) %}<p class="empty">No {{ older }}events match these filters. <a href="/admin/log">Clear the filters</a></p>
+{%- when List::Days(days) %}<div class="scroll"><table class="log"><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">App</th><th scope="col">What happened</th><th scope="col">Version</th><th scope="col">Severity</th><th scope="col">By</th></tr></thead>
+{%- for d in days -%}
+<tbody><tr class="day"><th colspan="7" scope="rowgroup">{{ d.name }}</th></tr>
+{%- for r in d.rows -%}
+<tr id="event-{{ r.id }}"><td class="time" title="{{ r.full }}">{{ r.time }}</td><td><span class="event tone-{{ r.tone }}">{{ r.icon|safe }}{{ r.word }}</span></td><td>
+{%- match r.app -%}
+{%- when Who::App(id, icon, name) %}<a class="who-app" href="/admin/apps/{{ id }}#detail">{{ icon|safe }}<span>{{ name }}</span></a>
+{%- when Who::Platform %}<span class="quiet">Platform</span>
+{%- when Who::Unknown(id) %}{{ id }}
+{%- endmatch -%}
+</td><td class="what"><details><summary><span class="msg">{{ r.message }}</span>{% if let Some(why) = r.reason %}<span class="because">{{ why }}</span>{% endif %}</summary><div class="whole">
+{%- if let Some(whole) = r.whole %}<pre>{{ whole }}</pre>{% endif -%}
+<dl class="facts"><dt>When</dt><dd>{{ r.when }}</dd>
+{%- if let Some(chip) = r.risk %}<dt>App's risk then</dt><dd>{{ chip|safe }}</dd>{% endif -%}
+{%- if let Some(took) = r.recovery %}<dt>First failure to rolled back</dt><dd>{{ took }}</dd>{% endif -%}
+</dl>
+{%- match r.behind -%}
+{%- when Behind::Nothing -%}
+{%- when Behind::Gone(kept) %}<p class="quiet">The requests behind it are no longer kept: platform.db keeps the newest {{ kept }} per app.</p>
+{%- when Behind::Listed(what, first, reqs) %}<p>{{ what }}{% if let Some(n) = first %} The first {{ n }}:{% endif %}</p><ul class="behind">
+{%- for q in reqs %}<li><span>{{ q.time }}</span><code>{{ q.route }}</code><span>{{ q.took }}</span><span class="err">{{ q.error }}</span></li>{% endfor -%}
+</ul>
+{%- endmatch -%}
+</div></details></td><td>{% if r.label.is_empty() %}<span class="quiet">—</span>{% else %}<code>{{ r.label }}</code>{% endif %}</td><td>{{ r.severity|safe }}</td><td>{{ r.by }}</td></tr>
+{%- endfor -%}
+</tbody>
+{%- endfor -%}
+</table></div>
+{%- endmatch -%}
+{%- if newest.is_some() || older.is_some() %}<div class="pages">{% if let Some(href) = newest %}<a class="button" href="{{ href }}">Newest</a>{% endif %}{% if let Some(href) = older %}<a class="button" href="{{ href }}">Older</a>{% endif %}</div>{% endif -%}
+</section>

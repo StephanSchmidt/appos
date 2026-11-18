@@ -1,0 +1,13 @@
+<section class="card kpis" aria-label="The platform, last 30 days">
+{%- for t in tiles -%}
+<a class="kpi" href="{{ t.href }}"><span class="label">{{ t.label }}</span><span class="figure"><b>{{ t.value }}</b>
+{%- match t.delta -%}
+{%- when Some(Delta::Same) %}<span class="delta">same as a week ago</span>
+{%- when Some(Delta::Moved(sign, word, n)) %}<span class="delta"><span aria-hidden="true">{{ sign }}</span><span class="sr-only">{{ word }}</span> {{ n }} vs a week ago</span>
+{%- when None -%}
+{%- endmatch -%}
+</span><span class="context">{{ t.context }}</span><div class="spark" role="img" aria-label="{{ t.aria }}">
+{%- for b in t.bars %}<span{% if b.now %} class="now"{% endif %} title="{{ b.title }}"><i style="height:{{ b.px }}px"></i></span>{% endfor -%}
+</div></a>
+{%- endfor -%}
+</section>

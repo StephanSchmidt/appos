@@ -10,12 +10,11 @@ use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::shell::Shell;
 use crate::terminal_logln as println;
 use crate::tx::{self, Waiting};
-use crate::web::escape;
 
 use super::actions::back;
 use super::format::{clock, plural};
 use super::model::{App, load, name_of, state};
-use super::{Ask, Viewer, page, read};
+use super::{Ask, Viewer, html, page, read};
 
 /// `GET /admin/messages`.
 pub(super) async fn messages_page(ask: Ask) -> Reply {
@@ -26,60 +25,80 @@ pub(super) async fn messages_page(ask: Ask) -> Reply {
 fn messages_html(shell: &Shell, viewer: &Viewer) -> Reply {
     let now = now_ms();
     let (apps, _) = load(shell, now);
-    let head = r#"<div class="cardhead"><h2 id="messages-h">Messages <small>· commands on their way from apps to kits</small></h2></div>"#;
-    let list = match tx::outbox(&shell.db) {
-        Ok(waiting) if waiting.is_empty() => r#"<p class="empty">No command waits: each one reached its kit.</p>"#.to_string(),
-        Ok(waiting) => table(&apps, &waiting, now),
-        Err(e) => format!(r#"<p class="empty">The outbox could not be read: {}</p>"#, escape(&e.to_string())),
-    };
-    let foot = format!(
-        "An app's command waits here from the app's commit until its kit ran it. A failed one is tried again after 1 s, 2 s, 4 s and so on up to 5 minutes; after {MAX_ATTEMPTS} tries it waits for you."
-    );
-    let body = format!(r#"<section class="card logcard policy" aria-labelledby="messages-h">{head}{list}<p class="foot">{foot}</p></section>"#);
+    let outbox = tx::outbox(&shell.db).map_err(|e| e.to_string());
+    let list = outbox.as_ref().map(|waiting| groups(&apps, waiting, now)).map_err(Clone::clone);
+    let body = html(&Messages { list, attempts: MAX_ATTEMPTS, changes: viewer.changes });
     Reply::document(page(shell, viewer, state(&apps), "/admin/messages", &format!("Messages · {} admin", shell.name), &body, None))
 }
 
-fn table(apps: &[App], waiting: &[Waiting], now: i64) -> String {
+/// The page's card (templates/admin/messages.html): the messages by
+/// interface, or why the outbox couldn't be read.
+#[derive(askama::Template)]
+#[template(path = "admin/messages.html")]
+struct Messages<'a> {
+    list: Result<Vec<Group<'a>>, String>,
+    attempts: u32,
+    /// Retry acts (admin-write).
+    changes: bool,
+}
+
+/// The messages to one interface.
+struct Group<'a> {
+    interface: &'a str,
+    count: String,
+    failed: usize,
+    rows: Vec<Row>,
+}
+
+/// One message: the function, from which app for whom, and its state.
+struct Row {
+    function: String,
+    app_path: String,
+    app_name: String,
+    user: Option<String>,
+    sent: String,
+    error: Option<String>,
+    state: State,
+}
+
+enum State {
+    /// Failed every try: its id and the tries.
+    Waits(String, u32),
+    OnItsWay,
+    /// Failed so often, tried again in so many seconds.
+    Again(String, i64),
+}
+
+fn groups<'a>(apps: &[App], waiting: &'a [Waiting], now: i64) -> Vec<Group<'a>> {
     let mut by_interface: BTreeMap<&str, Vec<&Waiting>> = BTreeMap::new();
     for w in waiting {
         by_interface.entry(&w.interface).or_default().push(w);
     }
-    let rows: String = by_interface
-        .iter()
-        .flat_map(|(interface, ws)| {
-            let failed = ws.iter().filter(|w| w.due.is_none()).count();
-            let summary =
-                format!(r#"<span class="id">{}{}</span>"#, plural(ws.len(), "message"), if failed > 0 { format!(", {failed} failed") } else { String::new() });
-            let head = format!(r#"<tr><th scope="rowgroup" colspan="2"><span class="names"><span>{}</span>{summary}</span></th></tr>"#, escape(interface));
-            std::iter::once(head).chain(ws.iter().map(move |w| row(apps, w, now)))
-        })
-        .collect();
-    format!(r#"<div class="scroll"><table><thead><tr><th scope="col">Command</th><th scope="col">State</th></tr></thead><tbody>{rows}</tbody></table></div>"#)
+    let group = |(interface, ws): (&'a str, Vec<&Waiting>)| Group {
+        interface,
+        count: plural(ws.len(), "message"),
+        failed: ws.iter().filter(|w| w.due.is_none()).count(),
+        rows: ws.iter().map(|w| row(apps, w, now)).collect(),
+    };
+    by_interface.into_iter().map(group).collect()
 }
 
-fn row(apps: &[App], w: &Waiting, now: i64) -> String {
-    let function = w.function.split_once('#').map_or(w.function.as_str(), |(_, f)| f);
-    let app =
-        format!(r#"<a href="/admin/apps/{}">{}</a>"#, form_urlencoded::byte_serialize(w.app.as_bytes()).collect::<String>(), escape(name_of(apps, &w.app)));
+fn row(apps: &[App], w: &Waiting, now: i64) -> Row {
     let sent: Sent = serde_json::from_str(&w.about).unwrap_or_default();
-    let user = sent.user.map(|u| format!(" for {}", escape(&u.email))).unwrap_or_default();
-    let what =
-        format!(r#"<span class="names"><span><code>{}</code></span><span class="id">from {app}{user}, sent {}</span></span>"#, escape(function), clock(w.at));
-    let error = w.error.as_deref().map(|e| format!(r#"<span class="id">{}</span>"#, escape(e))).unwrap_or_default();
     let state = match w.due {
-        None => format!(
-            r#"<form method="post" action="/admin/messages/{}/retry"><span class="names"><span>Failed {} times, waits for you <button type="submit">Retry</button></span>{error}</span></form>"#,
-            escape(&w.id),
-            w.attempts
-        ),
-        Some(_) if w.attempts == 0 => r#"<span class="quiet">On its way</span>"#.to_string(),
-        Some(due) => format!(
-            r#"<span class="names"><span>Failed {}, next try in {} s</span>{error}</span>"#,
-            plural(w.attempts as usize, "time"),
-            ((due - now).max(0) + 999) / 1000
-        ),
+        None => State::Waits(w.id.clone(), w.attempts),
+        Some(_) if w.attempts == 0 => State::OnItsWay,
+        Some(due) => State::Again(plural(w.attempts as usize, "time"), ((due - now).max(0) + 999) / 1000),
     };
-    format!(r#"<tr><td>{what}</td><td class="may">{state}</td></tr>"#)
+    Row {
+        function: w.function.split_once('#').map_or(w.function.as_str(), |(_, f)| f).to_string(),
+        app_path: form_urlencoded::byte_serialize(w.app.as_bytes()).collect(),
+        app_name: name_of(apps, &w.app).to_string(),
+        user: sent.user.map(|u| u.email),
+        sent: clock(w.at),
+        error: w.error.clone(),
+        state,
+    }
 }
 
 /// `POST /admin/messages/{id}/retry`: a failed command gets its tries

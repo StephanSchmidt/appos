@@ -7,7 +7,6 @@ use std::cmp::Ordering;
 
 use crate::platform::{Event, HOUR_MS, Hour, Kind};
 use crate::shell::Shell;
-use crate::web::escape;
 
 use super::format::{local, plural, span, thousands};
 use super::log::of_kinds;
@@ -229,53 +228,69 @@ fn recovery(m: &Month) -> Tile {
     }
 }
 
-fn delta_html(d: i64) -> String {
-    let (sign, word) = match d.cmp(&0) {
-        Ordering::Greater => ("▲", "up"),
-        Ordering::Less => ("▼", "down"),
-        Ordering::Equal => return r#"<span class="delta">same as a week ago</span>"#.to_string(),
-    };
-    format!(
-        r#"<span class="delta"><span aria-hidden="true">{sign}</span><span class="sr-only">{word}</span> {} vs a week ago</span>"#,
-        thousands(d.unsigned_abs())
-    )
+/// The tiles (templates/admin/kpis.html).
+#[derive(askama::Template)]
+#[template(path = "admin/kpis.html")]
+struct Kpis {
+    tiles: Vec<Drawn>,
 }
 
-fn tile_html(m: &Month, t: &Tile) -> String {
+/// A tile as drawn: its link into the log, label, number, the change in a
+/// week, context, the bars and what they say to screen readers.
+struct Drawn {
+    href: String,
+    label: &'static str,
+    value: String,
+    delta: Option<Delta>,
+    context: String,
+    aria: String,
+    bars: Vec<Bar>,
+}
+
+/// The newest bar against the one a week before: the same, or up or down
+/// (its sign, its word) by so many.
+enum Delta {
+    Same,
+    Moved(&'static str, &'static str, String),
+}
+
+/// A bar: the newest is marked; its title says when and what.
+struct Bar {
+    now: bool,
+    title: String,
+    px: f64,
+}
+
+fn delta(d: i64) -> Delta {
+    match d.cmp(&0) {
+        Ordering::Greater => Delta::Moved("▲", "up", thousands(d.unsigned_abs())),
+        Ordering::Less => Delta::Moved("▼", "down", thousands(d.unsigned_abs())),
+        Ordering::Equal => Delta::Same,
+    }
+}
+
+fn drawn(m: &Month, t: Tile) -> Drawn {
     let max = t.bars.iter().max().copied().unwrap_or(0).max(1);
-    let bars: String = t
+    let bars = t
         .bars
         .iter()
         .zip(&t.tips)
         .enumerate()
         .map(|(i, (n, tip))| {
-            let newest = i == BARS - 1;
-            let when = match newest {
+            let now = i == BARS - 1;
+            let when = match now {
                 true => "Last 24 hours".to_string(),
                 false => format!("{} to {}", local(m.end(i) - DAY_MS, "%b %-d %H:%M"), local(m.end(i), "%b %-d %H:%M")),
             };
             let px = if *n == 0 { 0.0 } else { (PLOT * *n as f64 / max as f64).round().max(2.0) };
-            format!(
-                r#"<span{} title="{}"><i style="height:{px}px"></i></span>"#,
-                if newest { r#" class="now""# } else { "" },
-                escape(&format!("{when} · {tip}"))
-            )
+            Bar { now, title: format!("{when} · {tip}"), px }
         })
         .collect();
-    format!(
-        r#"<a class="kpi" href="{}"><span class="label">{}</span><span class="figure"><b>{}</b>{}</span><span class="context">{}</span><div class="spark" role="img" aria-label="{}">{bars}</div></a>"#,
-        escape(&of_kinds(t.log)),
-        t.label,
-        escape(&t.value),
-        t.delta.map(delta_html).unwrap_or_default(),
-        escape(&t.context),
-        escape(&t.aria),
-    )
+    Drawn { href: of_kinds(t.log), label: t.label, value: t.value, delta: t.delta.map(delta), context: t.context, aria: t.aria, bars }
 }
 
 pub(super) fn kpis(apps: &[App], m: &Month) -> String {
-    let html: String = [apps_live(m, apps), deploys(m), stopped(m), recovery(m)].iter().map(|t| tile_html(m, t)).collect();
-    format!(r#"<section class="card kpis" aria-label="The platform, last 30 days">{html}</section>"#)
+    super::html(&Kpis { tiles: [apps_live(m, apps), deploys(m), stopped(m), recovery(m)].into_iter().map(|t| drawn(m, t)).collect() })
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+<section class="card logcard token" aria-labelledby="token-h"><div class="cardhead"><h2 id="token-h">Token for the appos CLI</h2></div>
+{%- match shown -%}
+{%- when Shown::Offer(email) %}<p>A token lets the appos CLI on your computer use this platform as <b>{{ email }}</b>, with what policy.csv gives you: admin-read to read the log and the apps, admin-write to deploy, roll back and turn apps off and on. It lasts {{ days }} days; <code>appos logout</code> ends it sooner.</p>
+<form method="post" action="/admin/token"><button class="primary">Make a token</button></form>
+<p class="foot">Then paste it into <code>appos login {{ url }}</code>.</p>
+{%- when Shown::Made(email, token) %}<p>Paste it into <code>appos login {{ url }}</code>. It is shown only now; make another if it gets lost.</p>
+<pre class="cmd"><code>{{ token }}</code></pre>
+<p class="foot">It acts as <b>{{ email }}</b> for {{ days }} days, with what policy.csv gives you then.</p>
+{%- when Shown::Failed(why) %}<p>The token could not be made: {{ why }}</p>
+{%- when Shown::NoAuth %}<p>The shell runs with <code>--no-auth</code>: its platform API takes no token, so <code>appos login</code> needs none.</p>
+{%- endmatch -%}
+</section>

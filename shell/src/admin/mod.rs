@@ -163,14 +163,23 @@ async fn not_found(ask: Ask) -> Reply {
     .await
 }
 
+/// What isn't there (templates/admin/missing.html).
+#[derive(askama::Template)]
+#[template(path = "admin/missing.html")]
+struct Missing<'a> {
+    sign: String,
+    what: &'a str,
+}
+
 /// A page saying `what` isn't there, with the way back to the overview.
 fn missing(shell: &Shell, viewer: &Viewer, state: Tone, what: &str) -> Reply {
-    let body = format!(
-        r#"<div class="card summary tone-caution"><span class="sign" aria-hidden="true">{}</span><p>{} <a href="/admin"><u>Back to the overview</u></a></p></div>"#,
-        style::tone_icon(Tone::Caution, 20),
-        escape(what)
-    );
+    let body = html(&Missing { sign: style::tone_icon(Tone::Caution, 20), what });
     Reply::document(page(shell, viewer, state, "/admin", &format!("Not found · {} admin", shell.name), &body, None)).status(404)
+}
+
+/// A template's HTML, or what went wrong drawing it.
+fn html(t: &impl Template) -> String {
+    t.render().unwrap_or_else(|e| format!("<p>This part could not be drawn: {}</p>", escape(&e.to_string())))
 }
 
 /// Plain text, for a request the screen's own forms never send.

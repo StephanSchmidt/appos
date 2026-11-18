@@ -1,0 +1,39 @@
+{%- if let Some(s) = start -%}
+{#- Nothing to report yet: how the first app gets here, and the rules it will run under. -#}
+<div class="start"><section class="card apps first" aria-labelledby="apps-h"><h2 id="apps-h">Deploy the first app</h2>
+<p>From a terminal: connect the appos CLI to this platform once, then deploy from the app's folder.</p>
+<pre class="cmd"><code>appos login {{ s.url }}
+appos new hello &amp;&amp; cd hello
+appos deploy</code></pre>
+<p>It shows up here with its requests, versions and risk. From the app's folder, <code>appos versions</code> then tells what happened to each version, and <code>appos log</code> why a request failed.</p></section><section class="card rules" aria-labelledby="rules-h"><h2 id="rules-h">Guardrails <small>· for every app, from the first</small></h2><ul>
+<li><b>{{ s.seconds }} s</b><p><strong>Limits per request.</strong> {{ s.seconds }} s unless the app asks for more, up to {{ s.max_seconds }} s; {{ s.billions }} billion instructions; an I/O budget of {{ s.io }}, where a read costs 1 and a write 5; {{ s.mb }} MB of memory. Over a limit, the request stops.</p></li>
+<li><b>{{ s.failures }} failures</b><p><strong>Automatic rollback.</strong> {{ s.failures }} failed requests within {{ s.window }} make the version before live again. New deploys then wait until someone makes a version live here.</p></li>
+<li><b>0–{{ s.max_risk }}</b><p><strong>Risk per grant.</strong> {{ s.grants|safe }}<br>{% if s.rated %}Levels come from the platform's risk file; an app can't change them.{% else %}No grant has a level yet: start the shell with <code>--risk</code> and a risk file.{% endif %}</p></li>
+</ul></section></div>
+{%- endif -%}
+{%- if let Some(p) = parts -%}
+{#- What needs attention first, then the apps, then the platform's numbers. -#}
+{{ p.board|safe }}{{ p.kpis|safe }}<div class="row">{{ p.requests|safe }}{{ p.failures|safe }}</div><div class="row" id="detail">{{ p.heat|safe }}{{ p.detail|safe }}</div>
+
+{#- Every app in a row. -#}
+<section class="card inventory" id="inventory" aria-labelledby="inv-h"><div class="cardhead"><h2 id="inv-h">Inventory <small>· an app is as risky as its riskiest grant <span class="bands">{{ p.legend|safe }}</span></small></h2></div><div class="scroll"><table><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Group</th><th scope="col">Owner</th><th scope="col">Live version</th><th scope="col">Risk</th><th scope="col">Grants and their risk</th><th scope="col" class="num">Requests, last hour</th><th scope="col">Last change</th><th scope="col" class="num">Refused deploys</th></tr></thead><tbody>
+{%- for i in p.inventory -%}
+<tr><th scope="row"><a class="who-app" href="/admin/apps/{{ i.id }}#detail">{{ i.icon|safe }}<span class="names"><b>{{ i.name }}</b><code class="id">{{ i.id }}</code></span></a></th><td>{{ i.kind }}</td>
+{%- match i.group %}{% when Some(g) %}<td>{{ g }}</td>{% when None %}<td><span class="none">—</span></td>{% endmatch -%}
+{%- match i.owner %}{% when Some(o) %}<td>{{ o|safe }}</td>{% when None %}<td><span class="none">—</span></td>{% endmatch -%}
+{%- match i.version %}{% when Some(v) %}<td><a class="version" href="/admin/apps/{{ i.id }}#versions"><code>{{ v }}</code></a></td>{% when None %}<td><span class="none">{% if i.stopped %}not running{% else %}none{% endif %}</span></td>{% endmatch -%}
+{%- match i.chip %}{% when Some(c) %}<td><a class="to-risk" href="/admin/apps/{{ i.id }}#risk" title="{{ i.name }}'s grants and their risk">{{ c|safe }}</a></td>{% when None %}<td><span class="none">—</span></td>{% endmatch -%}
+<td class="chips">{% match i.grants %}{% when Some(g) %}{% if g.is_empty() %}<span class="none">none</span>{% else %}{{ g|safe }}{% endif %}{% when None %}<span class="none">—</span>{% endmatch %}</td><td class="num">{{ i.requests }}</td><td class="changed">
+{%- match i.changed %}{% when Some(c) %}<span class="change tone-{{ c.tone }}">{{ c.icon|safe }}<span>{{ c.word }}</span><a class="when" href="{{ c.href }}" title="{{ c.full }} in the log">{{ c.clock }}</a></span>{% when None %}<span class="none">—</span>{% endmatch -%}
+</td><td class="num">{% if i.refused == 0 %}<span class="none">0</span>{% else %}<a class="bad" href="{{ i.refused_href }}" title="{{ i.name }}'s refused deploys">{{ i.refused }}</a>{% endif %}</td></tr>
+{%- endfor -%}
+</tbody></table></div></section>
+
+{#- What went wrong or was changed by hand, newest first. -#}
+<section class="card events" aria-labelledby="ev-h"><h2 id="ev-h">Refused, rolled back, turned off</h2>
+{%- for e in p.history -%}
+<div class="ev"><span class="evicon tone-{{ e.tone }}" aria-hidden="true">{{ e.icon|safe }}</span><span class="evtext"><span><b>{{ e.name }}</b> <span class="sub">{{ e.word }} at <a href="{{ e.href }}" title="{{ e.full }} in the log">{{ e.clock }}</a> · <code>{{ e.label }}</code></span></span><pre>{{ e.sentence }}{{ e.window }}</pre></span></div>
+{%- endfor -%}
+{%- if p.history.is_empty() %}<p class="empty">None yet. Refused and held deploys, rollbacks and apps turned off show up here.</p>{% else %}<a class="more" href="/admin/log">Everything in the log</a>{% endif -%}
+</section><p class="foot">Measured by the shell on every request. The last {{ p.kept }} requests per app are kept in platform.db, so a restart keeps them.</p>
+{%- endif -%}

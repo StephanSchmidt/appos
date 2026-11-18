@@ -23,6 +23,8 @@ appos-data/
 !/shell/Cargo.toml
 !/shell/src/**
 !/shell/assets/**
+# The admin screen's Askama templates.
+!/shell/templates/**
 
 !/cli/Cargo.toml
 !/cli/build.rs

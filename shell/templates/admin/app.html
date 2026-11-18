@@ -1,0 +1,92 @@
+<section class="detail" aria-labelledby="dt-h"><div class="dhead">{{ icon|safe }}<span class="dname"><h3 id="dt-h">{{ name }}</h3><span class="sub">
+{%- if let Some(g) = group %}{{ g }} · {% endif -%}
+{%- if let Some(o) = owner %}owned by {{ o|safe }} · {% endif -%}
+{{ requests }} in the last hour · {% match running -%}
+{%- when Some(r) %}live <code>{{ r.label }}</code> · grants {{ r.grants }} · {% if let Some(risk) = r.risk %}<a href="#risk">{{ risk }}</a>{% endif %} · <a href="{{ log }}">its log</a> · <a href="{{ r.origin }}/{{ id }}">open the app</a>
+{%- when None %}not running · <a href="{{ log }}">its log</a>
+{%- endmatch -%}
+</span></span>
+{%- if let Some(l) = limits %}<span class="limits">limits {{ l.time }}, {{ l.fuel }} fuel, {{ l.io }} I/O, {{ l.mb }} MB{% if l.set %} (set by an admin){% endif %}</span>{% endif -%}
+{%- match switch -%}
+{%- when Switch::Off %}<form{% if !changes %} inert{% endif %} method="post" action="{{ path }}/off"><input type="hidden" name="then" value="{{ path }}"><button class="button switch">{{ power|safe }}Turn off</button></form></div>
+{%- when Switch::On(at, by, reason) %}</div><div class="warn tone-warning banner">{{ warn|safe }}<p><b>Turned off</b> at {{ at }} {{ by }}{% if let Some(r) = reason %}: {{ r }}{% endif %}. Visitors get a page saying so; nothing runs.</p><form{% if !changes %} inert{% endif %} method="post" action="{{ path }}/on"><input type="hidden" name="then" value="{{ path }}"><button class="primary">Turn on</button></form></div>
+{%- when Switch::Nothing %}</div>
+{%- endmatch %}
+{% if let Some(c) = chart %}{{ c|safe }}{% endif -%}
+
+{#- Routes, last hour, all versions. -#}
+{%- match routes -%}
+{%- when Routes::None(earlier) %}<div class="part"><h4>Routes</h4><p class="empty">Not running, so no routes. {% if earlier %}Make an earlier version live below, or deploy a fixed one.{% else %}Deploy a fixed one with <code>appos deploy</code>.{% endif %}</p></div>
+{%- when Routes::Some(rows) %}<div class="part"><h4 id="routes-h">Routes <small>· last hour</small></h4><div class="scroll"><table class="routes" aria-labelledby="routes-h"><thead><tr><th scope="col">Route</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Failed</th><th scope="col" class="num">Median ms</th><th scope="col" class="num">p95 ms</th><th scope="col" class="num">Max ms</th><th scope="col" class="num">Fuel p95</th><th scope="col" class="num">I/O p95</th></tr></thead><tbody>
+{%- for r in rows %}<tr><td><code>{{ r.route }}</code></td><td class="num">{{ r.requests }}</td><td class="num{% if r.bad %} bad{% endif %}">{{ r.failures }}</td><td class="num">{{ r.median }}</td><td class="num">{% if let Some(p) = r.p95 %}<b>{{ p }}</b>{% else %}—{% endif %}</td><td class="num">{{ r.max }}</td><td class="num">{{ r.fuel }}</td><td class="num">{{ r.io }}</td></tr>{% endfor -%}
+</tbody></table></div></div>
+{%- endmatch -%}
+
+{#- The kits it uses; for a kit, what uses it. -#}
+{%- if let Some(k) = kits -%}
+<div class="part" id="kits"><h4 id="kits-h">Kits it uses <small>· by the grants it holds</small></h4>
+{%- if k.uses.is_empty() %}<p class="empty">It uses no kit: it holds no grant.</p>
+{%- else %}<div class="scroll"><table class="uses" aria-labelledby="kits-h"><thead><tr><th scope="col">Kit</th><th scope="col">From</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead><tbody>
+{%- for u in k.uses %}<tr><td>{% match u.name %}{% when Link::App(id, name) %}<a href="/admin/apps/{{ id }}">{{ name }}</a>{% when Link::Code(name) %}<code>{{ name }}</code>{% endmatch %}</td><td>{{ u.from }}</td><td>
+{%- for g in u.grants %}{% if !loop.first %} {% endif %}<code>{{ g }}</code>{% endfor -%}
+{%- if let Some(via) = u.through %} <span class="none">through {{ via }}</span>{% endif %}</td><td>{{ u.now|safe }}</td></tr>{% endfor -%}
+</tbody></table></div><p class="partfoot">While a kit it uses is off or not loaded, it waits: visitors get a page saying so.</p>
+{%- endif -%}
+</div>
+{%- if let Some(users) = k.users -%}
+<div class="part" id="users"><h4 id="users-h">Used by <small>· these wait while it is off</small></h4>
+{%- if users.is_empty() %}<p class="empty">Nothing uses it now.</p>
+{%- else %}<div class="scroll"><table class="uses" aria-labelledby="users-h"><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead><tbody>
+{%- for u in users %}<tr><td><a href="/admin/apps/{{ u.id }}">{{ u.name }}</a></td><td>{{ u.kind }}</td><td>
+{%- for g in u.grants %}{% if !loop.first %} {% endif %}<code>{{ g }}</code>{% endfor -%}
+</td><td>{{ u.now|safe }}</td></tr>{% endfor -%}
+</tbody></table></div>
+{%- endif -%}
+</div>
+{%- endif -%}
+{%- endif -%}
+
+{#- Each grant with what it lets the app do and its level. -#}
+<div class="part" id="risk">
+{%- match risk.why -%}
+{%- when None %}<h4>Risk</h4><p class="empty">Not running, so it can touch nothing.</p>
+{%- when Some(why) %}<h4 id="risk-h">Risk <small>· {{ why }}</small></h4>
+{%- if !risk.rows.is_empty() %}<div class="scroll"><table class="grants" aria-labelledby="risk-h"><thead><tr><th scope="col">Grant</th><th scope="col">Risk</th><th scope="col">Lets the app</th><th scope="col">Since</th></tr></thead><tbody>
+{%- for g in risk.rows %}<tr{% if g.sets %} class="sets"{% endif %}><td><code>{{ g.grant }}</code></td><td>{{ g.chip|safe }}</td><td>{{ g.allows }}</td><td>{% match g.since %}{% when Some(s) %}<a class="when" href="{{ s.href }}" title="{{ s.full }} in the log">{{ s.clock }}</a>{% when None %}<span class="none">—</span>{% endmatch %}</td></tr>{% endfor -%}
+</tbody></table></div>
+{%- endif -%}
+{%- endmatch -%}
+<p class="partfoot">Levels come from the platform's risk file; an app can't change them. <a href="{{ log }}">Its log</a> · <a href="{{ risk.changes }}">Risk changes</a></p></div>
+
+{#- The versions, the live one first, with Make live. -#}
+<div class="part" id="versions"><h4>Versions</h4>
+{%- match versions -%}
+{%- when None %}<p class="empty">None to go back to: loaded from a folder when the shell started. Deployed with <code>appos deploy</code>, every version is kept.</p>
+{%- when Some(v) -%}
+{%- if let Some((at, reason)) = v.hold %}<div class="warn tone-critical banner">{{ critical|safe }}<p><b>Deploys wait.</b> {{ name }} rolled itself back at {{ at }}{% if let Some(r) = reason %} ({{ r }}){% endif %}. New deploys are stored but not live until someone makes a version live here.</p></div>{% endif -%}
+<div class="scroll"><table class="versions"><thead><tr><th scope="col">Version</th><th scope="col">Status</th><th scope="col">Deployed</th><th scope="col" class="num">Live in</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead><tbody>
+{%- for r in v.rows -%}
+<tr{% if r.live %} class="live"{% else if r.reason.is_some() %} class="has-reason"{% endif %}><td><code>{{ r.label }}</code></td><td>{{ r.badge|safe }}</td><td title="{{ r.full }}">{{ r.clock }}</td><td class="num">{{ r.took }}</td><td class="act">
+{%- if let Some(primary) = r.make_live %}<form{% if !changes %} inert{% endif %} method="post" action="{{ path }}/rollback"><input type="hidden" name="label" value="{{ r.label }}"><input type="hidden" name="then" value="{{ path }}"><button{% if primary %} class="primary"{% endif %}>Make live</button></form>{% endif -%}
+</td></tr>
+{%- if let Some(why) = r.reason %}<tr class="reason"><td></td><td colspan="4" title="{{ why }}"><div>{{ r.line }}</div></td></tr>{% endif -%}
+{%- endfor -%}
+</tbody></table></div>
+{%- match v.more -%}
+{%- when More::Nothing -%}
+{%- when More::Newest %}<a class="more" href="/admin/apps/{{ id }}#versions">The newest {{ shown }} only</a>
+{%- when More::All(n) %}<a class="more" href="/admin/apps/{{ id }}?versions=all#versions">Show {{ n }} versions</a>
+{%- endmatch -%}
+{%- endmatch -%}
+</div>
+
+{#- The last failed requests, the error under each. -#}
+{%- if !failures.is_empty() -%}
+<div class="part"><h4>Last failures</h4><div class="scroll"><table class="failures"><thead><tr><th scope="col">Time</th><th scope="col">Route</th><th scope="col">What happened</th><th scope="col">Version</th></tr></thead><tbody>
+{%- for f in failures -%}
+<tr{% if f.error.is_some() %} class="has-reason"{% endif %}><td title="{{ f.full }}">{{ f.time }}</td><td><code>{{ f.route }}</code></td><td>{{ f.badge|safe }}</td><td><code>{{ f.label }}</code></td></tr>
+{%- if let Some(e) = f.error %}<tr class="reason"><td></td><td colspan="3"><pre>{{ e }}</pre></td></tr>{% endif -%}
+{%- endfor -%}
+</tbody></table></div></div>
+{%- endif -%}
+</section>

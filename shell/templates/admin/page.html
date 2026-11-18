@@ -1,0 +1,38 @@
+{%- let looks = "<span class=\"looks\" title=\"policy.csv gives you admin-read, not admin-write: the controls show, they don't act\">Look only</span>" -%}
+<!doctype html>
+<html lang="en"{% if let Some(scheme) = picked %} data-scheme="{{ scheme }}"{% endif %}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<link rel="icon" href="{{ icon }}">
+<style>{{ css|safe }}</style>
+{% if live.is_some() -%}
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyEnabled":false}'>
+<script src="{{ htmx }}" defer></script>
+<script src="{{ sse }}" defer></script>
+<script type="module" src="/admin/assets/admin.js"></script>
+{% endif -%}
+</head>
+<body{% if live.is_some() %} hx-ext="sse" sse-connect="/admin/stream?since={{ since }}"{% endif %}>
+<div class="wrap">
+<header><a class="brand" href="/admin"><span class="mark" aria-hidden="true"></span>AppOS</a><span class="platform" title="This platform">{{ name }}</span>
+<nav aria-label="Admin">{% for n in nav %}<a href="{{ n.path }}"{% if n.current %} aria-current="page"{% endif %}>{{ n.label }}</a>{% endfor %}</nav>
+<span class="where"{% if live.is_some() %} id="updated"{% endif %} title="{{ full }}"><span class="live">Live</span><span class="lost">Reconnecting</span><span class="stale">Stale</span><span>Updated {{ time }}</span></span>
+<form class="scheme" method="post" action="/admin/scheme" aria-label="Light or dark">
+{%- for s in schemes -%}
+<button name="scheme" value="{{ s.name() }}" aria-pressed="{{ s == scheme }}" aria-label="{{ s.label() }}" title="{{ s.label() }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ s.icon()|safe }}</svg></button>
+{%- endfor -%}
+</form>
+{%- if let Some((email, person)) = who -%}
+<span class="user">{% if !changes %}{{ looks|safe }}{% endif %}<span title="{{ email }}">{{ person }}</span><form method="post" action="/_auth/sign-out"><button>Sign out</button></form></span>
+{%- else if !changes -%}
+{{ looks|safe }}
+{%- endif -%}
+</header>
+{% if let Some(url) = live %}<div id="refresh" hidden hx-get="{{ url }}" hx-trigger="sse:changed, refresh" hx-select-oob="#live,#updated" hx-swap="none"></div>{% endif %}<main id="live" data-icon="{{ icon }}">
+{{ body|safe }}
+</main>
+</div>
+</body>
+</html>
