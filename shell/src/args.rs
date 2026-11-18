@@ -9,12 +9,15 @@ const USAGE: &str = "\
 PROGRAM [--addr 127.0.0.1:8080] [--platform-addr IP:PORT] [--name NAME] [--git URL]
         [--origin URL] [--data DIR] [--risk FILE] [--auth FILE --policy FILE | --no-auth] [APP...]
 PROGRAM --contract    the WIT apps build against, as JSON (appos sync --shell)
-PROGRAM --dev APP     what appos dev --shell runs: APP, open, reloading on each line on stdin
+PROGRAM --dev APP...  what appos dev --shell runs: the apps, open, reloading on each line on stdin
 PROGRAM --version";
 
 /// What the command line asks for.
 pub(crate) enum Run {
     Serve(Box<crate::Options>),
+    /// Serve as `appos dev` does: each line on stdin reloads the apps
+    /// (`stdin_reloads`).
+    Dev(Box<crate::Options>),
     Contract,
     /// --help, --version: printed already.
     Nothing,
@@ -74,17 +77,18 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
         return Ok(Run::Contract);
     }
     if dev {
-        let [app] = &opts.apps[..] else { anyhow::bail!("--dev runs one app: give its directory") };
-        let mut dev = crate::Options::dev(app.clone(), opts.addr.clone(), stdin_reloads());
+        let Some(first) = opts.apps.first() else { anyhow::bail!("--dev runs apps: give their directories") };
+        let mut dev = crate::Options::dev(first.clone(), opts.addr.clone(), tokio::sync::mpsc::channel(1).1);
+        dev.apps = opts.apps.clone();
         dev.risk = opts.risk;
-        return Ok(Run::Serve(Box::new(dev)));
+        return Ok(Run::Dev(Box::new(dev)));
     }
     Ok(Run::Serve(Box::new(opts)))
 }
 
-/// Each line on stdin reloads the app; the end of stdin, `appos dev`
+/// Each line on stdin reloads the apps; the end of stdin, `appos dev`
 /// stopping, ends the process.
-fn stdin_reloads() -> tokio::sync::mpsc::Receiver<()> {
+pub(crate) fn stdin_reloads() -> tokio::sync::mpsc::Receiver<()> {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     std::thread::spawn(move || {
         for line in std::io::stdin().lines() {
@@ -126,6 +130,14 @@ mod tests {
         let parse = |args: &[&str]| serve(args.iter().map(|a| a.to_string())).unwrap().unwrap();
         assert!(!parse(&[]).no_auth);
         assert!(parse(&["--no-auth"]).no_auth);
+    }
+
+    #[test]
+    fn dev_serves_the_apps_given() {
+        let Run::Dev(opts) = parse(["--dev", "a", "b"].into_iter().map(String::from)).unwrap() else { panic!("not dev") };
+        assert_eq!(opts.apps, [PathBuf::from("a"), PathBuf::from("b")]);
+        assert!(opts.no_auth && !opts.platform_api);
+        assert!(parse(["--dev"].into_iter().map(String::from)).is_err());
     }
 
     #[test]

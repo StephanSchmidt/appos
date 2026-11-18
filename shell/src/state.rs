@@ -32,6 +32,26 @@ fn held_reason(pause: &Event) -> String {
     }
 }
 
+/// Which apps serve: loaded and on, as `State` has them now. Cheap to
+/// clone.
+#[derive(Clone, Default)]
+pub struct Serving {
+    apps: Arc<RwLock<BTreeMap<String, Arc<LoadedApp>>>>,
+    off: Arc<RwLock<BTreeSet<String>>>,
+}
+
+impl std::fmt::Debug for Serving {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Serving").finish_non_exhaustive()
+    }
+}
+
+impl Serving {
+    pub fn serves(&self, id: &str) -> bool {
+        self.apps.read().contains_key(id) && !self.off.read().contains(id)
+    }
+}
+
 /// Per app: the live version's label, and when it failed lately (for the
 /// window, and in unix ms for the event).
 type Failures = BTreeMap<String, (String, Vec<(Instant, i64)>)>;
@@ -39,8 +59,8 @@ type Failures = BTreeMap<String, (String, Vec<(Instant, i64)>)>;
 pub struct State {
     platform: PlatformDb,
     risk: Risk,
-    apps: RwLock<BTreeMap<String, Arc<LoadedApp>>>,
-    off: RwLock<BTreeSet<String>>,
+    apps: Arc<RwLock<BTreeMap<String, Arc<LoadedApp>>>>,
+    off: Arc<RwLock<BTreeSet<String>>>,
     limits: RwLock<BTreeMap<String, AdminLimits>>,
     failures: Mutex<Failures>,
     /// Changes happen one at a time, each only for its write and swap.
@@ -57,7 +77,7 @@ impl State {
             platform,
             risk,
             apps: Default::default(),
-            off: RwLock::new(off.into_iter().collect()),
+            off: Arc::new(RwLock::new(off.into_iter().collect())),
             limits: RwLock::new(limits),
             failures: Default::default(),
             change: Default::default(),
@@ -75,6 +95,11 @@ impl State {
 
     pub fn is_off(&self, id: &str) -> bool {
         self.off.read().contains(id)
+    }
+
+    /// Which apps serve, for kits (`Context::serves`).
+    pub fn serving(&self) -> Serving {
+        Serving { apps: self.apps.clone(), off: self.off.clone() }
     }
 
     /// What an admin set for the app's requests.

@@ -27,6 +27,7 @@ use crate::bundle::Checked;
 use crate::kit::{self, About, Context, Kits, User};
 use crate::manifest::Manifest;
 use crate::platform::Outcome;
+use crate::state::Serving;
 use crate::tx::{Db, Tx};
 
 wasmtime::component::bindgen!({
@@ -344,7 +345,9 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -
     let mut problems = Vec::new();
     for (import, functions) in imports {
         let short = import.rsplit('/').next().unwrap_or(import);
-        if kits.offers(import) {
+        // An interface of a kit's WIT may hold types alone, which other
+        // interfaces use.
+        if kits.offers(import) || kits.knows(import) {
             for f in functions {
                 match kits.grant_for(import, f) {
                     Some(g) if m.grants(&g.name) => {}
@@ -373,6 +376,8 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
         .map_err(anyhow::Error::from)
         .context("not a valid WebAssembly component")?;
     let manifest = app.manifest.clone();
+    let id = &manifest.app.id;
+    anyhow::ensure!(!kits.page_names().contains(id.as_str()), "app id {id:?}: the platform's own pages are at /{id}");
     check_imports(&imports(engine, &component), &manifest, kits)?;
 
     let mut linker: Linker<Ctx> = Linker::new(engine);
@@ -454,7 +459,16 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
 /// writes are dropped and the request runs again from the start, this time
 /// alone. All runs together get the budget's time. Only the run that
 /// counts prints its log lines.
-pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget, access: Access, user: Option<User>) -> (Result<Page, Failed>, Cost) {
+/// `serving` tells kits which apps serve.
+pub async fn call(
+    app: &LoadedApp,
+    handler: &str,
+    req: &Request,
+    budget: Budget,
+    access: Access,
+    user: Option<User>,
+    serving: Serving,
+) -> (Result<Page, Failed>, Cost) {
     let deadline = Instant::now() + budget.time;
     let held = &app.manifest.capabilities.grant;
     let cx = Context::new(About {
@@ -463,6 +477,7 @@ pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget,
         page: Some(kit::Page { method: req.method.clone(), path: req.path.clone(), url: format!("{}{}", req.origin, req.base) }),
         deadline: deadline.into_std(),
         may: held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect(),
+        serving,
     });
     let timeout = || timed_out(budget);
     let mut cost = Cost::default();

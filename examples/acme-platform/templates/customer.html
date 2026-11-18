@@ -1,0 +1,20 @@
+<div class="appos-page">
+  <h1>{{ customer.name }}</h1>
+  <p>Revenue ${{ customer.revenue }}, looked after by {{ customer.owner }}.</p>
+  <h2>Notes</h2>
+  {% if notes.is_empty() %}
+    <p class="appos-muted">No notes yet.</p>
+  {% else %}
+    <ul>
+    {% for note in notes %}
+      <li>{{ note.text }} <span class="appos-muted">{{ note.by }}, {{ note.at }}</span></li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+  {% if may_write %}
+  <form method="post" action="/crm/{{ customer.id }}">
+    <input name="text" required maxlength="500" placeholder="A note">
+    <button>Add the note</button>
+  </form>
+  {% endif %}
+</div>

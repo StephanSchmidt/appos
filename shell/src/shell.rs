@@ -66,7 +66,7 @@ impl Shell {
     /// the kits' deliveries; in a Tokio runtime.
     pub fn new(p: Parts) -> anyhow::Result<Arc<Shell>> {
         let state = State::open(p.platform.clone(), p.risk.clone())?;
-        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits);
+        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits, state.serving());
         Ok(Arc::new(Shell {
             origin: p.origin,
             name: p.name,

@@ -2,10 +2,17 @@
 //! crm-read) and add notes (crm-write), through acme:crm/customers
 //! (wit/crm.wit). AppOS checks the grant, the policy and the request's
 //! budget before any of this runs.
+//!
+//! It has a page of its own too, /crm/<id>: the customer and its notes
+//! (templates/customer.html), with a form to add one. policy.csv says who
+//! may open it: `p, group:sales, crm, crm-read` (and crm-write to add).
 
 use std::sync::{Arc, Mutex};
 
-use appos_shell::kit::{ComponentType, Context, Grant, Kit, KitLinker, Lift, Lower, Message, Run};
+use appos_shell::kit::{
+    ComponentType, Context, Grant, Kit, KitLinker, KitRoute, Lift, Lower, Message, Reply, Run,
+};
+use askama::Template;
 use rusqlite::{Connection, OptionalExtension, params};
 
 const CUSTOMERS: &str = "acme:crm/customers@0.1.0";
@@ -108,11 +115,40 @@ impl Crm {
         Ok(())
     }
 
+    /// The customer's page; none for an unknown id.
+    fn page(&self, cx: &Context, id: &str) -> anyhow::Result<Option<Reply>> {
+        let Some(customer) = self.get(id)? else {
+            return Ok(None);
+        };
+        let page = CustomerPage {
+            notes: self.notes(id)?,
+            may_write: cx.may("crm-write"),
+            customer,
+        };
+        Ok(Some(Reply::page(&page.customer.name, page.render()?)))
+    }
+
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+#[derive(Template)]
+#[template(path = "customer.html")]
+struct CustomerPage {
+    customer: Customer,
+    notes: Vec<Note>,
+    may_write: bool,
+}
+
+/// An id for a note added on the page.
+fn new_id() -> String {
+    format!(
+        "page-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )
 }
 
 fn customer(r: &rusqlite::Row) -> rusqlite::Result<Customer> {
@@ -167,6 +203,38 @@ impl Kit for Crm {
         linker.command::<(String, String)>(CUSTOMERS, "add-note")
     }
 
+    fn routes(&self) -> Vec<KitRoute> {
+        let crm = self.clone();
+        let show = KitRoute::get("/crm/:id", "crm-read", move |cx, req| {
+            let page = crm.page(&cx, req.param("id").unwrap_or_default());
+            Box::pin(async move {
+                Ok(page?.unwrap_or_else(|| {
+                    Reply::page("No such customer", "<p>No such customer.</p>").status(404)
+                }))
+            })
+        });
+        let crm = self.clone();
+        // The kit's own page writes at once: no request of an app to wait for.
+        let add = KitRoute::post("/crm/:id", "crm-write", move |cx, req| {
+            let id = req.param("id").unwrap_or_default().to_string();
+            let text = req
+                .form_value("text")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let by = cx
+                .user()
+                .map_or_else(|| "nobody".to_string(), |u| u.email.clone());
+            let added = if text.is_empty() {
+                Ok(())
+            } else {
+                crm.add_note(&new_id(), &id, &by, &text)
+            };
+            Box::pin(async move { added.map(|()| Reply::redirect(&format!("/crm/{id}"))) })
+        });
+        vec![show, add]
+    }
+
     fn run(&self, cx: Context, msg: Message) -> Run<'_> {
         Box::pin(async move {
             anyhow::ensure!(msg.function == ADD_NOTE, "no command {}", msg.function);
@@ -217,10 +285,11 @@ mod tests {
 
     #[test]
     fn the_platform_takes_the_kit() {
-        let contract = appos_shell::kit::Kits::builtin()
+        let kits = appos_shell::kit::Kits::builtin()
             .with(Crm::open(":memory:").unwrap())
-            .unwrap()
-            .contract();
+            .unwrap();
+        assert_eq!(kits.page_names().into_iter().collect::<Vec<_>>(), ["crm"]);
+        let contract = kits.contract();
         assert!(
             contract["appos.wit"].contains("    import acme:crm/customers@0.1.0;\n"),
             "{}",

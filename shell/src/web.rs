@@ -1,4 +1,5 @@
-//! HTTP: the shell's own pages, and dispatch of `/<app-id>/...` to apps.
+//! HTTP: the shell's own pages, the kits' pages (kit.rs `KitRoute`), and
+//! dispatch of `/<app-id>/...` to apps.
 //!
 //! The shell owns the page: layout, menu, scripts. Per request an app sets
 //! named HTML ("page" is the whole page content), may add to `<head>`, and
@@ -13,7 +14,7 @@
 //! only under their own names (`own_host`).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -26,6 +27,7 @@ use serde::Serialize;
 use crate::api;
 use crate::auth::Who;
 use crate::deploy::Ask;
+use crate::kit::{About, Context, Grant, KitRequest, KitRoute};
 use crate::log_filter;
 use crate::platform::{Actor, Kind, Outcome, Usage, now_ms};
 use crate::runtime::{self, LoadedApp, QUEUE_WAIT};
@@ -43,6 +45,9 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsa
 /// Icons are untrusted documents, including when opened directly on the
 /// private admin origin. They must not load the shell's trusted scripts
 /// or acquire that origin's ability to submit admin actions.
+/// How long a kit's page may take.
+const KIT_PAGE_TIME: Duration = Duration::from_secs(10);
+
 const ICON_CSP: &str = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox";
 
 type S = State<Arc<Shell>>;
@@ -771,6 +776,11 @@ async fn dispatch_app(shell: Arc<Shell>, who: Who, req: Request, htmx: bool) -> 
         Err(e) => return e.into_response(),
     };
     let decoded: Vec<String> = req.path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+    let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    if let Some((route, params, grants)) = shell.kits.page(req.method.as_str(), &segments) {
+        let back = back.unwrap_or_else(|| req.path.clone());
+        return kit_page(&shell, &who, route, params, grants, req, htmx, &back).await;
+    }
     let Some((app_id, rest)) = decoded.split_first() else {
         return message(&shell, &who, StatusCode::NOT_FOUND, "Not found", "No such page.");
     };
@@ -819,16 +829,19 @@ fn back_to(shell: &Shell, req: &Request, htmx: bool) -> Option<String> {
 /// The policy doesn't let this person do what the app tried: sign in
 /// first, or a 403. htmx drops the body of a 4xx, so it is sent to the
 /// 403 page instead.
-fn denied(shell: &Shell, who: &Who, app: &LoadedApp, back: &str, htmx: bool) -> Response {
+fn denied(shell: &Shell, who: &Who, app: Option<&LoadedApp>, back: &str, htmx: bool) -> Response {
     if who.identity().is_none() && shell.auth.is_some() {
         let to: String = form_urlencoded::byte_serialize(back.as_bytes()).collect();
         return go(&format!("/_auth/sign-in?to={to}"), htmx);
     }
     if htmx {
-        let id: String = form_urlencoded::byte_serialize(app.manifest.app.id.as_bytes()).collect();
-        return go(&format!("/_auth/denied?app={id}"), htmx);
+        let to = match app {
+            Some(app) => format!("/_auth/denied?app={}", form_urlencoded::byte_serialize(app.manifest.app.id.as_bytes()).collect::<String>()),
+            None => "/_auth/denied".into(),
+        };
+        return go(&to, htmx);
     }
-    denied_page(shell, who, Some(app))
+    denied_page(shell, who, app)
 }
 
 /// "You can't do this here", with whom to ask.
@@ -915,7 +928,7 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
     let access = crate::access::of(shell, who, app);
     let started = Instant::now();
     let user = crate::access::user(shell, who);
-    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access, user).await;
+    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access, user, shell.state.serving()).await;
     drop(permit);
     if cost.sent > 0 {
         shell.outbox.wake();
@@ -925,7 +938,7 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
 
     let resp = match result {
         Ok(page) => {
-            let resp = render(shell, who, app, path, request.htmx, page);
+            let resp = render(shell, who, app_id, &app.manifest.app.name, path, request.htmx, page);
             usage.outcome = Outcome::of_status(resp.status().as_u16());
             resp
         }
@@ -934,7 +947,7 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
             println!("[{app_id}] {} ({whom})", f.error);
             usage.outcome = Outcome::Denied;
             usage.error = Some(f.error.to_string());
-            denied(shell, who, app, back, request.htmx)
+            denied(shell, who, Some(app), back, request.htmx)
         }
         Err(f) => {
             // The wasm backtrace has no names in a release build; the app's
@@ -959,6 +972,63 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
     resp
 }
 
+/// A kit's page: AppOS checks the policy, under the name the page is at,
+/// then the kit answers.
+#[allow(clippy::too_many_arguments)]
+async fn kit_page(
+    shell: &Arc<Shell>,
+    who: &Who,
+    route: &KitRoute,
+    params: Vec<(String, String)>,
+    grants: &[Grant],
+    req: AppRequest,
+    htmx: bool,
+    back: &str,
+) -> Response {
+    let name = route.name().to_string();
+    let held: Vec<String> = grants.iter().map(|g| g.name.clone()).collect();
+    let may: Vec<String> = match &shell.policy {
+        None => held,
+        Some(policies) => {
+            let access = policies.current().access(who, &name, "", &held);
+            held.into_iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g).collect()
+        }
+    };
+    if !may.iter().any(|g| g == route.grant()) {
+        let whom = if who.identity().is_some() { "signed in" } else { "not signed in" };
+        println!("[{name}] {}: denied {} ({whom})", route.pattern(), route.grant());
+        return denied(shell, who, None, back, htmx);
+    }
+    let below = req.path.strip_prefix(&format!("/{name}")).filter(|p| !p.is_empty()).unwrap_or("/");
+    let cx = Context::new(About {
+        app: name.clone(),
+        user: crate::access::user(shell, who),
+        page: Some(crate::kit::Page { method: req.method.to_string(), path: below.to_string(), url: format!("{}/{name}", shell.origin) }),
+        deadline: Instant::now() + KIT_PAGE_TIME,
+        may,
+        serving: shell.state.serving(),
+    });
+    let request =
+        KitRequest { method: req.method.to_string(), path: req.path.clone(), params, query: req.query, form: req.form, origin: shell.origin.clone(), htmx };
+    // In a task of its own: a kit that panics fails its page, not the shell.
+    let answer = tokio::spawn(route.respond(cx, request));
+    let abort = answer.abort_handle();
+    let failed = match tokio::time::timeout(KIT_PAGE_TIME, answer).await {
+        Ok(Ok(Ok(reply))) => {
+            let page = runtime::Page { status: reply.status, redirect: reply.redirect, head: reply.head, html: reply.html };
+            return render(shell, who, &name, &reply.title, &req.path, htmx, page);
+        }
+        Ok(Ok(Err(e))) => format!("{e:#}"),
+        Ok(Err(e)) => format!("the kit crashed: {e}"),
+        Err(_) => {
+            abort.abort();
+            format!("took longer than {} s", KIT_PAGE_TIME.as_secs())
+        }
+    };
+    eprintln!("[{name}] {}: {failed}", route.pattern());
+    message(shell, who, StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This page is unavailable right now. The rest of the site works.")
+}
+
 fn percent_decode(s: &str) -> String {
     form_urlencoded::parse(format!("x={}", s.replace('+', "%2B").replace('&', "%26")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
 }
@@ -967,10 +1037,9 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Turns what the app built into HTTP: a redirect, the page in the layout,
-/// or htmx swaps.
-fn render(shell: &Shell, who: &Who, app: &LoadedApp, path: &str, htmx: bool, page: runtime::Page) -> Response {
-    let app_id = &app.manifest.app.id;
+/// Turns what an app or a kit's page (`app_id`) built into HTTP: a
+/// redirect, the page in the layout titled `title`, or htmx swaps.
+fn render(shell: &Shell, who: &Who, app_id: &str, title: &str, path: &str, htmx: bool, page: runtime::Page) -> Response {
     let status = StatusCode::from_u16(page.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
     if let Some(to) = page.redirect {
@@ -1004,7 +1073,7 @@ fn render(shell: &Shell, who: &Who, app: &LoadedApp, path: &str, htmx: bool, pag
             );
         }
         match page.html.iter().find(|(n, _)| n == "page") {
-            Some((_, html)) => layout(shell, who, path, &app.manifest.app.name, &page.head, html),
+            Some((_, html)) => layout(shell, who, path, title, &page.head, html),
             None => String::new(),
         }
     };
@@ -1383,5 +1452,104 @@ mod tests {
         assert_eq!(on("/surveys"), Some("/surveys"));
         assert_eq!(on("/surveyor"), None);
         assert_eq!(on("/"), None);
+    }
+
+    /// A kit with a page at /desk/:id for those the policy gives
+    /// desk-read: it shows the id, who asks, the path below /desk and
+    /// whether the app "test" serves; a form sent to it goes on.
+    struct Desk;
+
+    impl crate::kit::Kit for Desk {
+        fn wit(&self) -> Vec<(String, String)> {
+            vec![("desk.wit".into(), "package acme:desk;\ninterface d { f: func(); }\n".into())]
+        }
+        fn grants(&self) -> Vec<Grant> {
+            vec![Grant::new("desk-read", "See the desk", &["acme:desk/d#f"], 1)]
+        }
+        fn link(&self, _: &mut crate::kit::KitLinker<'_>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn routes(&self) -> Vec<KitRoute> {
+            use crate::kit::Reply;
+            vec![
+                KitRoute::get("/desk/:id", "desk-read", |cx, req| {
+                    Box::pin(async move {
+                        let who = cx.user().map_or("nobody".to_string(), |u| u.email.clone());
+                        let below = cx.page().map(|p| p.path.clone()).unwrap_or_default();
+                        let html = format!("{} {who} {below} {} test:{}", req.param("id").unwrap_or(""), cx.app(), cx.serves("test"));
+                        Ok(Reply::page("Desk", html))
+                    })
+                }),
+                KitRoute::post("/desk/:id", "desk-read", |_, req| {
+                    Box::pin(async move { Ok(Reply::redirect(&format!("/desk/{}", req.form_value("to").unwrap_or("")))) })
+                }),
+                KitRoute::get("/desk/broken/now", "desk-read", |_, _| Box::pin(async move { anyhow::bail!("the desk's database is down") })),
+            ]
+        }
+    }
+
+    fn desk_kits() -> crate::kit::Kits {
+        crate::kit::Kits::builtin().with(Desk).unwrap()
+    }
+
+    async fn desk_shell(policy: Option<&str>) -> (tempfile::TempDir, Arc<Shell>) {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = match policy {
+            Some(text) => Some(crate::access::Policies::built_in(text, desk_kits().names()).await.unwrap()),
+            None => None,
+        };
+        let parts = crate::shell::Parts { kits: desk_kits(), policy, ..crate::testing::parts(dir.path().join("data"), Default::default()) };
+        (dir, Shell::new(parts).unwrap())
+    }
+
+    async fn ask(app: &Router, method: &str, uri: &str, form: &str) -> (StatusCode, HeaderMap, String) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        let (status, headers) = (response.status(), response.headers().clone());
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, headers, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn kits_have_pages_in_the_shells_layout() {
+        let (_dir, shell) = desk_shell(None).await;
+        let app = router(shell.clone());
+        let (status, _, body) = ask(&app, "GET", "/desk/7", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Desk</title>") && body.contains("<main>7 nobody /7 desk test:false</main>"), "{body}");
+
+        crate::deploy::deploy(&shell, &crate::testing::bundle("1", None).pack().unwrap(), Actor::Cli).await.unwrap();
+        let (_, _, body) = ask(&app, "GET", "/desk/7", "").await;
+        assert!(body.contains("test:true"), "the kit sees the app serve: {body}");
+
+        let (status, headers, _) = ask(&app, "POST", "/desk/7", "to=8").await;
+        assert_eq!((status, &headers[header::LOCATION]), (StatusCode::SEE_OTHER, &HeaderValue::from_static("/desk/8")));
+        let (status, _, body) = ask(&app, "GET", "/desk/broken/now", "").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!body.contains("database"), "the error stays in the log: {body}");
+        assert_eq!(ask(&app, "GET", "/desk", "").await.0, StatusCode::NOT_FOUND);
+
+        let desk =
+            crate::bundle::Bundle { manifest: crate::testing::bundle("1", None).manifest.replace("'test'", "'desk'"), ..crate::testing::bundle("1", None) };
+        let err = crate::deploy::deploy(&shell, &desk.pack().unwrap(), Actor::Cli).await.err().unwrap();
+        assert!(format!("{err:#}").contains("the platform's own pages are at /desk"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn the_policy_says_who_may_open_a_kits_page() {
+        let (_dir, shell) = desk_shell(Some("p, group:sales, desk, desk-read\n")).await;
+        let app = router(shell);
+        let (status, _, body) = ask(&app, "GET", "/desk/7", "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!body.contains("nobody"), "{body}");
+
+        let (_dir, shell) = desk_shell(Some("p, anyone, desk, desk-read\n")).await;
+        assert_eq!(ask(&router(shell), "GET", "/desk/7", "").await.0, StatusCode::OK);
     }
 }

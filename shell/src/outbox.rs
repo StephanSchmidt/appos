@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 
 use crate::kit::{Kit, Kits, Message};
 use crate::platform::{Actor, Kind, NewEvent, PlatformDb, now_ms};
+use crate::state::Serving;
 use crate::terminal_errorln as eprintln;
 use crate::tx::{self, Db, Waiting};
 
@@ -49,14 +50,15 @@ impl Outbox {
 }
 
 /// Starts one delivery task per interface; in a Tokio runtime. A message
-/// that waits for an admin is logged in `platform`.
-pub fn start(db: Db, platform: PlatformDb, kits: &Kits) -> Outbox {
+/// that waits for an admin is logged in `platform`. `serving` tells kits
+/// which apps serve.
+pub fn start(db: Db, platform: PlatformDb, kits: &Kits, serving: Serving) -> Outbox {
     let tasks = kits
         .interfaces()
         .into_iter()
         .map(|(interface, kit)| {
             let wake = Arc::new(Notify::new());
-            let to = Deliver { interface, kit, db: db.clone(), platform: platform.clone() };
+            let to = Deliver { interface, kit, db: db.clone(), platform: platform.clone(), serving: serving.clone() };
             tokio::spawn(deliver(to, wake.clone()));
             wake
         })
@@ -70,6 +72,7 @@ struct Deliver {
     kit: Arc<dyn Kit>,
     db: Db,
     platform: PlatformDb,
+    serving: Serving,
 }
 
 async fn deliver(to: Deliver, wake: Arc<Notify>) {
@@ -106,9 +109,9 @@ async fn deliver(to: Deliver, wake: Arc<Notify>) {
 /// not delivery), then takes it out or keeps it for later.
 async fn try_one(to: &Deliver, waiting: Waiting) -> rusqlite::Result<()> {
     let (id, attempts, function, app) = (waiting.id.clone(), waiting.attempts, waiting.function.clone(), waiting.app.clone());
-    let (db, kit) = (&to.db, to.kit.clone());
+    let (db, kit, serving) = (&to.db, to.kit.clone(), to.serving.clone());
     let run = tokio::spawn(async move {
-        let (cx, msg) = Message::of(waiting, RUN_TIME);
+        let (cx, msg) = Message::of(waiting, RUN_TIME, serving);
         kit.run(cx, msg).await
     });
     let abort = run.abort_handle();
@@ -191,7 +194,13 @@ mod tests {
     async fn a_failed_command_is_tried_again_then_waits_for_an_admin() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
         sent(&db);
-        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: false }), db: db.clone(), platform: platform.clone() };
+        let to = Deliver {
+            interface: "acme:crm/leads".into(),
+            kit: Arc::new(Down { panics: false }),
+            db: db.clone(),
+            platform: platform.clone(),
+            serving: Serving::default(),
+        };
         for n in 1..=MAX_ATTEMPTS {
             try_one(&to, tx::outbox(&db).unwrap().remove(0)).await.unwrap();
             let w = tx::outbox(&db).unwrap().remove(0);
@@ -210,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn a_kit_that_panics_fails_the_message_not_delivery() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
-        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: true }), db: db.clone(), platform };
+        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: true }), db: db.clone(), platform, serving: Serving::default() };
         try_one(&to, sent(&db)).await.unwrap();
         let w = tx::outbox(&db).unwrap().remove(0);
         assert!(w.error.as_deref().is_some_and(|e| e.starts_with("the kit crashed")), "{:?}", w.error);

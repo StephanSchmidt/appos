@@ -15,18 +15,25 @@
 //! code runs: kits never check permissions themselves, and they never see
 //! the linker they could get around it with.
 //!
-//! A function is a query or a command. A query answers now and only reads
-//! (`KitLinker::func`). A command returns nothing and runs after the
-//! request commits (`KitLinker::command`): the commit puts it in the
-//! outbox, and `Kit::run` gets it from there (outbox.rs). An interface
-//! is one kit's, a package may be split across kits: kv and users are two
-//! kits of appos:framework, so kv can be swapped as a whole.
+//! A function answers now (`KitLinker::func`) or is a command
+//! (`KitLinker::command`). A function may write the kit's own data, but
+//! the request can still fail or run again after the call, so a write
+//! there must be harmless to repeat: set a draft's field, don't add a
+//! line. A command returns nothing and runs once the request commits: the
+//! commit puts it in the outbox, and `Kit::run` gets it from there
+//! (outbox.rs). An interface is one kit's, a package may be split across
+//! kits: kv and users are two kits of appos:framework, so kv can be
+//! swapped as a whole.
 //!
-//! Every function, and `run`, gets a `Context`, like Go's
+//! Kits have pages too, like apps (`Kit::routes`): below names of their
+//! own, in the shell's layout. Each names the grant the person needs, and
+//! AppOS checks the policy before the page's code runs.
+//!
+//! Every function, page and `run` gets a `Context`, like Go's
 //! context.Context: the app, the signed-in user, the page and the
 //! deadline. AppOS builds it, never the caller, so a kit can trust it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -38,6 +45,7 @@ use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 
 use crate::runtime::{Ctx, FRAMEWORK, MAX_VALUE, READ, WRITE};
+use crate::state::Serving;
 
 /// What kit functions take and return: tuples of these, and records that
 /// derive them.
@@ -68,6 +76,7 @@ pub(crate) struct About {
     /// The app's grants the policy lets this user use, at the call (or
     /// for a command, at the commit).
     pub may: Vec<String>,
+    pub serving: Serving,
 }
 
 impl Context {
@@ -80,7 +89,8 @@ impl Context {
         Sent { user: self.0.user.clone(), may: self.0.may.clone() }
     }
 
-    /// The app that called, or sent the command.
+    /// The app that called, or sent the command; for a kit's page, the
+    /// name it is at ("booking" for /booking/...).
     pub fn app(&self) -> &str {
         &self.0.app
     }
@@ -111,6 +121,12 @@ impl Context {
     /// show or choose, never to guard. AppOS checks every call itself.
     pub fn may(&self, grant: &str) -> bool {
         self.0.may.iter().any(|g| g == grant)
+    }
+
+    /// Whether an app serves now: deployed and on. To send people to
+    /// another page while it doesn't.
+    pub fn serves(&self, app: &str) -> bool {
+        self.0.serving.serves(app)
     }
 }
 
@@ -195,6 +211,166 @@ pub trait Kit: Send + Sync + 'static {
         let _ = cx;
         Box::pin(async move { anyhow::bail!("{} is no command of this kit", msg.function) })
     }
+    /// Its pages, like an app's routes. Each path starts with a name of
+    /// the kit's own, which no app can take: "/booking/:draft".
+    fn routes(&self) -> Vec<KitRoute> {
+        vec![]
+    }
+}
+
+/// What a path's ":name" segments took, by name.
+pub type Params = Vec<(String, String)>;
+
+/// What a kit's page answers.
+pub type Respond = Pin<Box<dyn Future<Output = anyhow::Result<Reply>> + Send + 'static>>;
+type Handler = Arc<dyn Fn(Context, KitRequest) -> Respond + Send + Sync>;
+
+/// A page of a kit, like an app's route. The first segment of its path is
+/// where it is in policy.csv, as an app's id is: `p, anyone, booking,
+/// booking-read` lets anyone open the pages at /booking/... that need
+/// booking-read.
+#[derive(Clone)]
+pub struct KitRoute {
+    method: String,
+    path: String,
+    segments: Vec<String>,
+    grant: String,
+    handler: Handler,
+}
+
+impl KitRoute {
+    /// GET `path`, like "/booking/:draft", where ":draft" takes any one
+    /// segment. The person needs `grant`, one of the kit's.
+    pub fn get(path: &str, grant: &str, f: impl Fn(Context, KitRequest) -> Respond + Send + Sync + 'static) -> KitRoute {
+        KitRoute::new("GET", path, grant, Arc::new(f))
+    }
+
+    /// POST `path`: a form sent to it, as `KitRequest::form`.
+    pub fn post(path: &str, grant: &str, f: impl Fn(Context, KitRequest) -> Respond + Send + Sync + 'static) -> KitRoute {
+        KitRoute::new("POST", path, grant, Arc::new(f))
+    }
+
+    fn new(method: &str, path: &str, grant: &str, handler: Handler) -> KitRoute {
+        let segments = path.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect();
+        KitRoute { method: method.into(), path: path.into(), segments, grant: grant.into(), handler }
+    }
+
+    /// The grant the person needs.
+    pub fn grant(&self) -> &str {
+        &self.grant
+    }
+
+    /// Like "GET /booking/:draft".
+    pub fn pattern(&self) -> String {
+        format!("{} {}", self.method, self.path)
+    }
+
+    /// The name it is at: the path's first segment.
+    pub(crate) fn name(&self) -> &str {
+        self.segments.first().map_or("", String::as_str)
+    }
+
+    pub(crate) fn respond(&self, cx: Context, req: KitRequest) -> Respond {
+        (self.handler)(cx, req)
+    }
+
+    /// Its params, if it takes this path.
+    fn matches(&self, method: &str, path: &[&str]) -> Option<Params> {
+        if self.method != method || self.segments.len() != path.len() {
+            return None;
+        }
+        let mut params = Vec::new();
+        for (pattern, actual) in self.segments.iter().zip(path) {
+            match pattern.strip_prefix(':') {
+                Some(name) => params.push((name.to_string(), actual.to_string())),
+                None if pattern == actual => {}
+                None => return None,
+            }
+        }
+        Some(params)
+    }
+}
+
+/// A request to a kit's page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KitRequest {
+    pub method: String,
+    /// The whole path, like "/booking/k3x9".
+    pub path: String,
+    /// What the path's ":name" segments took.
+    pub params: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub form: Vec<(String, String)>,
+    /// Where the site is, like "https://apps.acme.com".
+    pub origin: String,
+    /// Sent by htmx: answer with what it swaps.
+    pub htmx: bool,
+}
+
+impl KitRequest {
+    /// A ":name" segment of the path.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        first(&self.params, name)
+    }
+
+    /// A value of the query string.
+    pub fn query_value(&self, name: &str) -> Option<&str> {
+        first(&self.query, name)
+    }
+
+    /// A field of the form; for several of one name, `form`.
+    pub fn form_value(&self, name: &str) -> Option<&str> {
+        first(&self.form, name)
+    }
+}
+
+fn first<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+}
+
+/// What a kit's page answers: a page in the shell's layout, or where the
+/// browser goes next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub(crate) status: u16,
+    pub(crate) title: String,
+    pub(crate) head: Vec<String>,
+    /// (name, html); "page" is the whole page.
+    pub(crate) html: Vec<(String, String)>,
+    pub(crate) redirect: Option<String>,
+}
+
+impl Reply {
+    /// `html` in the shell's layout, titled `title`. HTML from an Askama
+    /// template, as apps make theirs: it escapes what people typed.
+    pub fn page(title: &str, html: impl Into<String>) -> Reply {
+        Reply { status: 200, title: title.into(), head: vec![], html: vec![("page".into(), html.into())], redirect: None }
+    }
+
+    /// Sends the browser to `to`, a path on this site: a 303, which htmx
+    /// follows too.
+    pub fn redirect(to: &str) -> Reply {
+        Reply { status: 303, title: String::new(), head: vec![], html: vec![], redirect: Some(to.into()) }
+    }
+
+    /// Another status than 200: 422 for a form with mistakes, which htmx
+    /// swaps like 200.
+    pub fn status(mut self, status: u16) -> Reply {
+        self.status = status;
+        self
+    }
+
+    /// HTML for <head>, like a <style>.
+    pub fn head(mut self, html: impl Into<String>) -> Reply {
+        self.head.push(html.into());
+        self
+    }
+
+    /// For htmx requests: HTML swapped into the element with this id.
+    pub fn swap(mut self, id: &str, html: impl Into<String>) -> Reply {
+        self.html.push((id.into(), html.into()));
+        self
+    }
 }
 
 /// A command, delivered to its kit after the sender's commit.
@@ -217,21 +393,30 @@ impl Message {
     }
 
     /// The message and its context, `time` to run.
-    pub(crate) fn of(w: crate::tx::Waiting, time: Duration) -> (Context, Message) {
+    pub(crate) fn of(w: crate::tx::Waiting, time: Duration, serving: Serving) -> (Context, Message) {
         let sent: Sent = serde_json::from_str(&w.about).unwrap_or_default();
-        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may };
+        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may, serving };
         (Context::new(about), Message { id: w.id, function: w.function, attempts: w.attempts, args: w.args })
     }
 }
 
+#[derive(Clone)]
 struct Registered {
     kit: Arc<dyn Kit>,
     grants: Vec<Grant>,
+    routes: Vec<KitRoute>,
+    /// Every interface of its WIT, as apps import it:
+    /// "acme:crm/leads@1.0.0". Filled in by `Kits::checked`.
+    imports: Vec<String>,
     /// One of the shell's own, which may offer appos:framework.
     builtin: bool,
 }
 
 impl Registered {
+    fn new(kit: Arc<dyn Kit>, builtin: bool) -> Registered {
+        Registered { grants: kit.grants(), routes: kit.routes(), kit, imports: vec![], builtin }
+    }
+
     /// The interfaces its grants' functions are in, like "acme:crm/leads".
     fn interfaces(&self) -> BTreeSet<&str> {
         self.grants.iter().flat_map(|g| &g.functions).map(|f| interface_of(f)).collect()
@@ -248,20 +433,71 @@ impl Default for Kits {
     }
 }
 
+/// A kit's WIT file, read: its package ("acme:crm"), version and
+/// interfaces.
+fn read_wit(file: &str, text: &str) -> anyhow::Result<(String, Option<String>, Vec<String>)> {
+    let read = wit_parser::UnresolvedPackageGroup::parse(file, text).map_err(|(map, e)| anyhow::anyhow!("kit WIT {file}: {}", e.render(&map)))?;
+    let name = read.main.name;
+    let interfaces = read.main.interfaces.iter().filter_map(|(_, i)| i.name.clone()).collect();
+    Ok((format!("{}:{}", name.namespace, name.name), name.version.map(|v| v.to_string()), interfaces))
+}
+
+/// The kits' WIT packages ("acme:crm"), read and checked. A package may be
+/// split across kits, with one version.
+fn packages(all: &[Registered]) -> anyhow::Result<BTreeMap<String, Package>> {
+    let mut packages: BTreeMap<String, Package> = BTreeMap::new();
+    for r in all.iter().filter(|r| !r.builtin) {
+        for (file, text) in r.kit.wit() {
+            let (package, version, interfaces) = read_wit(&file, &text)?;
+            let p = packages.entry(package.clone()).or_insert_with(|| Package { version: version.clone(), files: vec![], interfaces: BTreeSet::new() });
+            anyhow::ensure!(p.version == version, "kit WIT {file}: {package} in two versions");
+            p.interfaces.extend(interfaces);
+            p.files.push((file, text));
+        }
+    }
+    for r in all.iter().filter(|r| !r.builtin) {
+        for interface in r.interfaces() {
+            let (package, name) = interface.split_once('/').unwrap_or((interface, ""));
+            anyhow::ensure!(packages.get(package).is_some_and(|p| p.interfaces.contains(name)), "a grant names {interface}, which no kit's WIT has");
+        }
+    }
+    Ok(packages)
+}
+
+/// The kits' pages: each path starts with a name, the kit's own; no two
+/// pages of one kit are the same; each needs one of the kit's grants.
+fn check_routes(all: &[Registered]) -> anyhow::Result<()> {
+    let mut names: HashMap<&str, usize> = HashMap::new();
+    for (n, r) in all.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for route in &r.routes {
+            let pattern = route.pattern();
+            let name = route.name();
+            anyhow::ensure!(route.path.starts_with('/'), "page {pattern}: the path starts with /");
+            crate::manifest::validate_app_id(name).map_err(|e| anyhow::anyhow!("page {pattern}: it must start with a name: {e}"))?;
+            anyhow::ensure!(r.grants.iter().any(|g| g.name == route.grant), "page {pattern}: {} is none of the kit's grants", route.grant);
+            anyhow::ensure!(
+                seen.insert((route.method.as_str(), route.segments.iter().map(|s| if s.starts_with(':') { ":" } else { s }).collect::<Vec<_>>())),
+                "page {pattern} twice"
+            );
+            anyhow::ensure!(*names.entry(name).or_insert(n) == n, "two kits have pages at /{name}");
+        }
+    }
+    Ok(())
+}
+
 impl Kits {
     /// The kits every platform has: the shell's own, kv and the user.
     pub fn builtin() -> Kits {
-        let own = |kit: Arc<dyn Kit>| Registered { grants: kit.grants(), kit, builtin: true };
-        Kits(Arc::new(vec![own(Arc::new(Kv)), own(Arc::new(Users))])).checked().expect("the built-in kits are valid")
+        Kits::checked(vec![Registered::new(Arc::new(Kv), true), Registered::new(Arc::new(Users), true)]).expect("the built-in kits are valid")
     }
 
-    /// With one kit more. Grant names, functions and interfaces are each
-    /// one kit's.
+    /// With one kit more. Grant names, functions, interfaces and the names
+    /// pages are at are each one kit's.
     pub fn with(self, kit: impl Kit) -> anyhow::Result<Kits> {
-        let copy = |r: &Registered| Registered { kit: r.kit.clone(), grants: r.grants.clone(), builtin: r.builtin };
-        let mut all = Arc::try_unwrap(self.0).unwrap_or_else(|shared| shared.iter().map(copy).collect());
-        all.push(Registered { grants: kit.grants(), kit: Arc::new(kit), builtin: false });
-        Kits(Arc::new(all)).checked()
+        let mut all = Arc::try_unwrap(self.0).unwrap_or_else(|shared| shared.to_vec());
+        all.push(Registered::new(Arc::new(kit), false));
+        Kits::checked(all)
     }
 
     /// The WIT apps build against, by path below an app's wit/: appos.wit,
@@ -269,7 +505,7 @@ impl Kits {
     /// kit's package under deps/. An app imports only what it calls, so it
     /// needs only those grants.
     pub fn contract(&self) -> BTreeMap<String, String> {
-        let packages = self.packages().expect("checked when the kits were added");
+        let packages = packages(&self.0).expect("checked when the kits were added");
         let mut imports = String::new();
         for r in self.0.iter().filter(|r| !r.builtin) {
             for interface in r.interfaces() {
@@ -288,34 +524,10 @@ impl Kits {
         wit
     }
 
-    /// The kits' WIT packages ("acme:crm"), read and checked. A package may
-    /// be split across kits, with one version.
-    fn packages(&self) -> anyhow::Result<BTreeMap<String, Package>> {
-        let mut packages: BTreeMap<String, Package> = BTreeMap::new();
-        for r in self.0.iter().filter(|r| !r.builtin) {
-            for (file, text) in r.kit.wit() {
-                let read = wit_parser::UnresolvedPackageGroup::parse(&file, &text).map_err(|(map, e)| anyhow::anyhow!("kit WIT {file}: {}", e.render(&map)))?;
-                let name = read.main.name;
-                let (package, version) = (format!("{}:{}", name.namespace, name.name), name.version.map(|v| v.to_string()));
-                let p = packages.entry(package.clone()).or_insert_with(|| Package { version: version.clone(), files: vec![], interfaces: BTreeSet::new() });
-                anyhow::ensure!(p.version == version, "kit WIT {file}: {package} in two versions");
-                p.interfaces.extend(read.main.interfaces.iter().filter_map(|(_, i)| i.name.clone()));
-                p.files.push((file, text));
-            }
-        }
-        for r in self.0.iter().filter(|r| !r.builtin) {
-            for interface in r.interfaces() {
-                let (package, name) = interface.split_once('/').unwrap_or((interface, ""));
-                anyhow::ensure!(packages.get(package).is_some_and(|p| p.interfaces.contains(name)), "a grant names {interface}, which no kit's WIT has");
-            }
-        }
-        Ok(packages)
-    }
-
-    fn checked(self) -> anyhow::Result<Kits> {
+    fn checked(mut all: Vec<Registered>) -> anyhow::Result<Kits> {
         let (mut names, mut functions, mut files) = (HashSet::new(), HashSet::new(), HashSet::from(["appos.wit".to_string()]));
         let mut interfaces = HashSet::new();
-        for r in self.0.iter() {
+        for r in all.iter() {
             for (file, _) in r.kit.wit() {
                 anyhow::ensure!(
                     file.ends_with(".wit") && !file.contains(['/', '\\']) && files.insert(file.clone()),
@@ -342,8 +554,30 @@ impl Kits {
                 anyhow::ensure!(interfaces.insert(i), "two kits offer {i}");
             }
         }
-        self.packages()?;
-        Ok(self)
+        packages(&all)?;
+        check_routes(&all)?;
+        for r in all.iter_mut().filter(|r| !r.builtin) {
+            let mut imports = vec![];
+            for (file, text) in r.kit.wit() {
+                let (package, version, names) = read_wit(&file, &text)?;
+                let version = version.map(|v| format!("@{v}")).unwrap_or_default();
+                imports.extend(names.iter().map(|i| format!("{package}/{i}{version}")));
+            }
+            r.imports = imports;
+        }
+        Ok(Kits(Arc::new(all)))
+    }
+
+    /// The names the kits' pages are at, like "booking": no app can have
+    /// one as its id.
+    pub fn page_names(&self) -> BTreeSet<&str> {
+        self.0.iter().flat_map(|r| &r.routes).map(KitRoute::name).collect()
+    }
+
+    /// The kit's page for a request: the route, what its params took and
+    /// the kit's grants. `path` is split at '/', decoded.
+    pub(crate) fn page(&self, method: &str, path: &[&str]) -> Option<(&KitRoute, Params, &[Grant])> {
+        self.0.iter().find_map(|r| r.routes.iter().find_map(|route| Some((route, route.matches(method, path)?, r.grants.as_slice()))))
     }
 
     /// Every grant, in the order the kits offer them.
@@ -371,6 +605,12 @@ impl Kits {
         self.grants().any(|g| g.functions.iter().any(|f| f.starts_with(&prefix)))
     }
 
+    /// Whether a kit's WIT has this interface ("acme:crm/types", no
+    /// version), with functions or types alone.
+    pub fn knows(&self, interface: &str) -> bool {
+        self.0.iter().flat_map(|r| &r.imports).any(|i| i.split('@').next() == Some(interface))
+    }
+
     /// The grant that allows a function of an interface.
     pub fn grant_for(&self, interface: &str, function: &str) -> Option<&Grant> {
         let f = format!("{interface}#{function}");
@@ -389,6 +629,12 @@ impl Kits {
         for r in self.0.iter() {
             if r.grants.iter().any(|g| held.contains(&g.name)) {
                 r.kit.link(&mut KitLinker { linker, grants: &r.grants, held })?;
+            }
+            // An app imports an interface for its types alone when another
+            // uses them (`use flow.{draft}`): it is there, with no
+            // functions the app may not call.
+            for interface in &r.imports {
+                linker.instance(interface)?;
             }
         }
         Ok(())
@@ -420,10 +666,12 @@ impl KitLinker<'_> {
         Ok(Some(Checked { what: format!("{short}::{function}"), grant: grant.name.clone(), bit: bit as u32, cost: grant.cost, name }))
     }
 
-    /// Links a query: it answers now and only reads. `interface` is as
-    /// apps import it, with its version: "acme:crm/leads@1.0.0". AppOS
-    /// checks the grant, the policy and the budget, then calls `f` with
-    /// the call's context.
+    /// Links a function that answers now. `interface` is as apps import
+    /// it, with its version: "acme:crm/leads@1.0.0". AppOS checks the
+    /// grant, the policy and the budget, then calls `f` with the call's
+    /// context. It may write the kit's data; the request can fail or run
+    /// again after it, so make such a write harmless to repeat. What must
+    /// happen once is a command.
     pub fn func<P, R, F>(&mut self, interface: &str, function: &str, f: F) -> anyhow::Result<()>
     where
         P: ComponentNamedList + Lift + Send + 'static,
@@ -578,7 +826,7 @@ mod tests {
         fn wit(&self) -> Vec<(String, String)> {
             vec![(
                 "crm.wit".into(),
-                "package acme:crm@1.0.0;\ninterface leads { count-leads: func(source: string) -> u32; add-lead: func(source: string); }\n".into(),
+                "package acme:crm@1.0.0;\ninterface types { record lead { source: string } }\ninterface leads { count-leads: func(source: string) -> u32; add-lead: func(source: string); }\n".into(),
             )]
         }
 
@@ -643,7 +891,7 @@ mod tests {
             htmx: false,
             now: "2026-11-18T12:00:00Z".into(),
         };
-        runtime::call(app, handler, &req, Budget::of(&app.manifest, AdminLimits::default()), access, user).await
+        runtime::call(app, handler, &req, Budget::of(&app.manifest, AdminLimits::default()), access, user, Serving::default()).await
     }
 
     #[tokio::test]
@@ -684,7 +932,7 @@ mod tests {
             [("test", "acme:crm/leads#add-lead", r#"["web"]"#), ("test", "acme:crm/leads#add-lead", r#"["ads"]"#)]
         );
 
-        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), &kits).wake();
+        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), &kits, Serving::default()).wake();
         for _ in 0..200 {
             if crate::tx::outbox(&db).unwrap().is_empty() {
                 break;
@@ -832,6 +1080,67 @@ mod tests {
         let world = resolve.select_world(&[package], Some("app")).unwrap();
         let imported: Vec<String> = resolve.worlds[world].imports.keys().map(|k| resolve.name_world_key(k)).collect();
         assert!(imported.contains(&"acme:b/y@2.1.0".to_string()), "{imported:?}");
+    }
+
+    /// A kit with the pages given, and the grant desk-read.
+    struct Pages(Vec<KitRoute>);
+
+    impl Kit for Pages {
+        fn wit(&self) -> Vec<(String, String)> {
+            vec![("desk.wit".into(), "package acme:desk;\ninterface d { f: func(); }\n".into())]
+        }
+        fn grants(&self) -> Vec<Grant> {
+            vec![Grant::new("desk-read", "", &["acme:desk/d#f"], 1)]
+        }
+        fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn routes(&self) -> Vec<KitRoute> {
+            self.0.clone()
+        }
+    }
+
+    fn page(path: &str, grant: &str) -> KitRoute {
+        KitRoute::get(path, grant, |_, _| Box::pin(async move { Ok(Reply::page("Desk", "")) }))
+    }
+
+    #[test]
+    fn a_kits_pages_are_at_names_of_its_own() {
+        let kits = Kits::builtin().with(Pages(vec![page("/desk", "desk-read"), page("/desk/:id", "desk-read"), page("/front", "desk-read")])).unwrap();
+        assert_eq!(kits.page_names().into_iter().collect::<Vec<_>>(), ["desk", "front"]);
+        let (route, params, _) = kits.page("GET", &["desk", "7"]).unwrap();
+        assert_eq!((route.pattern(), params), ("GET /desk/:id".to_string(), vec![("id".to_string(), "7".to_string())]));
+        assert!(kits.page("POST", &["desk", "7"]).is_none() && kits.page("GET", &["desk", "7", "x"]).is_none());
+
+        for (path, grant, why) in [
+            ("desk", "desk-read", "starts with /"),
+            ("/:id", "desk-read", "must start with a name"),
+            ("/", "desk-read", "must start with a name"),
+            ("/admin/x", "desk-read", "reserved"),
+            ("/desk", "kv-read", "kv-read is none of the kit's grants"),
+        ] {
+            let err = Kits::builtin().with(Pages(vec![page(path, grant)])).err().unwrap().to_string();
+            assert!(err.contains(why), "{path}: {err}");
+        }
+        let err = Kits::builtin().with(Pages(vec![page("/desk/:id", "desk-read"), page("/desk/:other", "desk-read")])).err().unwrap().to_string();
+        assert!(err.contains("page GET /desk/:other twice"), "{err}");
+        struct Other;
+        impl Kit for Other {
+            fn wit(&self) -> Vec<(String, String)> {
+                vec![("front.wit".into(), "package acme:front;\ninterface f { g: func(); }\n".into())]
+            }
+            fn grants(&self) -> Vec<Grant> {
+                vec![Grant::new("front-read", "", &["acme:front/f#g"], 1)]
+            }
+            fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn routes(&self) -> Vec<KitRoute> {
+                vec![page("/front/x", "front-read")]
+            }
+        }
+        let err = kits.with(Other).err().unwrap().to_string();
+        assert!(err.contains("two kits have pages at /front"), "{err}");
     }
 
     #[test]

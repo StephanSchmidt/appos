@@ -1,6 +1,8 @@
 ;; A test app that calls a platform's kit: GET / asks acme:crm's
 ;; count-leads("web") (grant leads-read) and shows "seven" when the kit
-;; answers 7, "other" when not. For the kit tests (kit.rs).
+;; answers 7, "other" when not. It imports acme:crm/types for a type
+;; alone, as apps do when an interface uses another's types. For the kit
+;; tests (kit.rs).
 (component
   (type $pairs (list (tuple string string)))
   (type $request (record
@@ -11,6 +13,9 @@
     (export "add-route" (func (param "method" string) (param "path" string) (param "handler" string)))))
   (import "appos:framework/page@0.1.0" (instance $page
     (export "set-html" (func (param "name" string) (param "html" string)))))
+  (import "acme:crm/types@1.0.0" (instance $types
+    (type $record (record (field "source" string)))
+    (export "lead" (type (eq $record)))))
   (import "acme:crm/leads@1.0.0" (instance $leads
     (export "count-leads" (func (param "source" string) (result u32)))))
   (alias export $registry "add-route" (func $route))

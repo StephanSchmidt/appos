@@ -115,13 +115,17 @@ impl Platform {
 
     /// The platform's binary: `appos-shell`'s command line with this
     /// platform's kits. `--contract` prints the WIT apps build against
-    /// (`appos sync --shell`), `--dev APP` serves one app as `appos dev`
+    /// (`appos sync --shell`), `--dev APP...` serves apps as `appos dev`
     /// does (`appos dev --shell`). Exits on an error.
     pub async fn main(self) {
         let result = async {
             let kits = self.kits?;
             match args::parse(std::env::args().skip(1))? {
                 args::Run::Serve(opts) => serve_with(*opts, kits).await,
+                args::Run::Dev(mut opts) => {
+                    opts.reload = Some(args::stdin_reloads());
+                    serve_with(*opts, kits).await
+                }
                 args::Run::Contract => {
                     crate::terminal_println!("{}", serde_json::to_string_pretty(&kits.contract())?);
                     Ok(())
