@@ -5,14 +5,14 @@
 //! list with the version. `appos audit` matches the lists of the live apps
 //! against OSV (https://osv.dev), which publishes the advisories of an
 //! ecosystem as one zip: for crates.io RustSec's, GitHub's and the known
-//! malicious crates.
+//! malicious crates, for npm GitHub's and the known malicious packages.
 //!
 //!   mod.rs        deps.json and the package URLs in it, of any ecosystem
 //!   ecosystem.rs  the ecosystems matched: package URL type, OSV's name
 //!   osv.rs        the advisories, and which of them affect a package
 //!
-//! Matching another ecosystem, like npm for TypeScript apps, is a line in
-//! ecosystem.rs; the CLI lists its packages (cli/src/deps).
+//! Matching another ecosystem is a line in ecosystem.rs; the CLI lists its
+//! packages (cli/src/deps).
 //!
 //! It finds accidents, not intent. An app that means harm doesn't need a
 //! vulnerable package; the sandbox and the grants hold it either way.
@@ -20,13 +20,14 @@
 mod ecosystem;
 mod osv;
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 pub use ecosystem::{ECOSYSTEMS, Ecosystem};
-pub use osv::{Advisories, Finding, Kind};
+pub use osv::{Advisories, Finding, Kind, MAX_ADVISORY};
 
 /// The packages in app.zip.
 pub const FILE: &str = "deps.json";
@@ -95,6 +96,28 @@ impl<'a> Purl<'a> {
         }
         Ok(Purl { kind, name, version })
     }
+
+    /// The package's name as its ecosystem writes it: a package URL
+    /// percent-encodes, so npm's @scope/name is %40scope/name.
+    pub fn package(&self) -> Cow<'a, str> {
+        let bytes = self.name.as_bytes();
+        if !bytes.contains(&b'%') {
+            return Cow::Borrowed(self.name);
+        }
+        let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if let (b'%', Some(hi), Some(lo)) = (bytes[i], hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +138,16 @@ mod tests {
         assert!(err(&format!("{{\"format\":1,\"packages\":[\"{}\"]}}", " ".repeat(MAX))).contains("more than 256 KB"));
         let p = Purl::parse("pkg:npm/%40scope/name@1.0.0").unwrap();
         assert_eq!((p.kind, p.name, p.version), ("npm", "%40scope/name", "1.0.0"));
+    }
+
+    #[test]
+    fn a_package_url_names_the_package_as_its_ecosystem_does() {
+        let package = |s: &str| Purl::parse(s).unwrap().package().into_owned();
+        assert_eq!(package("pkg:npm/%40noble/hashes@2.4.0"), "@noble/hashes");
+        assert_eq!(package("pkg:npm/%40Noble%2fhashes@2.4.0"), "@Noble/hashes", "either case of hex");
+        assert_eq!(package("pkg:npm/ms@2.1.3"), "ms");
+        assert_eq!(package("pkg:npm/100%25@1.0.0"), "100%");
+        assert_eq!(package("pkg:npm/a%4@1.0.0"), "a%4", "not a percent-encoding: as written");
+        assert_eq!(package("pkg:npm/a%zz%4g@1.0.0"), "a%zz%4g");
     }
 }

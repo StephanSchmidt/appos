@@ -372,7 +372,8 @@ TYPESCRIPT
   else in this guide holds, kv, the limits and the grants included.
   The files that differ from FILES:
   package.json         scriptc, pinned; npm test runs the unit tests
-  tsconfig.json        strict TypeScript; imports end in .ts
+  tsconfig.json        strict TypeScript; imports end in .ts; an import that
+                       brings only types says so (import type)
   src/lib.ts           your app: init() and start(); MODULES lists the modules
   src/hello/           a module: routes (index.ts), handlers (web.ts), pages
                        (view.ts), one usecase per file, IO (db.ts), data and
@@ -574,8 +575,8 @@ const HELP_DEPLOY: &str = "appos deploy [app.zip]
 
 Builds the app in this directory and sends it to the current platform
 (see `appos platforms`) as app.zip: app.toml, the .wasm, icon.svg if
-there is one and, for a Rust app, deps.json: the crates it is built with,
-for `appos audit`. With a file, sends that app.zip instead, as `appos pack`
+there is one and, for a Rust or TypeScript app, deps.json: the packages it
+is built with, for `appos audit`. With a file, sends that app.zip instead, as `appos pack`
 makes it, so an app built elsewhere (CI, another machine) deploys without
 building. The platform checks it as it does at startup and makes it live:
 the next request gets the new version, and the data in kv stays. Prints
@@ -601,8 +602,9 @@ the like) isn't the one of this appos; `appos sync` updates both.
 const HELP_PACK: &str = "appos pack [file]
 
 Builds the app in this directory and writes it as one file, app.zip:
-app.toml, the .wasm, icon.svg if there is one and, for a Rust app,
-deps.json: the crates it is built with, for `appos audit`. Writes
+app.toml, the .wasm, icon.svg if there is one and, for a Rust or
+TypeScript app, deps.json: the packages it is built with, for `appos
+audit`. Writes
 target/app.zip, or the file given. `appos deploy app.zip` sends it to a platform.
 `appos deploy` alone builds, packs and sends in one go; pack is for
 deploying later or from somewhere else.
@@ -683,16 +685,25 @@ vulnerability, and who owns them.
 compiled into the app. For a Rust app, the crates.io crates in its .wasm,
 read from Cargo.lock and the crates' Cargo.toml as cargo resolves them: no
 dev- or build-dependencies, no proc-macros, only what the features and
-wasm32-wasip2 turn on. The platform keeps it with the version. appos
-audit matches the live versions against the advisories OSV publishes for
-their ecosystem (for crates.io: RustSec, GitHub, known malware),
-downloaded at most once an hour into ~/.cache/appos.
+wasm32-wasip2 turn on. For a TypeScript app, the npm packages scriptc
+compiles into it: those bindings/entry.ts imports, theirs and so on, at
+the versions in package-lock.json. A TypeScript file needs
+\"verbatimModuleSyntax\": true in the nearest tsconfig.json above it, if
+there is one; `appos sync` sets it in the app's. Packages from git, a
+tarball or another registry are left out, with a warning; a mirror of the
+npm registry goes in APPOS_NPM_MIRRORS (URLs, separated by spaces).
+
+The platform keeps deps.json with the version. appos audit matches the
+live versions against the advisories OSV publishes for their ecosystem
+(for crates.io: RustSec, GitHub, known malware; for npm: GitHub, known
+malware). It downloads them all once a week into ~/.cache/appos and the
+ones that changed at most once an hour.
 
 For each app: the package, the advisory, and the versions that fix it. Fix
-a crate with `cargo update -p <crate>` (or a newer version in Cargo.toml)
-and `appos deploy`. Unmaintained and unsound crates are warnings. Apps
-without deps.json (TypeScript, Java and Zig apps, or packed by an older
-appos) are listed as not checked.
+a crate with `cargo update -p <crate>` (or a newer version in Cargo.toml),
+an npm package with `npm update <package>`, and `appos deploy`.
+Unmaintained and unsound crates are warnings. Apps without deps.json (Java
+and Zig apps, or packed by an older appos) are listed as not checked.
 
 It finds accidents, not intent: an app that means harm doesn't need a
 vulnerable package. The sandbox and the grants hold every app either way.
@@ -707,7 +718,10 @@ Brings the app in this directory up to date with this appos: writes its
 SDK as src/appos.rs (src/appos.ts in a TypeScript app,
 src/main/java/app/Appos.java in a Java app; a Zig app keeps its own), and
 the contract of the current platform (or the one
-built into appos) into wit/, removing contract files it doesn't have.
+built into appos) into wit/, removing contract files it doesn't have. In
+a TypeScript app it sets \"verbatimModuleSyntax\": true in tsconfig.json,
+which deps.json needs (appos audit --help); an import that brings only
+types is then `import type`, and the build says where one isn't.
 Nothing else changes: change your own code to the new SDK where the build
 says so. `git diff` shows what changed.
 

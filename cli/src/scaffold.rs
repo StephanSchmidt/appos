@@ -247,7 +247,8 @@ pub fn sync() -> anyhow::Result<()> {
 }
 
 /// Writes the SDK and the contract into the app at `dir`; removes contract
-/// files the contract doesn't have. Returns what changed.
+/// files the contract doesn't have; sets a TypeScript app's
+/// verbatimModuleSyntax. Returns what changed.
 fn sync_files(dir: &Path, wit: &BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
     let wit_dir = dir.join("wit");
     if wit_dir.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
@@ -270,6 +271,13 @@ fn sync_files(dir: &Path, wit: &BTreeMap<String, String>) -> anyhow::Result<Vec<
             write(&wit_dir.join(name), text)?;
             changed.push(format!("wit/{name}"));
         }
+    }
+    if Lang::of(dir) == Some(Lang::TypeScript)
+        && let Ok(text) = std::fs::read_to_string(dir.join("tsconfig.json"))
+        && let Some(set) = crate::deps::tsconfig::with_verbatim_module_syntax(&text)?
+    {
+        write(&dir.join("tsconfig.json"), &set)?;
+        changed.push("tsconfig.json (verbatimModuleSyntax)".to_string());
     }
     Ok(changed)
 }
@@ -294,7 +302,8 @@ fn read_wit(dir: &Path) -> BTreeMap<String, String> {
 }
 
 /// What in the app at `dir` isn't what it builds and runs against: the SDK
-/// of this appos, and `wit`, the contract of `source`.
+/// of this appos, `wit`, the contract of `source`, and a TypeScript app's
+/// verbatimModuleSyntax, without which it gets no deps.json.
 fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String> {
     let mut stale = Vec::new();
     if let Some(lang) = Lang::of(dir)
@@ -305,6 +314,12 @@ fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String
     if &read_wit(dir) != wit {
         stale.push(format!("wit/ is not the contract of {source}"));
     }
+    if Lang::of(dir) == Some(Lang::TypeScript)
+        && let Ok(text) = std::fs::read_to_string(dir.join("tsconfig.json"))
+        && crate::deps::tsconfig::sets_verbatim_module_syntax(&text).is_ok_and(|set| !set)
+    {
+        stale.push("tsconfig.json doesn't set verbatimModuleSyntax".to_string());
+    }
     stale
 }
 
@@ -313,7 +328,7 @@ fn stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) -> Vec<String
 pub fn warn_if_stale(dir: &Path, wit: &BTreeMap<String, String>, source: &str) {
     let stale = stale(dir, wit, source);
     if !stale.is_empty() {
-        eprintln!("warning: {}. `appos sync` updates both (and replaces changes made to them).", stale.join(", and "));
+        eprintln!("warning: {}. `appos sync` brings the app up to date (and replaces changes made to the SDK and wit/).", stale.join(", and "));
     }
 }
 
@@ -514,6 +529,30 @@ mod tests {
                 assert!(!app.join(other.sdk_path()).exists(), "{lang:?} got {other:?}'s SDK");
             }
         }
+    }
+
+    #[test]
+    fn sync_sets_verbatim_module_syntax_in_an_older_typescript_app() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("events");
+        write_project(&app, "events", &builtin_wit(), "", "", Lang::TypeScript).unwrap();
+        let tsconfig = app.join("tsconfig.json");
+        let template = std::fs::read_to_string(&tsconfig).unwrap();
+        let older = template.replace("    \"verbatimModuleSyntax\": true,\n", "");
+        assert_ne!(older, template);
+        std::fs::write(&tsconfig, &older).unwrap();
+        assert_eq!(stale(&app, &builtin_wit(), "x"), ["tsconfig.json doesn't set verbatimModuleSyntax"]);
+        assert_eq!(sync_files(&app, &builtin_wit()).unwrap(), ["tsconfig.json (verbatimModuleSyntax)"]);
+        let synced = std::fs::read_to_string(&tsconfig).unwrap();
+        assert!(crate::deps::tsconfig::sets_verbatim_module_syntax(&synced).unwrap(), "{synced}");
+        assert_eq!(synced.lines().count(), template.lines().count(), "one line more, and nothing else");
+        assert!(stale(&app, &builtin_wit(), "x").is_empty());
+        assert!(sync_files(&app, &builtin_wit()).unwrap().is_empty());
+
+        std::fs::write(&tsconfig, "{ broken").unwrap();
+        assert!(sync_files(&app, &builtin_wit()).is_err(), "a tsconfig.json that isn't JSON is the app's to fix");
+        std::fs::remove_file(&tsconfig).unwrap();
+        assert!(sync_files(&app, &builtin_wit()).unwrap().is_empty(), "nor is a missing one sync's to write");
     }
 
     /// The examples are apps like any other: they carry this SDK and this

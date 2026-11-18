@@ -3,6 +3,7 @@
 //! (deps/) and the advisories OSV publishes for each ecosystem.
 
 use std::collections::HashSet;
+use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -14,10 +15,18 @@ use serde::Serialize;
 
 use crate::platform;
 
-/// How long a download of the advisories is used before the next.
+/// How long the advisories are used before the changes since are fetched.
 const FRESH: Duration = Duration::from_secs(60 * 60);
-/// The largest advisories zip of an ecosystem; crates.io's is about 4 MB.
-const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
+/// How long a download of all advisories is kept up to date with the
+/// changes before it is downloaded again: npm has about 1,200 changes a
+/// week.
+const FULL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// The most changes fetched one by one; with more, all advisories are
+/// downloaded again.
+const MAX_CHANGES: usize = 1000;
+/// The largest advisories zip of an ecosystem, or list of changes; npm's
+/// zip is 211 MB, crates.io's 4 MB (2026).
+const MAX_DOWNLOAD: u64 = 1024 * 1024 * 1024;
 
 /// What `--json` prints for each live app.
 #[derive(Serialize)]
@@ -92,7 +101,7 @@ fn print(platform: &str, reports: &[Report], ecosystems: &[&str], advisories: &A
         println!();
         println!("{} {}, {}, {}", r.id, r.version, r.owner, r.group);
         for f in &r.findings {
-            let (name, version) = Purl::parse(&f.package).map_or((f.package.as_str(), ""), |p| (p.name, p.version));
+            let (name, version) = Purl::parse(&f.package).map_or((f.package.as_str().into(), ""), |p| (p.package(), p.version));
             println!("  {name} {version}  {}  {}", f.kind, f.id);
             println!("    {}", f.summary);
             let fix = match f.fixed.as_slice() {
@@ -132,14 +141,93 @@ fn ago(age: Duration) -> String {
     }
 }
 
-/// Where downloads of an ecosystem's advisories are kept:
-/// $XDG_CACHE_HOME/appos, or ~/.cache/appos.
-fn cache(e: &Ecosystem) -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        home.join(".cache")
-    });
-    base.join(format!("appos/osv-{}.zip", e.osv))
+/// Where an ecosystem's advisories are kept, in $XDG_CACHE_HOME/appos or
+/// ~/.cache/appos: all of them as OSV's zip, the ones that changed since
+/// as their own files, and when the newest change fetched was made.
+struct Cache {
+    zip: PathBuf,
+    changed: PathBuf,
+    since: PathBuf,
+}
+
+impl Cache {
+    fn of(e: &Ecosystem) -> Cache {
+        let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            home.join(".cache")
+        });
+        Cache::in_dir(&base.join("appos"), e)
+    }
+
+    fn in_dir(dir: &Path, e: &Ecosystem) -> Cache {
+        Cache {
+            zip: dir.join(format!("osv-{}.zip", e.osv)),
+            changed: dir.join(format!("osv-{}.changed", e.osv)),
+            since: dir.join(format!("osv-{}.since", e.osv)),
+        }
+    }
+
+    /// The advisories kept: the zip, with the changed ones in place of
+    /// theirs.
+    fn load(&self) -> anyhow::Result<Advisories> {
+        let mut changed = vec![];
+        for entry in std::fs::read_dir(&self.changed).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(id) = name.strip_suffix(".json") {
+                changed.push((id.to_string(), read_at_most(&entry.path(), deps::MAX_ADVISORY as u64 + 1)?));
+            }
+        }
+        let ids: HashSet<String> = changed.iter().map(|(id, _)| id.clone()).collect();
+        let zip = read_at_most(&self.zip, MAX_DOWNLOAD)?;
+        if zip.len() as u64 > MAX_DOWNLOAD {
+            anyhow::bail!("{} is larger than {} MB", self.zip.display(), MAX_DOWNLOAD >> 20);
+        }
+        let mut advisories = Advisories::from_zip_except(&zip, &ids)?;
+        for (_, json) in changed {
+            if json.len() > deps::MAX_ADVISORY || advisories.add(&json).is_err() {
+                advisories.unreadable += 1;
+            }
+        }
+        Ok(advisories)
+    }
+
+    /// When the newest change fetched was made.
+    fn since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let text = std::fs::read_to_string(&self.since).ok()?;
+        chrono::DateTime::parse_from_rfc3339(text.trim()).ok().map(|t| t.to_utc())
+    }
+
+    /// Keeps a download of all advisories, made `newest`, and drops the
+    /// changes kept from the last.
+    fn keep_all(&self, zip: &[u8], newest: Option<chrono::DateTime<chrono::Utc>>) -> anyhow::Result<()> {
+        keep(&self.zip, zip)?;
+        match std::fs::remove_dir_all(&self.changed) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        // A zip is written while advisories change: one changed in its last
+        // hour may be in it as it was, so those are fetched again.
+        match newest {
+            Some(newest) => keep(&self.since, (newest - chrono::Duration::hours(1)).to_rfc3339().as_bytes()),
+            None => match std::fs::remove_file(&self.since) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+/// A file's first `limit` bytes and one more, so a longer file shows.
+fn read_at_most(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path)?, limit + 1), &mut bytes)?;
+    Ok(bytes)
+}
+
+/// How long ago a file was written.
+fn age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(SystemTime::now().duration_since(modified).unwrap_or_default())
 }
 
 /// OSV's advisories for these ecosystems, and how old the oldest are.
@@ -154,25 +242,28 @@ fn advisories(ecosystems: &[&Ecosystem]) -> anyhow::Result<(Advisories, Duration
     Ok((all, oldest))
 }
 
-/// OSV's advisories for an ecosystem and how old they are: downloaded at
-/// most once an hour; without a connection, the last download, with a
-/// warning.
+/// OSV's advisories for an ecosystem and how old they are: all of them
+/// downloaded once a week, the changes since fetched at most once an hour;
+/// without a connection, those kept, with a warning.
 fn ecosystem_advisories(e: &Ecosystem) -> anyhow::Result<(Advisories, Duration)> {
-    let path = cache(e);
-    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().map(|t| SystemTime::now().duration_since(t).unwrap_or_default());
-    if let Some(age) = age.filter(|a| *a < FRESH)
-        && let Ok(advisories) = cached(&path)
+    let cache = Cache::of(e);
+    let checked = age(&cache.since);
+    if let Some(age) = checked.filter(|a| *a < FRESH)
+        && let Ok(advisories) = cache.load()
     {
         return Ok((advisories, age));
     }
-    match download(e) {
-        Ok((advisories, bytes)) => {
-            if let Err(e) = keep(&path, &bytes) {
-                eprintln!("warning: could not keep the advisories in {}: {e:#}", path.display());
-            }
-            Ok((advisories, Duration::ZERO))
-        }
-        Err(err) => match age.map(|age| (age, cached(&path))) {
+    let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(300))).build());
+    let fetched = match age(&cache.zip) {
+        Some(age) if age < FULL => fetch_changes(&agent, e, &cache).and_then(|changed| match changed {
+            Some(advisories) => Ok(advisories),
+            None => download(&agent, e, &cache),
+        }),
+        _ => download(&agent, e, &cache),
+    };
+    match fetched {
+        Ok(advisories) => Ok((advisories, Duration::ZERO)),
+        Err(err) => match checked.map(|age| (age, cache.load())) {
             Some((age, Ok(advisories))) => {
                 eprintln!("warning: could not download the advisories for {} ({err:#}); using those{}", e.osv, ago(age));
                 Ok((advisories, age))
@@ -182,23 +273,83 @@ fn ecosystem_advisories(e: &Ecosystem) -> anyhow::Result<(Advisories, Duration)>
     }
 }
 
-fn cached(path: &Path) -> anyhow::Result<Advisories> {
-    Advisories::from_zip(&appos_shell::bundle::read_file(path)?)
+/// Fetches the advisories that changed since the last fetch, one by one,
+/// and loads them all; None when that's too many to fetch one by one, or
+/// nothing tells since when.
+fn fetch_changes(agent: &ureq::Agent, e: &Ecosystem, cache: &Cache) -> anyhow::Result<Option<Advisories>> {
+    let Some(since) = cache.since() else { return Ok(None) };
+    let url = e.changes();
+    let mut resp = agent.get(&url).call().with_context(|| format!("could not download {url}"))?;
+    let lines = std::io::BufReader::new(resp.body_mut().with_config().limit(MAX_DOWNLOAD).reader()).lines();
+    let Some(changes) = changed_since(lines, since).with_context(|| format!("could not download {url}"))? else { return Ok(None) };
+    if !changes.odd.is_empty() {
+        eprintln!("warning: {url} names advisories appos doesn't fetch, which are left as they were: {}", changes.odd.join(", "));
+    }
+    for id in changes.ids {
+        let json = get(agent, &e.advisory(&id), deps::MAX_ADVISORY as u64)?;
+        keep(&cache.changed.join(format!("{id}.json")), &json)?;
+    }
+    keep(&cache.since, changes.newest.to_rfc3339().as_bytes())?;
+    cache.load().map(Some)
 }
 
-fn download(e: &Ecosystem) -> anyhow::Result<(Advisories, Vec<u8>)> {
+/// The advisories that changed since a time.
+#[derive(Debug, PartialEq)]
+struct Changes {
+    /// When the newest change was made.
+    newest: chrono::DateTime<chrono::Utc>,
+    ids: Vec<String>,
+    /// Lines that name no file an id can: not fetched.
+    odd: Vec<String>,
+}
+
+/// Of OSV's list of changes (`2026-11-17T17:30:17.9Z,GHSA-…`, newest
+/// first), the advisories that changed after `since`; None with more than
+/// MAX_CHANGES. Times are compared as times: the list can drop a
+/// fraction's trailing zero.
+fn changed_since(lines: impl Iterator<Item = std::io::Result<String>>, since: chrono::DateTime<chrono::Utc>) -> std::io::Result<Option<Changes>> {
+    let mut changes = Changes { newest: since, ids: vec![], odd: vec![] };
+    for line in lines {
+        let line = line?;
+        let Some((at, id)) = line.trim().split_once(',') else { continue };
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(at).map(|t| t.to_utc()) else { continue };
+        if at <= since {
+            break;
+        }
+        if changes.ids.len() + changes.odd.len() == MAX_CHANGES {
+            return Ok(None);
+        }
+        changes.newest = changes.newest.max(at);
+        // An id names a file: only what OSV's ids are made of.
+        if !id.is_empty() && id.len() <= 128 && !id.starts_with('.') && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+            changes.ids.push(id.to_string());
+        } else {
+            changes.odd.push(id.chars().take(128).collect());
+        }
+    }
+    Ok(Some(changes))
+}
+
+/// Downloads all advisories and keeps them.
+fn download(agent: &ureq::Agent, e: &Ecosystem, cache: &Cache) -> anyhow::Result<Advisories> {
     let url = e.advisories();
-    let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(120))).build());
-    let mut resp = agent.get(&url).call().with_context(|| format!("could not download {url}"))?;
-    let bytes = resp.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().with_context(|| format!("could not download {url}"))?;
+    let bytes = get(agent, &url, MAX_DOWNLOAD)?;
     let advisories = Advisories::from_zip(&bytes)?;
     if advisories.is_empty() {
         anyhow::bail!("{url} has no advisories for {}", e.osv);
     }
-    Ok((advisories, bytes))
+    if let Err(err) = cache.keep_all(&bytes, advisories.newest) {
+        eprintln!("warning: could not keep the advisories in {}: {err:#}", cache.zip.display());
+    }
+    Ok(advisories)
 }
 
-/// Writes the download whole or not at all.
+fn get(agent: &ureq::Agent, url: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
+    let mut resp = agent.get(url).call().with_context(|| format!("could not download {url}"))?;
+    resp.body_mut().with_config().limit(limit).read_to_vec().with_context(|| format!("could not download {url}"))
+}
+
+/// Writes a file whole or not at all.
 fn keep(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let dir = path.parent().context("no cache directory")?;
     std::fs::create_dir_all(dir)?;
@@ -226,6 +377,89 @@ mod tests {
         assert_eq!(used(&[app(None), app(Some(&[]))]), Vec::<&Ecosystem>::new(), "no deps.json, nothing to download");
         let rust = app(Some(&["pkg:cargo/serde@1.0.228", "pkg:cargo/itoa@1.0.15"]));
         assert_eq!(used(&[rust, app(Some(&["pkg:golang/x@1.0.0"]))]).iter().map(|e| e.osv).collect::<Vec<_>>(), ["crates.io"], "golang isn't matched");
+    }
+
+    fn time(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc()
+    }
+
+    #[test]
+    fn the_changes_since_the_last_fetch_are_those_newer_up_to_a_limit() {
+        let lines = |text: &str| text.lines().map(|l| Ok(l.to_string())).collect::<Vec<_>>().into_iter();
+        let list = "2026-11-17T17:30:17.901276722Z,MAL-2026-20076\n\
+                    2026-11-13T22:30:20.666251571Z,GHSA-aaaa-bbbb-cccc\n\
+                    2026-11-13T22:30:20.66625157Z,MAL-2026-19828\n\
+                    no time,GHSA-x\n\
+                    2026-11-12T10:00:00Z,../escape\n\
+                    2026-11-12T09:00:00Z,.hidden\n\
+                    2026-11-12T08:00:00Z,a/b\n\
+                    2026-11-12T07:00:00Z,\n\
+                    2026-11-01T00:00:00Z,GHSA-old\n\
+                    2026-11-17T18:00:00Z,GHSA-after-the-mark\n";
+        let changes = changed_since(lines(list), time("2026-11-02T00:00:00Z")).unwrap().unwrap();
+        assert_eq!(changes.newest, time("2026-11-17T17:30:17.901276722Z"));
+        assert_eq!(changes.ids, ["MAL-2026-20076", "GHSA-aaaa-bbbb-cccc", "MAL-2026-19828"], "a dropped zero is no older");
+        assert_eq!(changes.odd, ["../escape", ".hidden", "a/b", ""]);
+
+        let none = changed_since(lines(list), time("2026-11-17T17:30:17.901276722Z")).unwrap().unwrap();
+        assert_eq!((none.newest, none.ids.len(), none.odd.len()), (time("2026-11-17T17:30:17.901276722Z"), 0, 0), "the mark itself is no change");
+
+        let many: String = (0..=MAX_CHANGES).map(|i| format!("2026-11-17T17:00:00Z,GHSA-{i}\n")).collect();
+        assert_eq!(changed_since(lines(&many), time("2026-11-01T00:00:00Z")).unwrap(), None, "too many to fetch one by one");
+        let enough: String = many.lines().take(MAX_CHANGES).map(|l| format!("{l}\n")).collect();
+        assert_eq!(changed_since(lines(&enough), time("2026-11-01T00:00:00Z")).unwrap().unwrap().ids.len(), MAX_CHANGES);
+        let broken = vec![Ok("2026-11-17T17:00:00Z,GHSA-1".to_string()), Err(std::io::Error::other("cut"))].into_iter();
+        assert!(changed_since(broken, time("2026-11-01T00:00:00Z")).is_err(), "a cut download is no list");
+    }
+
+    #[test]
+    fn the_cache_holds_the_zip_with_the_changed_advisories_in_place_of_theirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let npm = deps::ECOSYSTEMS.iter().find(|e| e.osv == "npm").unwrap();
+        let cache = Cache::in_dir(&dir.path().join("appos"), npm);
+        assert!(cache.load().is_err(), "nothing kept");
+        assert_eq!(cache.since(), None);
+        let advisory = |id: &str, name: &str, fixed: &str, modified: &str| {
+            format!(
+                r#"{{"id":"{id}","modified":"{modified}","summary":"{id}","affected":[{{"package":{{"ecosystem":"npm","name":"{name}"}},"ranges":[{{"type":"SEMVER","events":[{{"introduced":"0"}},{{"fixed":"{fixed}"}}]}}]}}]}}"#
+            )
+        };
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(vec![]));
+        for (id, json) in
+            [("GHSA-1", advisory("GHSA-1", "ms", "2.0.0", "2026-11-10T00:00:00Z")), ("GHSA-2", advisory("GHSA-2", "@s/b", "1.0.0", "2026-11-16T12:00:00Z"))]
+        {
+            zip.start_file(format!("{id}.json"), zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zip, json.as_bytes()).unwrap();
+        }
+        let zip = zip.finish().unwrap().into_inner();
+        let all = Advisories::from_zip(&zip).unwrap();
+        assert_eq!(all.newest, Some(time("2026-11-16T12:00:00Z")));
+        std::fs::create_dir_all(&cache.changed).unwrap();
+        std::fs::write(cache.changed.join("stale.json"), "from the last download").unwrap();
+        cache.keep_all(&zip, all.newest).unwrap();
+        assert!(!cache.changed.exists(), "a new download has every change");
+        assert_eq!(cache.since(), Some(time("2026-11-16T11:00:00Z")), "an hour before its newest, which may have been written as it changed");
+        let ids = |a: &Advisories, purl: &str| a.of(purl).into_iter().map(|f| f.id).collect::<Vec<_>>();
+        let loaded = cache.load().unwrap();
+        assert_eq!((ids(&loaded, "pkg:npm/ms@1.0.0"), ids(&loaded, "pkg:npm/%40s/b@0.9.0")), (vec!["GHSA-1".to_string()], vec!["GHSA-2".to_string()]));
+
+        keep(&cache.changed.join("GHSA-1.json"), advisory("GHSA-1", "ms", "0.5.0", "2026-11-17T00:00:00Z").as_bytes()).unwrap();
+        keep(&cache.changed.join("GHSA-3.json"), advisory("GHSA-3", "ms", "3.0.0", "2026-11-17T00:00:00Z").as_bytes()).unwrap();
+        keep(&cache.changed.join("GHSA-4.json"), b"not json").unwrap();
+        keep(&cache.changed.join("GHSA-5.json"), &vec![b' '; deps::MAX_ADVISORY + 1]).unwrap();
+        keep(&cache.changed.join("notes.txt"), b"ignored").unwrap();
+        let loaded = cache.load().unwrap();
+        assert_eq!(ids(&loaded, "pkg:npm/ms@1.0.0"), ["GHSA-3"], "the changed GHSA-1 is fixed in 0.5.0, and GHSA-3 is new");
+        assert_eq!(ids(&loaded, "pkg:npm/%40s/b@0.9.0"), ["GHSA-2"], "unchanged");
+        assert_eq!(loaded.unreadable, 2);
+
+        cache.keep_all(&zip, None).unwrap();
+        assert_eq!(cache.since(), None, "no newest, no mark: the next fetch downloads it all");
+
+        // npm's zip is over 200 MB, more than an app.zip may be.
+        std::fs::write(&cache.zip, vec![0; 65 << 20]).unwrap();
+        let err = format!("{:#}", cache.load().err().unwrap());
+        assert!(err.contains("not a zip file"), "{err}");
     }
 
     #[test]

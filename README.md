@@ -9,8 +9,8 @@ way to automate that check (`appos review` sets it up). WebAssembly
 sandboxes it, and it may do only what its manifest grants and the policy
 lets its users do. Engineering owns the platform and gardens the live
 apps: it sees every app, who owns it, what it may do and how it runs,
-checks its packages for known vulnerabilities (`appos audit`, Rust apps
-for now), and can limit it, roll it back or turn it off.
+checks its packages for known vulnerabilities (`appos audit`, Rust and
+TypeScript apps for now), and can limit it, roll it back or turn it off.
 
 ![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
 
@@ -100,7 +100,7 @@ cd calculator && appos deploy        # http://127.0.0.1:8080/calculator
 ```
 
 An app travels as one file, app.zip: app.toml, the .wasm, icon.svg and,
-for a Rust app, deps.json, the crates compiled into it (see
+for a Rust or TypeScript app, deps.json, the packages compiled into it (see
 [Gardening](#gardening)). `appos deploy` builds and packs it in memory; `appos
 pack` writes it (`target/app.zip`, the same bytes for the same app), and
 `appos deploy app.zip` sends one built elsewhere, by CI or another
@@ -178,26 +178,48 @@ the crates.io crates compiled into its .wasm, as package URLs like
 `pkg:cargo/serde@1.0.228`. appos reads them from Cargo.lock and the
 crates' Cargo.toml as cargo resolves them for wasm32-wasip2, without
 running cargo: no dev- or build-dependencies, no proc-macros, only what
-the features and the target turn on. The shell keeps deps.json with the
-version; `/_platform/packages` lists it for every live app.
+the features and the target turn on.
+
+For a TypeScript app, deps.json holds the npm packages scriptc compiles
+into it (`pkg:npm/semver@7.7.3`): those `bindings/entry.ts` imports,
+theirs and so on, through node_modules as Node finds them, at the
+versions in package-lock.json, without running node, npm or scriptc. What
+scriptc serves itself (Node's builtins, polyfills of them) isn't listed.
+appos reads the imports from the syntax: an import that brings only
+types says so (`import type`), and every other one loads its module. That
+holds for JavaScript files, and for a TypeScript file when the nearest
+tsconfig.json above it sets `"verbatimModuleSyntax": true`, or there is
+none. New apps have it, and `appos sync` sets it in older ones. Packages
+from git, a tarball or another registry are left out with a warning, as
+their names can be another package's in the npm registry; set
+`APPOS_NPM_MIRRORS` to the URLs of the registry mirrors you install from.
+
+The shell keeps deps.json with the version; `/_platform/packages` lists
+it for every live app.
 
 `appos audit` matches these lists against the advisories OSV
-(https://osv.dev) publishes for each ecosystem, for crates.io those of
-RustSec and GitHub and the known malicious crates. It downloads them at
-most once an hour into ~/.cache/appos. For each app with a vulnerable
+(https://osv.dev) publishes for each ecosystem: for crates.io those of
+RustSec and GitHub and the known malicious crates, for npm those of
+GitHub and the known malicious packages. It downloads all of them once a
+week into ~/.cache/appos, and the ones that changed since at most once an
+hour; it sends osv.dev no package names. For each app with a vulnerable
 package it names the owner, the advisory and the versions that fix it,
 and it exits with 1 if there is one, so CI can run it every day.
 Unmaintained and unsound crates are warnings.
 
-Where appos can't tell which crates cargo builds, the app.zip goes
-without deps.json and `appos deploy` and `appos pack` warn: resolver 1
-(edition 2015 or 2018 without `resolver = "2"`), rustflags that change
-the target's cfg, `[replace]`, a crate missing from the cargo cache
-(build the app first). The audit lists those apps as not checked, like
-TypeScript, Java and Zig apps, which get no deps.json yet.
+Where appos can't tell which packages are built in, the app.zip goes
+without deps.json and `appos deploy` and `appos pack` warn. For a Rust
+app: resolver 1 (edition 2015 or 2018 without `resolver = "2"`),
+rustflags that change the target's cfg, `[replace]`, a crate missing
+from the cargo cache (build the app first). For a TypeScript app: a
+TypeScript file under a tsconfig.json without verbatimModuleSyntax, a
+scriptc other than the one the template pins, a package-lock.json from
+before npm 7, a node_modules that isn't what package-lock.json says (run
+npm install). The audit lists those apps as not checked, like Java and
+Zig apps, which get no deps.json yet.
 
-It finds accidents, like a forgotten `cargo update`, not intent: the
-sandbox and the grants hold an app whatever it is built with.
+It finds accidents, like a forgotten `cargo update` or `npm update`, not
+intent: the sandbox and the grants hold an app whatever it is built with.
 
 ## Admin screen
 

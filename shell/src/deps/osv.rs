@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{Ecosystem, Purl};
 
-/// The most an advisories zip may hold, in files and unpacked bytes.
-const MAX_ADVISORIES: usize = 100_000;
-const MAX_ADVISORY: usize = 1024 * 1024;
-const MAX_UNPACKED: usize = 512 * 1024 * 1024;
+/// The most an advisories zip may hold, in files and unpacked bytes, and
+/// the largest advisory. npm's is the largest: 233,000 advisories, 374 MB
+/// unpacked, the largest 1.1 MB (2026).
+const MAX_ADVISORIES: usize = 2_000_000;
+const MAX_UNPACKED: usize = 2 * 1024 * 1024 * 1024;
+pub const MAX_ADVISORY: usize = 8 * 1024 * 1024;
 
 names! {
     /// What an advisory says about a package.
@@ -58,6 +60,7 @@ pub struct Finding {
 #[derive(Deserialize)]
 struct Osv {
     id: String,
+    modified: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default)]
@@ -150,11 +153,19 @@ pub struct Advisories {
     packages: HashMap<&'static str, HashMap<String, Vec<Affected>>>,
     /// Advisories in the zip that could not be read, left out.
     pub unreadable: usize,
+    /// When the newest advisory read last changed.
+    pub newest: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Advisories {
     /// OSV's all.zip of an ecosystem (`Ecosystem::advisories`).
     pub fn from_zip(bytes: &[u8]) -> anyhow::Result<Advisories> {
+        Advisories::from_zip_except(bytes, &HashSet::new())
+    }
+
+    /// OSV's all.zip, without the advisories in `newer` (by id), which
+    /// changed since: `add` those.
+    pub fn from_zip_except(bytes: &[u8], newer: &HashSet<String>) -> anyhow::Result<Advisories> {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| anyhow::anyhow!("the advisories are not a zip file"))?;
         if zip.len() > MAX_ADVISORIES {
             bail!("the advisories zip has {} files, more than {MAX_ADVISORIES}", zip.len());
@@ -163,7 +174,8 @@ impl Advisories {
         let mut total = 0;
         for i in 0..zip.len() {
             let mut file = zip.by_index(i).context("the advisories zip is damaged")?;
-            if file.is_dir() {
+            let changed = file.name().is_ok_and(|n| n.strip_suffix(".json").is_some_and(|id| newer.contains(id)));
+            if file.is_dir() || changed {
                 continue;
             }
             let mut text = Vec::new();
@@ -190,12 +202,15 @@ impl Advisories {
             }
         }
         self.unreadable += other.unreadable;
+        self.newest = self.newest.max(other.newest);
     }
 
     /// Adds one advisory in OSV's JSON. Withdrawn ones and what they say of
     /// other ecosystems are left out.
     pub fn add(&mut self, json: &[u8]) -> anyhow::Result<()> {
         let osv: Osv = serde_json::from_slice(json)?;
+        let modified = osv.modified.as_deref().and_then(|m| chrono::DateTime::parse_from_rfc3339(m).ok()).map(|m| m.to_utc());
+        self.newest = self.newest.max(modified);
         if osv.withdrawn.is_some() {
             return Ok(());
         }
@@ -252,7 +267,7 @@ impl Advisories {
     /// (RUSTSEC-..., GHSA-..., MAL-...) is told once.
     pub fn of(&self, purl: &str) -> Vec<Finding> {
         let Ok(p) = Purl::parse(purl) else { return vec![] };
-        let affected = self.packages.get(p.kind).and_then(|packages| packages.get(p.name));
+        let affected = self.packages.get(p.kind).and_then(|packages| packages.get(p.package().as_ref()));
         let (Some(affected), Some(v)) = (affected, version(p.version)) else { return vec![] };
         // An advisory may say several things of one package.
         let mut matched: BTreeMap<usize, (Kind, BTreeSet<&semver::Version>)> = BTreeMap::new();
@@ -434,15 +449,56 @@ mod tests {
         for (name, text) in [
             ("RUSTSEC-1.json", good.as_str()),
             ("broken.json", "{"),
-            ("GHSA-npm.json", r#"{"id":"GHSA-x","affected":[{"package":{"ecosystem":"npm","name":"time"}}]}"#),
+            ("GHSA-pypi.json", r#"{"id":"GHSA-x","affected":[{"package":{"ecosystem":"PyPI","name":"time"}}]}"#),
         ] {
             zip.start_file(name, options).unwrap();
             std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
         }
         let a = Advisories::from_zip(&zip.finish().unwrap().into_inner()).unwrap();
-        assert_eq!((a.len(), a.unreadable), (1, 1), "npm is no ecosystem matched");
+        assert_eq!((a.len(), a.unreadable), (1, 1), "PyPI is no ecosystem matched");
         assert_eq!(ids(&a.of("pkg:cargo/time@0.1.0")), ["RUSTSEC-1"]);
         assert!(Advisories::from_zip(b"not a zip").is_err());
+    }
+
+    #[test]
+    fn npm_packages_are_found_by_their_scoped_names() {
+        let a = advisories(&[
+            r#"{"id":"GHSA-n","summary":"s","affected":[{"package":{"ecosystem":"npm","name":"@noble/hashes"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.2.0"}]}]}]}"#,
+            r#"{"id":"MAL-1","affected":[{"package":{"ecosystem":"npm","name":"ms"},"versions":["2.1.3"]}]}"#,
+        ]);
+        assert_eq!(ids(&a.of("pkg:npm/%40noble/hashes@1.1.5")), ["GHSA-n"]);
+        assert_eq!(a.of("pkg:npm/%40noble/hashes@1.1.5")[0].fixed, ["1.2.0"]);
+        assert_eq!(ids(&a.of("pkg:npm/%40noble/hashes@1.2.0")), Vec::<&str>::new());
+        assert_eq!(a.of("pkg:npm/ms@2.1.3")[0].kind, Kind::Malicious);
+        assert_eq!(ids(&a.of("pkg:cargo/ms@2.1.3")), Vec::<&str>::new(), "crates.io's ms is another package");
+    }
+
+    #[test]
+    fn a_zip_leaves_out_the_advisories_that_changed_since_and_knows_its_newest() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let at = |id: &str, modified: &str, fixed: &str| {
+            format!(
+                r#"{{"id":"{id}","modified":"{modified}","affected":[{{"package":{{"ecosystem":"npm","name":"ms"}},"ranges":[{{"type":"SEMVER","events":[{{"introduced":"0"}},{{"fixed":"{fixed}"}}]}}]}}]}}"#
+            )
+        };
+        for (name, text) in
+            [("GHSA-1.json", at("GHSA-1", "2026-11-17T07:11:36.432385586Z", "2.0.0")), ("GHSA-2.json", at("GHSA-2", "2026-11-17T07:11:36.5Z", "3.0.0"))]
+        {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        let all = Advisories::from_zip(&bytes).unwrap();
+        assert_eq!(all.newest.unwrap().to_rfc3339(), "2026-11-17T07:11:36.500+00:00", "by time, not by text");
+        let mut newer = Advisories::from_zip_except(&bytes, &HashSet::from(["GHSA-2".to_string()])).unwrap();
+        assert_eq!(newer.len(), 1);
+        newer.add(at("GHSA-2", "2026-11-17T08:00:00Z", "2.5.0").as_bytes()).unwrap();
+        assert_eq!(newer.of("pkg:npm/ms@1.0.0")[1].fixed, ["2.5.0"], "the changed advisory, once");
+        assert_eq!(ids(&newer.of("pkg:npm/ms@1.0.0")), ["GHSA-1", "GHSA-2"]);
+        assert_eq!(newer.newest.unwrap().to_rfc3339(), "2026-11-17T08:00:00+00:00");
+        let mut appended = Advisories::default();
+        appended.append(newer);
+        assert_eq!(appended.newest.unwrap().to_rfc3339(), "2026-11-17T08:00:00+00:00");
     }
 
     #[test]

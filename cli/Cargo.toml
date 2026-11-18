@@ -26,6 +26,13 @@ wasm-encoder = { version = "0.261", features = ["wasmparser"] }
 wasmparser = "0.261"
 wit-component = "0.261"
 wit-parser = "0.261"
+# TypeScript apps' deps.json: reading which modules a file imports.
+oxc_allocator = { version = "0.159", default-features = false }
+oxc_parser = { version = "0.159", default-features = false }
+oxc_ast = { version = "0.159", default-features = false }
+oxc_ast_visit = { version = "0.159", default-features = false }
+oxc_span = { version = "0.159", default-features = false }
 
 [dev-dependencies]
 wat = "1"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

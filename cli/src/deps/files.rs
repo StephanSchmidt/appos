@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 pub trait Files {
     fn read(&self, path: &Path) -> io::Result<String>;
     fn exists(&self, path: &Path) -> bool;
+    fn is_file(&self, path: &Path) -> bool;
     /// The directories in `dir`, sorted, symlinks not followed.
     fn dirs(&self, dir: &Path) -> Vec<PathBuf>;
 }
@@ -21,6 +22,10 @@ impl Files for Disk {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
     }
 
     fn dirs(&self, dir: &Path) -> Vec<PathBuf> {
@@ -62,6 +67,10 @@ impl Files for MapFs {
         self.0.keys().any(|k| k.starts_with(path))
     }
 
+    fn is_file(&self, path: &Path) -> bool {
+        self.0.contains_key(path)
+    }
+
     fn dirs(&self, dir: &Path) -> Vec<PathBuf> {
         let dirs: std::collections::BTreeSet<PathBuf> = self
             .0
@@ -87,6 +96,7 @@ mod tests {
         assert_eq!(files.dirs(Path::new("/a")), [PathBuf::from("/a/b"), PathBuf::from("/a/c")], "sorted, without the file /a/z");
         assert_eq!(files.dirs(Path::new("/a/b")), [PathBuf::from("/a/b/d")]);
         assert!(files.exists(Path::new("/a/b/d")) && files.exists(Path::new("/a/z")) && !files.exists(Path::new("/a/b/x")));
+        assert!(files.is_file(Path::new("/a/z")) && !files.is_file(Path::new("/a/b/d")) && !files.is_file(Path::new("/a/q")));
         assert_eq!(files.read(Path::new("/a/z")).unwrap(), "");
         assert_eq!(files.read(Path::new("/a/b")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }

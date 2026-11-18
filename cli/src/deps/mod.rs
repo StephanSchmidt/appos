@@ -5,6 +5,8 @@
 //!   files.rs   what a lister reads: the disk, or a map of files in tests
 //!   cargo/     Rust: Cargo.lock and the crates' Cargo.toml, as cargo
 //!              resolves them for wasm32-wasip2
+//!   npm/       TypeScript: the imports from bindings/entry.ts on, through
+//!              node_modules, and package-lock.json
 //!
 //! A language plugs in with a lister: a module whose `packages` is a
 //! `Lister`, picked in `lister` below. It reads the lock file and manifests
@@ -13,6 +15,9 @@
 
 mod cargo;
 mod files;
+mod npm;
+
+pub use npm::tsconfig;
 
 use std::path::Path;
 
@@ -30,7 +35,10 @@ type Lister = fn(&dyn Files, &Path, &Env<'_>) -> anyhow::Result<Vec<String>>;
 /// The lister for the app in `dir`, by its language as `appos build` tells
 /// it (dev.rs); None for a language without one yet.
 fn lister(dir: &Path) -> Option<Lister> {
-    if crate::ts::is_ts(dir) || crate::zig::is_zig(dir) || crate::java::is_java(dir) {
+    if crate::ts::is_ts(dir) {
+        return Some(npm::packages);
+    }
+    if crate::zig::is_zig(dir) || crate::java::is_java(dir) {
         return None;
     }
     Some(cargo::packages)
