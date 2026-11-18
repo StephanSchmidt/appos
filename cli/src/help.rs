@@ -468,6 +468,10 @@ JAVA
   getJson(key, Greeting::fromJson) returns Read.Found, Read.Missing or, for
   stored text that isn't what fromJson expects, Read.Unreadable(why): the
   usecase returns it in its result and the handler answers failed(why).
+  A kit's WIT arrives typed: records as Java records, enums as Java enums
+  (Wit.Flow.Plan.TEAM), a result as Wit.Result, switched on like a
+  usecase's (case Wit.Result.Ok(var draft), case Wit.Result.Err(var why)),
+  u64 and s64 as long, option as Optional.
   Each request starts the app fresh, so a call that loads Java's Unicode
   tables pays for it every time: String.strip costs about 1.7 ms,
   String.trim nothing.

@@ -13,15 +13,18 @@
 //! `extern struct`s with the ABI's layout. Strings and byte lists the shell
 //! passes are not copied; other lists are lifted into new slices.
 //!
-//! Supported: bool, integers, floats, char, string, list, option, tuple and
-//! record. Anything else in the WIT is an error naming the type.
+//! Supported: bool, integers, floats, char, string, list, option, tuple,
+//! record, enum (a Zig enum, `flow.Plan.team`) and result (`wit.Result(T,
+//! E)`, a union with `.ok` and `.err`, `void` for a side without a value;
+//! not as a parameter, except in a list). Anything else in the WIT is an
+//! error naming the type.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 use wit_parser::abi::WasmType;
-use wit_parser::{Docs, Resolve, Type, TypeDefKind, TypeId, TypeOwner, WorldId};
+use wit_parser::{Docs, Int, Resolve, Type, TypeDefKind, TypeId, TypeOwner, WorldId};
 
 use crate::ts::{WitFn, exports, imports};
 
@@ -45,6 +48,16 @@ pub fn List(comptime T: type) type {
 }
 pub fn Option(comptime T: type) type {
     return extern struct { is_some: u8, value: T };
+}
+/// A result's layout; u8 stands in for a side without a value.
+pub fn RawResult(comptime T: type, comptime E: type) type {
+    return extern struct { tag: u8, payload: extern union { ok: T, err: E } };
+}
+
+/// A WIT result: what a function answers (.ok), or why it couldn't (.err).
+/// A side without a value is void.
+pub fn Result(comptime T: type, comptime E: type) type {
+    return union(enum) { ok: T, err: E };
 }
 
 fn str(s: []const u8) Str {
@@ -71,6 +84,7 @@ pub fn generate(resolve: &Resolve, world: WorldId) -> Result<String> {
         helpers: String::new(),
         helper_names: HashMap::new(),
         records: HashSet::new(),
+        enums: HashSet::new(),
         tuples: HashSet::new(),
         tmp: 0,
     };
@@ -131,6 +145,7 @@ struct Gen<'a> {
     helpers: String,
     helper_names: HashMap<String, String>,
     records: HashSet<TypeId>,
+    enums: HashSet<TypeId>,
     tuples: HashSet<usize>,
     tmp: usize,
 }
@@ -177,6 +192,11 @@ impl Gen<'_> {
                 let def = &self.resolve.types[id];
                 match &def.kind {
                     TypeDefKind::Record(_) => self.record(id)?.0,
+                    TypeDefKind::Enum(_) => self.enumeration(id)?,
+                    TypeDefKind::Result(r) => {
+                        let (ok, err) = (r.ok, r.err);
+                        format!("Result({}, {})", self.zig_or_void(ok.as_ref())?, self.zig_or_void(err.as_ref())?)
+                    }
                     TypeDefKind::List(t) => format!("[]const {}", self.zig(t)?),
                     TypeDefKind::Option(t) => format!("?{}", self.zig(t)?),
                     TypeDefKind::Tuple(t) => {
@@ -197,6 +217,12 @@ impl Gen<'_> {
                 let def = &self.resolve.types[id];
                 match &def.kind {
                     TypeDefKind::Record(_) => self.record(id)?.1,
+                    TypeDefKind::Enum(e) => tag(e).into(),
+                    TypeDefKind::Result(r) if r.ok.is_none() && r.err.is_none() => "u8".into(),
+                    TypeDefKind::Result(r) => {
+                        let (ok, err) = (r.ok, r.err);
+                        format!("RawResult({}, {})", self.raw_or_u8(ok.as_ref())?, self.raw_or_u8(err.as_ref())?)
+                    }
                     TypeDefKind::List(t) => format!("List({})", self.raw(t)?),
                     TypeDefKind::Option(t) => format!("Option({})", self.raw(t)?),
                     TypeDefKind::Tuple(t) => {
@@ -209,6 +235,40 @@ impl Gen<'_> {
                 }
             }
         })
+    }
+
+    /// A result's side for the app: `void` without a value.
+    fn zig_or_void(&mut self, ty: Option<&Type>) -> Result<String> {
+        ty.map_or_else(|| Ok("void".into()), |t| self.zig(t))
+    }
+
+    /// A result's side in the layout: u8 without a value, which never
+    /// changes the payload's size or alignment.
+    fn raw_or_u8(&mut self, ty: Option<&Type>) -> Result<String> {
+        ty.map_or_else(|| Ok("u8".into()), |t| self.raw(t))
+    }
+
+    /// An enum: emitted once into its interface's namespace, with the
+    /// shell's number as its tag. Returns its Zig type (`flow.Plan`).
+    fn enumeration(&mut self, id: TypeId) -> Result<String> {
+        let def = &self.resolve.types[id];
+        let TypeDefKind::Enum(e) = &def.kind else { unreachable!() };
+        let name = pascal(def.name.as_deref().ok_or_else(|| unsupported("an anonymous enum"))?);
+        let TypeOwner::Interface(owner) = def.owner else { return Err(unsupported("an enum outside an interface")) };
+        let ns = snake(self.resolve.interfaces[owner].name.as_deref().unwrap_or("interface"));
+        let qualified = format!("{}.{name}", ident(&ns));
+        if !self.enums.insert(id) {
+            return Ok(qualified);
+        }
+        let mut code = doc(&def.docs, "    ");
+        writeln!(code, "    pub const {name} = enum({}) {{", tag(e))?;
+        for c in &e.cases {
+            code.push_str(&doc(&c.docs, "        "));
+            writeln!(code, "        {},", ident(&snake(&c.name)))?;
+        }
+        writeln!(code, "    }};")?;
+        self.namespaces.entry(ns).or_default().body.push_str(&code);
+        Ok(qualified)
     }
 
     fn tuple_raw(&mut self, n: usize) -> Result<()> {
@@ -278,6 +338,20 @@ impl Gen<'_> {
             DType::Prim(_) => expr.to_string(),
             DType::Id(id) => match &self.resolve.types[id].kind {
                 TypeDefKind::Record(_) => format!("{}({expr})", self.record(id)?.2),
+                TypeDefKind::Enum(_) => format!("@as({}, @enumFromInt({expr}))", self.enumeration(id)?),
+                TypeDefKind::Result(r) => {
+                    let (ok, err) = (r.ok, r.err);
+                    let (z, raw) = (self.zig(ty)?, self.raw(ty)?);
+                    let f = self.helper(format!("lift {z}"), "liftResult", |g, name| {
+                        if ok.is_none() && err.is_none() {
+                            return Ok(format!("fn {name}(r: u8) {z} {{\n    return if (r == 0) .{{ .ok = {{}} }} else .{{ .err = {{}} }};\n}}\n"));
+                        }
+                        let ok = ok.map_or_else(|| Ok("{}".to_string()), |t| g.lift(&t, "r.payload.ok"))?;
+                        let err = err.map_or_else(|| Ok("{}".to_string()), |t| g.lift(&t, "r.payload.err"))?;
+                        Ok(format!("fn {name}(r: {raw}) {z} {{\n    return if (r.tag == 0) .{{ .ok = {ok} }} else .{{ .err = {err} }};\n}}\n"))
+                    })?;
+                    format!("{f}({expr})")
+                }
                 TypeDefKind::List(t) if self.same_layout(t)? => format!("{expr}.ptr[0..{expr}.len]"),
                 TypeDefKind::List(t) => {
                     let (z, r) = (self.zig(t)?, self.raw(t)?);
@@ -331,6 +405,25 @@ impl Gen<'_> {
                         parts.push(format!(".{field} = {}", self.lower(&f.ty, &format!("{expr}.{field}"))?));
                     }
                     format!("{raw}{{ {} }}", parts.join(", "))
+                }
+                TypeDefKind::Enum(_) => format!("@intFromEnum({expr})"),
+                TypeDefKind::Result(r) => {
+                    let (ok, err) = (r.ok, r.err);
+                    let (z, raw) = (self.zig(ty)?, self.raw(ty)?);
+                    let f = self.helper(format!("lower {z}"), "lowerResult", |g, name| {
+                        if ok.is_none() && err.is_none() {
+                            return Ok(format!("fn {name}(r: {z}) u8 {{\n    return switch (r) {{ .ok => 0, .err => 1 }};\n}}\n"));
+                        }
+                        let side = |g: &mut Self, t: Option<Type>, case: &str, tag: u8| -> Result<String> {
+                            Ok(match t {
+                                Some(t) => format!(".{case} => |v| .{{ .tag = {tag}, .payload = .{{ .{case} = {} }} }},", g.lower(&t, "v")?),
+                                None => format!(".{case} => .{{ .tag = {tag}, .payload = undefined }},"),
+                            })
+                        };
+                        let (ok, err) = (side(g, ok, "ok", 0)?, side(g, err, "err", 1)?);
+                        Ok(format!("fn {name}(r: {z}) {raw} {{\n    return switch (r) {{\n        {ok}\n        {err}\n    }};\n}}\n"))
+                    })?;
+                    format!("{f}({expr})")
                 }
                 TypeDefKind::List(t) if self.same_layout(t)? => format!(".{{ .ptr = {expr}.ptr, .len = {expr}.len }}"),
                 TypeDefKind::List(t) => {
@@ -405,6 +498,8 @@ impl Gen<'_> {
                     }
                     out
                 }
+                TypeDefKind::Enum(_) => one(format!("@as(u32, @intFromEnum({expr}))"), "u32"),
+                TypeDefKind::Result(_) => return Err(unsupported("a result as a parameter")),
                 TypeDefKind::List(_) => {
                     let n = self.tmp;
                     self.tmp += 1;
@@ -483,6 +578,10 @@ impl Gen<'_> {
                     let value = self.flat_lift(&t, values)?;
                     format!("@as({zig}, if ({d} != 0) {value} else null)")
                 }
+                TypeDefKind::Enum(_) => format!("@as({}, @enumFromInt({}))", self.enumeration(id)?, next()?),
+                // Only a result without values is one core value.
+                TypeDefKind::Result(r) if r.ok.is_none() && r.err.is_none() => self.lift(ty, &format!("@as(u8, @intCast({}))", next()?))?,
+                TypeDefKind::Result(_) => return Err(unsupported("a result as a parameter")),
                 kind => return Err(unsupported(kind_name(kind))),
             },
         })
@@ -643,12 +742,19 @@ fn kind_name(kind: &TypeDefKind) -> &'static str {
         TypeDefKind::Resource | TypeDefKind::Handle(_) => "a resource",
         TypeDefKind::Flags(_) => "flags",
         TypeDefKind::Variant(_) => "a variant",
-        TypeDefKind::Enum(_) => "an enum",
-        TypeDefKind::Result(_) => "a result",
         TypeDefKind::Map(..) => "a map",
         TypeDefKind::FixedLengthList(..) => "a fixed-length list",
         TypeDefKind::Future(_) | TypeDefKind::Stream(_) => "async",
         _ => "this type",
+    }
+}
+
+/// An enum's tag, the number the shell passes.
+fn tag(e: &wit_parser::Enum) -> &'static str {
+    match e.tag() {
+        Int::U8 => "u8",
+        Int::U16 => "u16",
+        _ => "u32",
     }
 }
 
@@ -829,8 +935,41 @@ mod tests {
     }
 
     #[test]
+    fn enums_and_results() {
+        let (resolve, world) = load(
+            "package t:t;
+            interface flow {
+                enum plan { starter, team }
+                enum payment-terms { net30, net60 }
+                record quote { plan: plan, cents: s64, plans: list<plan>, terms: option<payment-terms> }
+                with-plan: func(id: string, plan: plan, terms: option<payment-terms>) -> result<quote, string>;
+                done: func(id: string) -> result<_, string>;
+                ping: func() -> result;
+            }
+            world w { import flow; }",
+        );
+        let code = generate(&resolve, world).unwrap();
+        assert!(code.contains("    pub const Plan = enum(u8) {\n        starter,\n        team,\n    };"), "{code}");
+        assert!(
+            code.contains("        plan: flow.Plan,\n        cents: i64,\n        plans: []const flow.Plan,\n        terms: ?flow.PaymentTerms,"),
+            "{code}"
+        );
+        assert!(code.contains("        plan: u8,\n        cents: i64,\n        plans: List(u8),\n        terms: Option(u8),"), "{code}");
+        assert!(code.contains("            .plan = @as(flow.Plan, @enumFromInt(r.plan)),"), "{code}");
+        assert!(code.contains("pub fn withPlan(id_: []const u8, plan_: flow.Plan, terms_: ?flow.PaymentTerms) Result(flow.Quote, []const u8) {"), "{code}");
+        assert!(code.contains("@as(u32, @intFromEnum(plan_))"), "{code}");
+        assert!(code.contains("        var result: RawResult(flow.RawQuote, Str) = undefined;"), "{code}");
+        assert!(code.contains("(r: RawResult(flow.RawQuote, Str)) Result(flow.Quote, []const u8) {\n    return if (r.tag == 0) .{ .ok = flow.liftQuote(r.payload.ok) } else .{ .err = r.payload.err.ptr[0..r.payload.err.len] };"), "{code}");
+        assert!(code.contains("pub fn done(id_: []const u8) Result(void, []const u8) {\n        var result: RawResult(u8, Str) = undefined;"), "{code}");
+        assert!(code.contains("(r: RawResult(u8, Str)) Result(void, []const u8) {\n    return if (r.tag == 0) .{ .ok = {} } else"), "{code}");
+        assert!(code.contains("    pub fn ping() Result(void, void) {\n        return liftResult"), "{code}");
+    }
+
+    #[test]
     fn unsupported_types_are_named() {
-        let (resolve, world) = load("package t:t;\ninterface i { f: func() -> result<u32, string>; }\nworld w { import i; }");
-        assert_eq!(generate(&resolve, world).unwrap_err().to_string(), "a result in the WIT isn't supported for Zig apps yet");
+        let (resolve, world) = load("package t:t;\ninterface i { variant v { a(u32) } f: func() -> v; }\nworld w { import i; }");
+        assert_eq!(generate(&resolve, world).unwrap_err().to_string(), "a variant in the WIT isn't supported for Zig apps yet");
+        let (resolve, world) = load("package t:t;\ninterface i { f: func(r: result<u32>); }\nworld w { import i; }");
+        assert_eq!(generate(&resolve, world).unwrap_err().to_string(), "a result as a parameter in the WIT isn't supported for Zig apps yet");
     }
 }

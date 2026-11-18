@@ -15,15 +15,18 @@
 //!
 //! Types: bool boolean; u8 to u32, s8 to s32 and char (a code point) int;
 //! u64 and s64 long; f32 float; f64 double; string String; list<T> List;
-//! option<T> Optional; tuple<..> Wit.Tuple2 and up; record a Java record.
-//! Anything else in the WIT is an error naming the type.
+//! option<T> Optional; tuple<..> Wit.Tuple2 and up; record a Java record;
+//! enum a Java enum (`Flow.Plan.TEAM`); result<T, E> `Wit.Result<T, E>`,
+//! `Result.Ok(value)` or `Result.Err(error)`, `Void` for a side without a
+//! value (not as a parameter, except in a list). Anything else in the WIT is
+//! an error naming the type.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 use wit_parser::abi::WasmType;
-use wit_parser::{Docs, InterfaceId, Resolve, SizeAlign, Type, TypeDefKind, TypeId, TypeOwner, WorldId};
+use wit_parser::{Docs, Int, InterfaceId, Resolve, SizeAlign, Type, TypeDefKind, TypeId, TypeOwner, WorldId};
 
 use crate::ts::{WitFn, exports, imports};
 
@@ -229,8 +232,46 @@ const ABI: &str = r#"
                 value.accept(o.get(), a + offset);
             }
         }
+
+        static <T, E> Result<T, E> result(boolean ok, T value, E error) {
+            return ok ? new Result.Ok<>(value) : new Result.Err<>(error);
+        }
+
+        static <T, E> Result<T, E> liftResultAt(int a, int offset, IntFunction<T> ok, IntFunction<E> err) {
+            return liftBool(a) ? new Result.Err<>(err.apply(a + offset)) : new Result.Ok<>(ok.apply(a + offset));
+        }
+
+        static <T, E> void lowerResultAt(int a, Result<T, E> r, int offset, ObjIntConsumer<T> ok, ObjIntConsumer<E> err) {
+            switch (r) {
+                case Result.Ok<T, E>(T value) -> {
+                    lowerU8(a, 0);
+                    ok.accept(value, a + offset);
+                }
+                case Result.Err<T, E>(E error) -> {
+                    lowerU8(a, 1);
+                    err.accept(error, a + offset);
+                }
+            }
+        }
     }
 "#;
+
+/// A WIT result, in every Wit.
+const RESULT: &str = "
+    /**
+     * A WIT result: what a function answers, or why it couldn't. Switch on
+     * it: {@code case Wit.Result.Ok(var draft) -> ...} and
+     * {@code case Wit.Result.Err(var why) -> ...}. A side without a value is
+     * {@code Void}, its value null.
+     */
+    public sealed interface Result<T, E> {
+        /** What the function answers. */
+        record Ok<T, E>(T value) implements Result<T, E> {}
+
+        /** Why it couldn't. */
+        record Err<T, E>(E error) implements Result<T, E> {}
+    }
+";
 
 pub fn generate(resolve: &Resolve, world: WorldId) -> Result<String> {
     let mut sizes = SizeAlign::default();
@@ -272,6 +313,7 @@ pub fn generate(resolve: &Resolve, world: WorldId) -> Result<String> {
     writeln!(out, "    private Wit() {{}}\n")?;
     writeln!(out, "    /** TeaVM needs a main class; the app starts in the exports below. */")?;
     writeln!(out, "    public static void main(String[] args) {{}}")?;
+    out.push_str(RESULT);
     for n in &g.tuples {
         let params: Vec<String> = (0..*n).map(|i| format!("T{i}")).collect();
         let fields: Vec<String> = (0..*n).map(|i| format!("T{i} f{i}")).collect();
@@ -347,7 +389,7 @@ impl Gen<'_> {
     fn class(&mut self, id: InterfaceId) -> Result<String> {
         let iface = &self.resolve.interfaces[id];
         let name = pascal(iface.name.as_deref().ok_or_else(|| unsupported("an anonymous interface"))?);
-        if name == "Abi" || name == "Wit" || name.starts_with("Tuple") {
+        if name == "Abi" || name == "Wit" || name == "Result" || name.starts_with("Tuple") {
             bail!("an interface named {name} clashes with the generated Java");
         }
         if !self.classes.contains_key(&name) {
@@ -399,6 +441,11 @@ impl Gen<'_> {
             Type::ErrorContext => return Err(unsupported("error-context")),
             Type::Id(id) => match &self.resolve.types[id].kind {
                 TypeDefKind::Record(_) => self.record(id)?,
+                TypeDefKind::Enum(_) => self.enumeration(id)?,
+                TypeDefKind::Result(r) => {
+                    let (ok, err) = (r.ok, r.err);
+                    format!("Result<{}, {}>", self.java_or_void(ok.as_ref())?, self.java_or_void(err.as_ref())?)
+                }
                 TypeDefKind::List(t) => format!("List<{}>", self.java(t, true)?),
                 TypeDefKind::Option(t) => format!("Optional<{}>", self.java(t, true)?),
                 TypeDefKind::Tuple(t) if t.types.is_empty() => return Err(unsupported("an empty tuple")),
@@ -410,6 +457,47 @@ impl Gen<'_> {
                 kind => return Err(unsupported(kind_name(kind))),
             },
         })
+    }
+
+    /// A result's side as a type argument: `Void` without a value.
+    fn java_or_void(&mut self, ty: Option<&Type>) -> Result<String> {
+        ty.map_or_else(|| Ok("Void".into()), |t| self.java(t, true))
+    }
+
+    /// An enum: emitted once into its interface's class, as a Java enum
+    /// with a function that turns the shell's number into it. Returns its
+    /// name as seen from Wit (`Flow.Plan`).
+    fn enumeration(&mut self, id: TypeId) -> Result<String> {
+        let def = &self.resolve.types[id];
+        let TypeDefKind::Enum(e) = &def.kind else { unreachable!() };
+        let name = pascal(def.name.as_deref().ok_or_else(|| unsupported("an anonymous enum"))?);
+        let TypeOwner::Interface(owner) = def.owner else { return Err(unsupported("an enum outside an interface")) };
+        let class = self.class(owner)?;
+        let qualified = format!("{class}.{name}");
+        if !self.records.insert(id) {
+            return Ok(qualified);
+        }
+        let mut code = doc(&def.docs, "        ");
+        writeln!(code, "        public enum {name} {{")?;
+        let cases: Vec<String> = e.cases.iter().map(|c| format!("{}            {}", doc(&c.docs, "            "), constant(&c.name))).collect();
+        writeln!(code, "{}\n        }}\n", cases.join(",\n"))?;
+        writeln!(code, "        static {name} lift{name}(int i) {{\n            return {name}.values()[i];\n        }}\n")?;
+        self.classes.get_mut(&class).expect("class").types.push_str(&code);
+        Ok(qualified)
+    }
+
+    /// An enum's number in memory, as the shell reads and writes it.
+    fn tag(e: &wit_parser::Enum) -> (&'static str, &'static str) {
+        match e.tag() {
+            Int::U8 => ("Abi.liftU8", "Abi.lowerU8"),
+            Int::U16 => ("Abi.liftU16", "Abi.lowerU16"),
+            _ => ("Abi.liftI32", "Abi.lowerI32"),
+        }
+    }
+
+    /// Where a result's value is, after its case.
+    fn payload(&self, r: &wit_parser::Result_) -> usize {
+        self.sizes.payload_offset(Int::U8, [r.ok.as_ref(), r.err.as_ref()]).size_wasm32()
     }
 
     /// A record: emitted once into its interface's class, with functions
@@ -476,6 +564,24 @@ impl Gen<'_> {
                     let (class, record) = name.split_once('.').expect("qualified");
                     format!("{class}.lift{record}({a})")
                 }
+                TypeDefKind::Enum(e) => {
+                    let (lift, _) = Self::tag(e);
+                    let name = self.enumeration(id)?;
+                    let (class, en) = name.split_once('.').expect("qualified");
+                    format!("{class}.lift{en}({lift}({a}))")
+                }
+                TypeDefKind::Result(r) => {
+                    let r = r.clone();
+                    let off = self.payload(&r);
+                    let types = format!("{}, {}", self.java_or_void(r.ok.as_ref())?, self.java_or_void(r.err.as_ref())?);
+                    let mut sides = Vec::new();
+                    for side in [r.ok, r.err] {
+                        let x = format!("$a{}", self.fresh());
+                        let value = side.map_or_else(|| Ok("null".to_string()), |t| self.lift_mem(&t, &x))?;
+                        sides.push(format!("{x} -> {value}"));
+                    }
+                    format!("Abi.<{types}>liftResultAt({a}, {off}, {})", sides.join(", "))
+                }
                 TypeDefKind::List(t) => {
                     let x = format!("$a{}", self.fresh());
                     let item = self.lift_mem(t, &x)?;
@@ -519,6 +625,19 @@ impl Gen<'_> {
                     let name = self.record(id)?;
                     let (class, record) = name.split_once('.').expect("qualified");
                     format!("{class}.lower{record}({a}, {v});")
+                }
+                TypeDefKind::Enum(e) => format!("{}({a}, {v}.ordinal());", Self::tag(e).1),
+                TypeDefKind::Result(r) => {
+                    let r = r.clone();
+                    let off = self.payload(&r);
+                    let types = format!("{}, {}", self.java_or_void(r.ok.as_ref())?, self.java_or_void(r.err.as_ref())?);
+                    let mut sides = Vec::new();
+                    for side in [r.ok, r.err] {
+                        let n = self.fresh();
+                        let value = side.map_or_else(|| Ok(String::new()), |t| self.lower_mem(&t, &format!("$e{n}"), &format!("$a{n}")))?;
+                        sides.push(format!("($e{n}, $a{n}) -> {{ {value} }}"));
+                    }
+                    format!("Abi.<{types}>lowerResultAt({a}, {v}, {off}, {});", sides.join(", "))
                 }
                 TypeDefKind::List(t) => {
                     let n = self.fresh();
@@ -570,6 +689,8 @@ impl Gen<'_> {
                     let list = format!("Abi.lowerList({v}, {}, {}, ($e{n}, $a{n}) -> {{ {item} }})", self.size(t), self.align(t));
                     vec![(list, WasmType::Pointer), (format!("{v}.size()"), WasmType::Length)]
                 }
+                TypeDefKind::Enum(_) => vec![(format!("{v}.ordinal()"), WasmType::I32)],
+                TypeDefKind::Result(_) => return Err(unsupported("a result as a parameter")),
                 TypeDefKind::Option(t) => {
                     let mut out = vec![(format!("({v}.isPresent() ? 1 : 0)"), WasmType::I32)];
                     for (e, t) in self.flat_lower(t, &format!("{v}.get()"))? {
@@ -622,6 +743,14 @@ impl Gen<'_> {
                     let value = self.flat_lift(t, values)?;
                     format!("({d} == 0 ? Optional.<{boxed}>empty() : Optional.of({value}))")
                 }
+                TypeDefKind::Enum(_) => {
+                    let name = self.enumeration(id)?;
+                    let (class, en) = name.split_once('.').expect("qualified");
+                    format!("{class}.lift{en}({})", next()?)
+                }
+                // Only a result without values is one core value.
+                TypeDefKind::Result(r) if r.ok.is_none() && r.err.is_none() => format!("Abi.<Void, Void>result({} == 0, null, null)", next()?),
+                TypeDefKind::Result(_) => return Err(unsupported("a result as a parameter")),
                 TypeDefKind::Tuple(t) => {
                     let java = self.java(ty, false)?;
                     let types = t.types.clone();
@@ -788,9 +917,7 @@ fn zero(t: WasmType) -> &'static str {
 fn kind_name(kind: &TypeDefKind) -> &'static str {
     match kind {
         TypeDefKind::Variant(_) => "a variant",
-        TypeDefKind::Enum(_) => "an enum",
         TypeDefKind::Flags(_) => "flags",
-        TypeDefKind::Result(_) => "a result",
         TypeDefKind::Resource | TypeDefKind::Handle(_) => "a resource",
         TypeDefKind::Future(_) => "a future",
         TypeDefKind::Stream(_) => "a stream",
@@ -828,6 +955,11 @@ fn camel(name: &str) -> String {
         }
     }
     out
+}
+
+/// An enum case: `payment-terms` -> `PAYMENT_TERMS`.
+fn constant(name: &str) -> String {
+    name.replace('-', "_").to_uppercase()
 }
 
 fn pascal(name: &str) -> String {
@@ -1005,9 +1137,41 @@ mod tests {
     }
 
     #[test]
+    fn enums_and_results() {
+        let (resolve, world) = load(
+            "package t:t;
+            interface flow {
+                enum plan { starter, team }
+                enum payment-terms { net30, net60 }
+                record quote { plan: plan, cents: s64, plans: list<plan>, terms: option<payment-terms> }
+                with-plan: func(id: string, plan: plan, terms: option<payment-terms>) -> result<quote, string>;
+                done: func(id: string) -> result<_, string>;
+                ping: func() -> result;
+            }
+            world w { import flow; }",
+        );
+        let code = generate(&resolve, world).unwrap();
+        assert!(code.contains("        public enum Plan {\n            STARTER,\n            TEAM\n        }"), "{code}");
+        assert!(code.contains("        static PaymentTerms liftPaymentTerms(int i) {\n            return PaymentTerms.values()[i];"), "{code}");
+        assert!(code.contains("                Flow.Plan plan,\n                long cents,\n                List<Flow.Plan> plans,\n                Optional<Flow.PaymentTerms> terms) {}"), "{code}");
+        assert!(code.contains("return new Quote(Flow.liftPlan(Abi.liftU8($a)), Abi.liftI64($a + 8), Abi.liftListAt($a + 16, 1, $a1 -> Flow.liftPlan(Abi.liftU8($a1))), Abi.liftOptionAt($a + 24, 1, $a2 -> Flow.liftPaymentTerms(Abi.liftU8($a2))));"), "{code}");
+        assert!(code.contains("            Abi.lowerU8($a, $v.plan().ordinal());"), "{code}");
+        assert!(code.contains("public static Result<Flow.Quote, String> withPlan(String id, Flow.Plan plan, Optional<Flow.PaymentTerms> terms) {"), "{code}");
+        assert!(code.contains("plan.ordinal(), (terms.isPresent() ? 1 : 0), (terms.isPresent() ? terms.get().ordinal() : 0), $ret);"), "{code}");
+        assert!(code.contains("return Abi.<Flow.Quote, String>liftResultAt($ret, 8, $a5 -> Flow.liftQuote($a5), $a6 -> Abi.liftStrAt($a6));"), "{code}");
+        assert!(code.contains("public static Result<Void, String> done(String id) {"), "{code}");
+        assert!(code.contains("-> null, $a"), "{code}");
+        assert!(code.contains("            int $r = $ping();\n            return Abi.<Void, Void>result($r == 0, null, null);"), "{code}");
+        assert!(code.contains("    public sealed interface Result<T, E> {"), "{code}");
+    }
+
+    #[test]
     fn unsupported_types_are_named() {
-        let (resolve, world) = load("package t:t; interface a { enum color { red } paint: func(c: color); } world w { import a; }");
+        let (resolve, world) = load("package t:t; interface a { flags f { red } paint: func(c: f); } world w { import a; }");
         let err = generate(&resolve, world).unwrap_err().to_string();
-        assert_eq!(err, "an enum in the WIT isn't supported for Java apps yet");
+        assert_eq!(err, "flags in the WIT isn't supported for Java apps yet");
+        let (resolve, world) = load("package t:t; interface a { paint: func(c: result<u32>); } world w { import a; }");
+        let err = generate(&resolve, world).unwrap_err().to_string();
+        assert_eq!(err, "a result as a parameter in the WIT isn't supported for Java apps yet");
     }
 }
