@@ -16,7 +16,10 @@ use std::time::Instant;
 use anyhow::{Context as _, bail};
 use parking_lot::{Mutex, RwLock};
 
+use crate::access::{Access, Policies};
+use crate::auth::{Identity, Who};
 use crate::deploy::{Ask, FAILURE_WINDOW, FAILURES_BEFORE_ROLLBACK};
+use crate::kit::User;
 use crate::manifest::Risk;
 use crate::platform::{Actor, Event, NewVersion, PlatformDb, Rollback, Target, Version, VersionStatus, now_ms};
 use crate::runtime::{AdminLimits, Budget, LoadedApp};
@@ -32,23 +35,44 @@ fn held_reason(pause: &Event) -> String {
     }
 }
 
-/// Which apps serve: loaded and on, as `State` has them now. Cheap to
-/// clone.
+/// What is live, for kits: the apps that serve (loaded and on, as `State`
+/// has them now) and the policy. Cheap to clone.
 #[derive(Clone, Default)]
-pub struct Serving {
+pub struct Live {
     apps: Arc<RwLock<BTreeMap<String, Arc<LoadedApp>>>>,
     off: Arc<RwLock<BTreeSet<String>>>,
+    /// None: no policy, everyone may use every grant.
+    policy: Option<Arc<Policies>>,
 }
 
-impl std::fmt::Debug for Serving {
+impl std::fmt::Debug for Live {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Serving").finish_non_exhaustive()
+        f.debug_struct("Live").finish_non_exhaustive()
     }
 }
 
-impl Serving {
+impl Live {
     pub fn serves(&self, id: &str) -> bool {
         self.apps.read().contains_key(id) && !self.off.read().contains(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy(policy: Arc<Policies>) -> Live {
+        Live { policy: Some(policy), ..Live::default() }
+    }
+
+    /// What the policy lets `user` use of `held`, a kit's grants, as `name`:
+    /// a kit calling other kits is checked like an app, under its name.
+    pub fn access(&self, user: Option<&User>, name: &str, held: &[String]) -> Access {
+        let Some(policies) = &self.policy else { return Access::ALL };
+        let who = match user {
+            Some(u) => match Identity::new(&u.id, &u.email, &u.name, u.groups.clone()) {
+                Ok(id) => Who::signed_in(id),
+                Err(_) => return Access::NONE,
+            },
+            None => Who::default(),
+        };
+        policies.current().access(&who, name, "", held)
     }
 }
 
@@ -97,9 +121,9 @@ impl State {
         self.off.read().contains(id)
     }
 
-    /// Which apps serve, for kits (`Context::serves`).
-    pub fn serving(&self) -> Serving {
-        Serving { apps: self.apps.clone(), off: self.off.clone() }
+    /// Which apps serve and the policy, for kits (`Context::serves`).
+    pub fn live(&self, policy: Option<Arc<Policies>>) -> Live {
+        Live { apps: self.apps.clone(), off: self.off.clone(), policy }
     }
 
     /// What an admin set for the app's requests.

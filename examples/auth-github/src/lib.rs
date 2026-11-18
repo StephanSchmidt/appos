@@ -1,11 +1,14 @@
-//! Sign-in with GitHub: an AppOS sign-in plugin (wit/auth.wit). The
-//! members of one GitHub organization sign in; their teams in it become
-//! their groups, which policy.csv names as `group:<team>`.
+//! Sign-in with GitHub: an AppOS sign-in kit (wit/auth.wit). The members
+//! of one GitHub organization sign in; their teams in it become their
+//! groups, which policy.csv names as `group:<team>`.
 //!
-//! auth.toml (this directory has one):
+//! auth.toml names the kit (provider = "kit", kit = "."), and kit.toml
+//! says the rest (this directory has both):
 //!
-//!   provider = "plugin"
+//!   [kit]
+//!   id = "auth-github"
 //!   wasm = "auth_github.wasm"
+//!   [sign-in]
 //!   hosts = ["github.com", "api.github.com"]
 //!   [config]
 //!   client-id = "Iv1.0123456789abcdef"   # the GitHub OAuth app's

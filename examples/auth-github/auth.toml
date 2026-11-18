@@ -1,11 +1,3 @@
 # appos-shell --auth auth.toml --policy policy.csv
-provider = "plugin"
-wasm = "auth_github.wasm"                 # make build puts it here
-hosts = ["github.com", "api.github.com"]  # all it may call
-
-[config]
-client-id = "Iv1.0123456789abcdef"        # your GitHub OAuth app's
-org = "kitewell"                          # only its members sign in
-
-[config-env]
-client-secret = "GITHUB_CLIENT_SECRET"    # the OAuth app's secret, never in this file
+provider = "kit"
+kit = "."                                 # kit.toml, in this directory

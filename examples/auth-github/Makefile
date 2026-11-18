@@ -10,7 +10,7 @@ check:
 fmt:
 	cargo fmt
 
-## The plugin, next to auth.toml: auth_github.wasm.
+## The kit, next to kit.toml: auth_github.wasm.
 build:
 	cargo build --release --target wasm32-wasip2
 	cp target/wasm32-wasip2/release/auth_github.wasm .

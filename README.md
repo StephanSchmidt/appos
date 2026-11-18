@@ -292,7 +292,7 @@ open: anyone may do anything, on the admin screen and the platform API
 too; it says so at the start. `appos dev` runs that way, on localhost.
 
 ```toml
-# auth.toml: how people sign in (dev, header, oidc or plugin; see Sign-in)
+# auth.toml: how people sign in (dev, header, oidc or kit; see Sign-in)
 provider = "dev"         # anyone signs in as anyone; localhost only
 session-hours = 8        # the default
 ```
@@ -361,7 +361,7 @@ The identity provider sends people back to `<origin>/_auth/callback`.
 
 ### Your own sign-in
 
-Anything else is a sign-in plugin: a WebAssembly component of the world
+Anything else is a sign-in kit: a kit in WebAssembly of the world
 `appos:auth/sign-in` ([wit-auth/auth.wit](wit-auth/auth.wit), also in
 `/_platform/spec` as `sign_in`). It exports `start` (show a page or send the
 browser to the identity provider) and `finish` (the form it posted, or the
@@ -369,8 +369,17 @@ callback; the shell has checked the state) and returns a page, a redirect,
 an identity, or why not.
 
 ```toml
-provider = "plugin"
-wasm = "acme-auth.wasm"                 # found next to auth.toml
+# auth.toml
+provider = "kit"
+kit = "acme-sign-in"                    # its directory, next to auth.toml
+
+# acme-sign-in/kit.toml
+[kit]
+id = "acme-sign-in"
+name = "Acme sign-in"
+version = "1.0.0"
+wasm = "acme-auth.wasm"
+[sign-in]
 hosts = ["login.acme.com"]              # the only hosts it may call
 [config]                                # what config.get returns
 tenant = "acme"
@@ -378,10 +387,10 @@ tenant = "acme"
 client-secret = "ACME_SECRET"
 ```
 
-The plugin is sandboxed like an app: no files, no environment, no storage.
+The kit is sandboxed like an app: no files, no environment, no storage.
 It may call `config.get` and `http.fetch`, which reaches only `hosts`, over
 https (http only to localhost), and follows no redirects. Each step runs in a
-fresh instance with an app's fuel and memory, for at most 10 s. A plugin
+fresh instance with an app's fuel and memory, for at most 10 s. A kit
 that doesn't load stops the shell at startup; one that fails while someone
 signs in shows "Sign-in isn't working right now", and the site goes on.
 
@@ -461,7 +470,7 @@ grant = ["kv-read", "kv-write"]
 
 ```
 wit/appos.wit         the contract between shell and apps
-wit-auth/auth.wit     the contract between shell and sign-in plugins
+wit-auth/auth.wit     the contract between shell and sign-in kits
 shell/                the shell: library + appos-shell binary
                       (axum, wasmtime, SQLite for kv and the platform
                       database, platform API, admin screen)
@@ -475,7 +484,7 @@ cli/template-java/    the same in Java (appos new --java)
 examples/             four apps (pricing, webinars, status, discounts) in
                       Rust, TypeScript and Zig, each from a request; see
                       its README
-examples/auth-github/  a sign-in plugin: GitHub, teams as groups
+examples/auth-github/  a sign-in kit: GitHub, teams as groups
 ```
 
 There is no SDK crate: bindings are generated in each app from its `wit/`,

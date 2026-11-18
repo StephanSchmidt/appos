@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::session::Cookies;
 use super::session::{SESSION, SIGN_IN, SIGN_IN_SECS, random};
-use super::{Auth, Identity, Provider, Site, Who, dev, plugin};
+use super::{Auth, Identity, Provider, Site, Who, dev, sign_in_kit};
 use crate::shell::Shell;
 use crate::web::{self, pairs};
 
@@ -81,7 +81,7 @@ async fn start(State(shell): State<Arc<Shell>>, Extension(site): Extension<Site>
         Provider::Dev => dev::start(None),
         Provider::Header(h) => h.start(&pending.to),
         Provider::Oidc(o) => o.start(&pending, &site.0).await,
-        Provider::Plugin(p) => p.start(plugin::request(&pending, &site.0, "GET", "/_auth/sign-in", query, vec![])).await,
+        Provider::Kit(p) => p.start(sign_in_kit::request(&pending, &site.0, "GET", "/_auth/sign-in", query, vec![])).await,
         Provider::Token(t) => t.start(&query),
     };
     let mut resp = respond(&shell, auth, &site, &who, &pending, step);
@@ -95,7 +95,7 @@ async fn form(State(shell): State<Arc<Shell>>, Extension(site): Extension<Site>,
     let form = pairs(std::str::from_utf8(&body).ok());
     let step = match &auth.provider {
         Provider::Dev => dev::form(&form),
-        Provider::Plugin(p) => p.finish(plugin::request(&pending, &site.0, "POST", "/_auth/sign-in", vec![], form)).await,
+        Provider::Kit(p) => p.finish(sign_in_kit::request(&pending, &site.0, "POST", "/_auth/sign-in", vec![], form)).await,
         Provider::Token(t) => t.form(&form),
         Provider::Header(_) | Provider::Oidc(_) => Step::Refuse("This sign-in has no form.".into()),
     };
@@ -111,7 +111,7 @@ async fn callback(State(shell): State<Arc<Shell>>, Extension(site): Extension<Si
     }
     let step = match &auth.provider {
         Provider::Oidc(o) => o.callback(&query, &pending, &site.0).await,
-        Provider::Plugin(p) => p.finish(plugin::request(&pending, &site.0, "GET", "/_auth/callback", query, vec![])).await,
+        Provider::Kit(p) => p.finish(sign_in_kit::request(&pending, &site.0, "GET", "/_auth/callback", query, vec![])).await,
         Provider::Dev | Provider::Header(_) | Provider::Token(_) => Step::Refuse("This sign-in has no callback.".into()),
     };
     respond(&shell, auth, &site, &who, &pending, step)

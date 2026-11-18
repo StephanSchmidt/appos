@@ -49,7 +49,7 @@ pub async fn shell_with_policy(auth_toml: &str, policy_csv: &str) -> (tempfile::
     std::fs::write(&path, policy_csv).unwrap();
     let policy = crate::access::Policies::load(&path, crate::kit::Kits::builtin().names()).await.unwrap();
     let auth = (!auth_toml.is_empty()).then(|| crate::auth::Auth::parse(auth_toml, "http://localhost", [7; 32], "127.0.0.1:8080").unwrap());
-    let shell = Shell::new(Parts { auth, policy: Some(policy), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
+    let shell = Shell::new(Parts { auth, policy: Some(Arc::new(policy)), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
     crate::deploy::deploy(&shell, &kv_bundle().pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();
     (dir, shell)
 }
@@ -62,7 +62,7 @@ pub async fn shell_with_token(secret: &str) -> (tempfile::TempDir, Arc<Shell>) {
         .await
         .unwrap();
     let auth = crate::auth::Auth::token_with(secret.into(), "http://localhost", [7; 32]);
-    let shell = Shell::new(Parts { auth: Some(auth), policy: Some(policy), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
+    let shell = Shell::new(Parts { auth: Some(auth), policy: Some(Arc::new(policy)), ..parts(dir.path().join("data"), Risk::default()) }).unwrap();
     crate::deploy::deploy(&shell, &kv_bundle().pack().unwrap(), crate::platform::Actor::Cli).await.unwrap();
     (dir, shell)
 }

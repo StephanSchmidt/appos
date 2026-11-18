@@ -1,10 +1,19 @@
-//! The plugin provider: sign-in by a WebAssembly component, for what the
-//! built-in providers don't do (GitHub, an in-house identity service, a
-//! gateway to LDAP). Its world is `appos:auth/sign-in` (wit-auth/auth.wit).
+//! The kit provider: sign-in by a kit in Wasm, for what the built-in
+//! providers don't do (GitHub, an in-house identity service, a gateway to
+//! LDAP). Its world is `appos:auth/sign-in` (wit-auth/auth.wit).
 //!
 //! ```toml
-//! provider = "plugin"
-//! wasm = "acme-auth.wasm"          # found next to auth.toml
+//! # auth.toml
+//! provider = "kit"
+//! kit = "acme-sign-in"             # the kit's directory, next to auth.toml
+//!
+//! # acme-sign-in/kit.toml (wasm_kit.rs)
+//! [kit]
+//! id = "acme-sign-in"
+//! name = "Acme sign-in"
+//! version = "1.0.0"
+//! wasm = "acme-auth.wasm"
+//! [sign-in]
 //! hosts = ["login.acme.com"]       # the only hosts it may call
 //! [config]                         # what config.get returns
 //! tenant = "acme"
@@ -12,11 +21,11 @@
 //! client-secret = "ACME_SECRET"
 //! ```
 //!
-//! The plugin is a sandbox like an app: it may call `config.get` and
+//! The kit is a sandbox like an app: it may call `config.get` and
 //! `http.fetch`, and nothing else. No files, no environment, no kv; fetch
 //! only to `hosts`, over https (http only to localhost), without following
 //! redirects. Each step runs in a fresh instance with an app's fuel and
-//! memory, for at most 10 seconds. A plugin that fails shows "sign-in
+//! memory, for at most 10 seconds. A kit that fails shows "sign-in
 //! unavailable"; the site goes on.
 
 use std::collections::BTreeMap;
@@ -36,7 +45,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use super::oidc::secure;
 use super::routes::{Pending, Step};
-use super::{Identity, need, take_list, take_str};
+use super::{Identity, need, take_str};
 use crate::runtime::{ALLOWED_WASI, FUEL, MEMORY, imports, is_local};
 use crate::terminal_errorln as eprintln;
 
@@ -57,7 +66,7 @@ pub use types::Request;
 const TIME: Duration = Duration::from_secs(10);
 /// Fetches in one step.
 const MAX_FETCHES: u32 = 20;
-/// Bytes of an answer to a fetch, and of a page the plugin shows.
+/// Bytes of an answer to a fetch, and of a page the kit shows.
 const MAX_BODY: u64 = 1 << 20;
 const MAX_PAGE: usize = 256 * 1024;
 /// Bytes of what one step prints.
@@ -66,47 +75,28 @@ const PACKAGE: &str = "appos:auth/";
 /// The interfaces of the sign-in world.
 const OWN: &[&str] = &["types", "config", "http"];
 
-pub struct Plugin {
-    /// The file, for messages.
+pub struct SignInKit {
+    /// The kit's id, for messages.
     file: String,
     pre: SignInPre<Ctx>,
     hosts: Arc<Vec<String>>,
     config: Arc<BTreeMap<String, String>>,
 }
 
-impl Plugin {
-    /// Reads the plugin's settings out of auth.toml, whose directory is
-    /// `dir`, and compiles it: a plugin that can't run stops the shell
-    /// from starting.
-    pub fn parse(table: &mut toml::Table, dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<Plugin> {
-        let wasm = need(take_str(table, "wasm")?, "plugin", "wasm = \"sign-in.wasm\", the component")?;
-        let hosts = take_list(table, "hosts")?.unwrap_or_default();
-        for h in &hosts {
+impl SignInKit {
+    /// Reads the kit auth.toml names, from its directory next to auth.toml
+    /// (`dir`), and compiles it: a kit that can't run stops the shell from
+    /// starting.
+    pub fn parse(table: &mut toml::Table, dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<SignInKit> {
+        let kit = need(take_str(table, "kit")?, "kit", "kit = \"sign-in\", the kit's directory")?;
+        let found = crate::wasm_kit::sign_in(&dir.join(&kit), env).with_context(|| format!("kit = {kit:?}"))?;
+        for h in &found.hosts {
             if h.contains(['/', ':', '@', '?', '#']) || h.chars().any(char::is_whitespace) {
-                bail!("hosts: {h:?}: give the host alone, like \"login.acme.com\"");
+                bail!("kit = {kit:?}: [sign-in] hosts: {h:?}: give the host alone, like \"login.acme.com\"");
             }
         }
-        let mut config = BTreeMap::new();
-        for (key, value) in take_table(table, "config")? {
-            match value {
-                toml::Value::String(s) => config.insert(key, s),
-                v => bail!("[config] {key} = {v}: give a text"),
-            };
-        }
-        for (key, value) in take_table(table, "config-env")? {
-            let toml::Value::String(var) = value else { bail!("[config-env] {key}: give the name of an environment variable") };
-            if config.contains_key(&key) {
-                bail!("{key} is in [config] and [config-env]: give it once");
-            }
-            match env(&var).filter(|s| !s.is_empty()) {
-                Some(s) => config.insert(key, s),
-                None => bail!("[config-env] {key} = {var:?}, but {var} is not set"),
-            };
-        }
-        let path = dir.join(&wasm);
-        let bytes = std::fs::read(&path).with_context(|| format!("wasm = {wasm:?}: {}", path.display()))?;
-        let pre = compile(&bytes).with_context(|| format!("wasm = {wasm:?}"))?;
-        Ok(Plugin { file: wasm, pre, hosts: Arc::new(hosts.into_iter().map(|h| h.to_lowercase()).collect()), config: Arc::new(config) })
+        let pre = compile(&found.wasm).with_context(|| format!("kit {}", found.id))?;
+        Ok(SignInKit { file: found.id, pre, hosts: Arc::new(found.hosts.into_iter().map(|h| h.to_lowercase()).collect()), config: Arc::new(found.config) })
     }
 
     pub async fn start(&self, req: Request) -> Step {
@@ -136,8 +126,8 @@ impl Plugin {
         store.set_epoch_deadline(1);
         store.epoch_deadline_async_yield_and_update(1);
         let ran = timeout_at(deadline, async {
-            let plugin = self.pre.instantiate_async(&mut store).await?;
-            let provider = plugin.appos_auth_provider();
+            let kit = self.pre.instantiate_async(&mut store).await?;
+            let provider = kit.appos_auth_provider();
             if start { provider.call_start(&mut store, &req).await } else { provider.call_finish(&mut store, &req).await }
         })
         .await;
@@ -150,7 +140,7 @@ impl Plugin {
         }
     }
 
-    /// The plugin's step, checked.
+    /// The kit's step, checked.
     fn step(&self, step: types::Step) -> Step {
         match step {
             types::Step::Page(html) if html.len() > MAX_PAGE => self.failed(&format!("a page of {} bytes, more than {MAX_PAGE}", html.len())),
@@ -175,7 +165,7 @@ impl Plugin {
     }
 }
 
-/// The request a plugin gets, for the sign-in `pending`.
+/// The request a sign-in kit gets, for the sign-in `pending`.
 pub fn request(pending: &Pending, origin: &str, method: &str, path: &str, query: Vec<(String, String)>, form: Vec<(String, String)>) -> Request {
     let origin = origin.trim_end_matches('/');
     Request {
@@ -192,14 +182,6 @@ pub fn request(pending: &Pending, origin: &str, method: &str, path: &str, query:
     }
 }
 
-fn take_table(table: &mut toml::Table, key: &str) -> anyhow::Result<toml::Table> {
-    match table.remove(key) {
-        None => Ok(toml::Table::new()),
-        Some(toml::Value::Table(t)) => Ok(t),
-        Some(v) => bail!("{key} = {v}: give a table, [{key}]"),
-    }
-}
-
 /// Compiles the component, refuses imports outside the sign-in world and
 /// the allowed WASI, and checks it exports the provider.
 fn compile(bytes: &[u8]) -> anyhow::Result<SignInPre<Ctx>> {
@@ -209,7 +191,7 @@ fn compile(bytes: &[u8]) -> anyhow::Result<SignInPre<Ctx>> {
     for (import, _) in imports(&engine, &component) {
         let own = import.strip_prefix(PACKAGE).is_some_and(|i| OWN.contains(&i));
         if !own && !ALLOWED_WASI.iter().any(|w| import.starts_with(w)) {
-            problems.push(format!("imports {import}, which sign-in plugins can never use"));
+            problems.push(format!("imports {import}, which sign-in kits can never use"));
         }
     }
     if !problems.is_empty() {
@@ -264,7 +246,7 @@ impl http::Host for Ctx {
     }
 }
 
-/// Whether a plugin may fetch `url`: https to one of `hosts`, or http to
+/// Whether a sign-in kit may fetch `url`: https to one of `hosts`, or http to
 /// one of them on this machine.
 fn allowed(url: &str, hosts: &[String]) -> Result<(), String> {
     let uri: ureq::http::Uri = url.parse().map_err(|_| format!("{url:?} is no URL"))?;
@@ -272,7 +254,7 @@ fn allowed(url: &str, hosts: &[String]) -> Result<(), String> {
     let listed = hosts.contains(&host);
     let local = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(&host.as_str());
     match uri.scheme_str() {
-        _ if !listed => Err(format!("{host:?} is not in auth.toml's hosts ({})", if hosts.is_empty() { "none".to_string() } else { hosts.join(", ") })),
+        _ if !listed => Err(format!("{host:?} is not in kit.toml's hosts ({})", if hosts.is_empty() { "none".to_string() } else { hosts.join(", ") })),
         Some("https") => Ok(()),
         Some("http") if local => Ok(()),
         _ => Err(format!("{url:?}: only https (http only to localhost)")),
@@ -319,10 +301,22 @@ mod tests {
 
     const WASM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/auth/testing-plugin.wat");
 
+    /// A sign-in kit's directory: kit.toml, with `rest` after [kit], and
+    /// testing-plugin.wat.
+    fn kit_dir(rest: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kit.toml"), format!("[kit]\nid = \"acme-sign-in\"\nname = \"Acme\"\nversion = \"1\"\nwasm = \"{WASM}\"\n{rest}"))
+            .unwrap();
+        dir
+    }
+
     /// A shell signing in with testing-plugin.wat, which fetches `url`.
     fn shell(hosts: &str, url: Option<&str>) -> Arc<Shell> {
         let config = url.map(|u| format!("[config]\nurl = \"{u}\"\n")).unwrap_or_default();
-        crate::testing::shell_with_auth(&format!("provider = \"plugin\"\nwasm = \"{WASM}\"\nhosts = [\"{hosts}\"]\n{config}"))
+        let dir = kit_dir(&format!("[sign-in]\nhosts = [\"{hosts}\"]\n{config}"));
+        let shell = crate::testing::shell_with_auth(&format!("provider = \"kit\"\nkit = \"{}\"\n", dir.path().display()));
+        drop(dir);
+        shell
     }
 
     /// An identity service on a free port: /me answers an email, /moved
@@ -346,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plugin_signs_in_as_what_it_fetched() {
+    async fn a_sign_in_kit_signs_in_as_what_it_fetched() {
         let me = format!("{}/me", service().await);
         let app = crate::web::router(shell("127.0.0.1", Some(&me)));
         let (status, headers, body) = sign_in(&app).await;
@@ -357,10 +351,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plugin_reaches_only_its_hosts_and_follows_no_redirect() {
+    async fn a_sign_in_kit_reaches_only_its_hosts_and_follows_no_redirect() {
         let service = service().await;
         for (hosts, url, said) in [
-            ("login.acme.com", format!("{service}/me"), "\"127.0.0.1\" is not in auth.toml's hosts (login.acme.com)"),
+            ("login.acme.com", format!("{service}/me"), "\"127.0.0.1\" is not in kit.toml's hosts (login.acme.com)"),
             ("127.0.0.1", format!("{service}/moved"), "\"\" is not an email address"),
         ] {
             let app = crate::web::router(shell(hosts, Some(&url)));
@@ -371,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plugin_that_fails_shows_sign_in_unavailable_and_the_site_goes_on() {
+    async fn a_sign_in_kit_that_fails_shows_sign_in_unavailable_and_the_site_goes_on() {
         let app = crate::web::router(shell("127.0.0.1", None));
         let (status, _, body) = sign_in(&app).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -380,14 +374,15 @@ mod tests {
     }
 
     #[test]
-    fn the_example_plugin_carries_this_contract() {
+    fn the_example_sign_in_kit_carries_this_contract() {
         let example = include_str!("../../../examples/auth-github/wit/auth.wit");
         assert!(example == include_str!("../../../wit-auth/auth.wit"), "copy wit-auth/auth.wit to examples/auth-github/wit/");
     }
 
     #[test]
     fn its_redirects_and_pages_are_checked() {
-        let p = Plugin::parse(&mut toml::from_str(&format!("wasm = \"{WASM}\"")).unwrap(), Path::new("."), &|_| None).unwrap();
+        let dir = kit_dir("[sign-in]\n");
+        let p = SignInKit::parse(&mut toml::from_str("kit = \".\"").unwrap(), dir.path(), &|_| None).unwrap();
         let redirect = |to: &str| matches!(p.step(types::Step::Redirect(to.into())), Step::Redirect(_));
         assert!(redirect("https://login.acme.com/authorize?x=1") && redirect("/webinars") && redirect("http://localhost:9000/x"));
         assert!(!redirect("http://login.acme.com/") && !redirect("//evil.example/") && !redirect("javascript:alert(1)"));
@@ -398,13 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn plugins_fetch_only_from_their_hosts() {
+    fn sign_in_kits_fetch_only_from_their_hosts() {
         let hosts = vec!["login.acme.com".to_string(), "127.0.0.1".to_string()];
         assert!(allowed("https://login.acme.com/token", &hosts).is_ok());
         assert!(allowed("https://LOGIN.acme.com:8443/x", &hosts).is_ok());
         assert!(allowed("http://127.0.0.1:9000/me", &hosts).is_ok());
         assert!(allowed("http://login.acme.com/token", &hosts).unwrap_err().contains("only https"));
-        assert!(allowed("https://evil.example/", &hosts).unwrap_err().contains("not in auth.toml's hosts"));
+        assert!(allowed("https://evil.example/", &hosts).unwrap_err().contains("not in kit.toml's hosts"));
         assert!(allowed("https://login.acme.com@evil.example/", &hosts).is_err());
         assert!(allowed("https://login.acme.com.evil.example/", &hosts).is_err());
         assert!(allowed("ftp://login.acme.com/", &hosts).is_err());
@@ -412,23 +407,27 @@ mod tests {
     }
 
     #[test]
-    fn auth_toml_names_the_component_and_what_it_may_use() {
+    fn the_kit_says_what_it_may_use() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("p.wat"), include_str!("testing-plugin.wat")).unwrap();
         std::fs::write(dir.path().join("app.wat"), include_str!("../testing.wat")).unwrap();
-        let parse = |text: &str| {
-            Plugin::parse(&mut toml::from_str(text).unwrap(), dir.path(), &|var| (var == "SET").then(|| "s3cret".into()))
+        let parse = |kit_toml: &str| {
+            std::fs::write(dir.path().join("kit.toml"), format!("[kit]\nid = \"acme-sign-in\"\nname = \"Acme\"\nversion = \"1\"\n{kit_toml}")).unwrap();
+            SignInKit::parse(&mut toml::from_str("kit = \".\"").unwrap(), dir.path(), &|var| (var == "SET").then(|| "s3cret".into()))
                 .map(|p| p.config.as_ref().clone())
                 .map_err(|e| format!("{e:#}"))
         };
-        let config = parse("wasm = \"p.wat\"\nhosts = [\"login.acme.com\"]\n[config]\nurl = \"u\"\n[config-env]\nsecret = \"SET\"").unwrap();
+        let config = parse("wasm = \"p.wat\"\n[sign-in]\nhosts = [\"login.acme.com\"]\n[config]\nurl = \"u\"\n[config-env]\nsecret = \"SET\"").unwrap();
         assert_eq!(config.into_iter().collect::<Vec<_>>(), [("secret".to_string(), "s3cret".to_string()), ("url".into(), "u".into())]);
-        assert!(parse("hosts = []").unwrap_err().contains("needs wasm"));
-        assert!(parse("wasm = \"missing.wasm\"").unwrap_err().contains("missing.wasm"));
-        assert!(parse("wasm = \"p.wat\"\nhosts = [\"https://login.acme.com\"]").unwrap_err().contains("give the host alone"));
-        assert!(parse("wasm = \"p.wat\"\n[config-env]\nsecret = \"UNSET\"").unwrap_err().contains("UNSET is not set"));
-        assert!(parse("wasm = \"p.wat\"\n[config]\nn = 1").unwrap_err().contains("give a text"));
-        let app = parse("wasm = \"app.wat\"").unwrap_err();
-        assert!(app.contains("imports appos:framework/registry, which sign-in plugins can never use"), "{app}");
+        assert!(parse("wasm = \"p.wat\"").unwrap_err().contains("no [sign-in]: not a sign-in kit"));
+        assert!(parse("wasm = \"missing.wasm\"\n[sign-in]").unwrap_err().contains("missing.wasm"));
+        assert!(parse("wasm = \"p.wat\"\n[sign-in]\nhosts = [\"https://login.acme.com\"]").unwrap_err().contains("give the host alone"));
+        assert!(parse("wasm = \"p.wat\"\n[sign-in]\n[config-env]\nsecret = \"UNSET\"").unwrap_err().contains("UNSET is not set"));
+        assert!(parse("wasm = \"p.wat\"\n[sign-in]\n[config]\nn = 1").unwrap_err().contains("invalid type"));
+        assert!(parse("wasm = \"p.wat\"\nwit = [\"x.wit\"]\n[sign-in]").unwrap_err().contains("offers apps nothing"));
+        let app = parse("wasm = \"app.wat\"\n[sign-in]").unwrap_err();
+        assert!(app.contains("imports appos:framework/registry, which sign-in kits can never use"), "{app}");
+        let err = crate::auth::Auth::parse_in("provider = \"kit\"", "http://localhost", [7; 32], "127.0.0.1:8080", &|_| None, dir.path()).err().unwrap();
+        assert!(err.to_string().contains("provider \"kit\" needs kit = \"sign-in\""), "{err}");
     }
 }

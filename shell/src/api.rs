@@ -192,7 +192,7 @@ pub struct Spec {
     pub git: Option<String>,
     /// The WIT files, by name.
     pub wit: BTreeMap<String, String>,
-    /// The WIT of sign-in plugins (`provider = "plugin"` in auth.toml), by
+    /// The WIT of sign-in kits (`provider = "kit"` in auth.toml), by
     /// name: apart from `wit`, which apps build against.
     #[serde(default)]
     pub sign_in: BTreeMap<String, String>,

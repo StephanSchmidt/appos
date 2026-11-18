@@ -4,8 +4,8 @@
 //!
 //! Providers: `dev` (pick a name, for trying things on localhost),
 //! `header` (a proxy in front signs people in and sends who they are),
-//! `oidc` (any OpenID Connect identity provider) and `plugin` (a WASM
-//! component for anything else).
+//! `oidc` (any OpenID Connect identity provider) and `kit` (a sign-in kit
+//! in Wasm, for anything else).
 //!
 //! Who is asking feeds the policy (access.rs): a host call goes through
 //! only if the app holds the grant and the policy lets this user make it.
@@ -13,10 +13,10 @@
 
 mod dev;
 mod oidc;
-mod plugin;
 mod proxy;
 mod routes;
 pub mod session;
+mod sign_in_kit;
 pub mod token;
 pub mod tokens;
 
@@ -136,7 +136,7 @@ pub enum Provider {
     Dev,
     Header(proxy::Header),
     Oidc(oidc::Oidc),
-    Plugin(plugin::Plugin),
+    Kit(sign_in_kit::SignInKit),
     /// No auth.toml: the link with a token that the shell prints.
     Token(token::Token),
 }
@@ -174,7 +174,7 @@ impl Auth {
         Auth::parse_in(text, origin, key, addr, env, Path::new("."))
     }
 
-    /// `dir` is auth.toml's directory, where a plugin's wasm is.
+    /// `dir` is auth.toml's directory, where a sign-in kit's directory is.
     pub fn parse_in(text: &str, origin: &str, key: [u8; 32], addr: &str, env: &dyn Fn(&str) -> Option<String>, dir: &Path) -> anyhow::Result<Auth> {
         let mut table: toml::Table = toml::from_str(text)?;
         let session_secs = match table.remove("session-hours") {
@@ -184,8 +184,8 @@ impl Auth {
         } * 3600;
         let provider = match table.remove("provider") {
             Some(toml::Value::String(p)) => p,
-            Some(v) => anyhow::bail!("provider = {v}: give one of dev, header, oidc, plugin"),
-            None => anyhow::bail!("no provider: give provider = \"dev\", \"header\", \"oidc\" or \"plugin\""),
+            Some(v) => anyhow::bail!("provider = {v}: give one of dev, header, oidc, kit"),
+            None => anyhow::bail!("no provider: give provider = \"dev\", \"header\", \"oidc\" or \"kit\""),
         };
         let provider_name = provider;
         let provider = match provider_name.as_str() {
@@ -197,8 +197,8 @@ impl Auth {
             }
             "header" => Provider::Header(proxy::Header::parse(&mut table)?),
             "oidc" => Provider::Oidc(oidc::Oidc::parse(&mut table, env)?),
-            "plugin" => Provider::Plugin(plugin::Plugin::parse(&mut table, dir, env)?),
-            other => anyhow::bail!("unknown provider {other:?}; known: dev, header, oidc, plugin"),
+            "kit" => Provider::Kit(sign_in_kit::SignInKit::parse(&mut table, dir, env)?),
+            other => anyhow::bail!("unknown provider {other:?}; known: dev, header, oidc, kit"),
         };
         no_more(&table, &provider_name)?;
         Ok(Auth { provider, cookies: Cookies::new(key, origin.starts_with("https://")), session_secs })
@@ -208,7 +208,7 @@ impl Auth {
     pub fn who(&self, headers: &HeaderMap, peer: Option<IpAddr>) -> Who {
         match &self.provider {
             Provider::Header(h) => h.who(headers, peer),
-            Provider::Dev | Provider::Oidc(_) | Provider::Plugin(_) | Provider::Token(_) => Who(self.cookies.read::<Identity>(headers, SESSION).map(Arc::new)),
+            Provider::Dev | Provider::Oidc(_) | Provider::Kit(_) | Provider::Token(_) => Who(self.cookies.read::<Identity>(headers, SESSION).map(Arc::new)),
         }
     }
 
@@ -227,7 +227,7 @@ impl Auth {
     /// Where signing out goes.
     pub async fn sign_out(&self, origin: &str) -> String {
         match &self.provider {
-            Provider::Dev | Provider::Plugin(_) | Provider::Token(_) => "/".into(),
+            Provider::Dev | Provider::Kit(_) | Provider::Token(_) => "/".into(),
             Provider::Header(h) => h.sign_out(),
             Provider::Oidc(o) => o.sign_out(origin).await,
         }

@@ -50,12 +50,12 @@ wit/.
 In the repo root, `make typescript` builds the TypeScript example and
 `make zig` runs the Zig one's check.
 
-## A sign-in plugin: auth-github
+## A sign-in kit: auth-github
 
-Not an app: a component of the world `appos:auth/sign-in` (wit/auth.wit),
-which signs in the members of one GitHub organization, with their teams
-as groups. auth.toml shows how the shell names it; the README's "Your own
-sign-in" explains the world.
+Not an app: a kit of the world `appos:auth/sign-in` (wit/auth.wit), which
+signs in the members of one GitHub organization, with their teams as
+groups. auth.toml names it, kit.toml says what it may call; the README's
+"Your own sign-in" explains the world.
 
     make check       # formatting, lints, tests
-    make build       # auth_github.wasm, next to auth.toml
+    make build       # auth_github.wasm, next to kit.toml

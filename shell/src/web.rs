@@ -13,6 +13,7 @@
 //! platform API, with a token from `appos login` (`api_only`). Both answer
 //! only under their own names (`own_host`).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -284,7 +285,7 @@ async fn icon(State(shell): S, Path(id): Path<String>) -> Response {
 // ---- platform API, for the appos CLI --------------------------------------
 
 /// The contract apps build against, served to `appos new`.
-/// The contract of sign-in plugins (auth/plugin.rs).
+/// The contract of sign-in kits (auth/sign_in_kit.rs).
 const SIGN_IN_WIT: &str = include_str!("../../wit-auth/auth.wit");
 
 /// The WIT package apps build against, as appos.wit names it:
@@ -318,6 +319,7 @@ pub fn platform_router(shell: Arc<Shell>, own: Option<&str>) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(shell.clone(), api_only));
     let router = Router::new()
         .route("/_platform/spec", get(spec))
+        .route("/_platform/fakes", get(fakes))
         .route("/_platform/install", get(install))
         .route("/_platform/logout", post(logout))
         .merge(api)
@@ -679,6 +681,23 @@ async fn rollback(State(shell): S, who: Who, Path(id): Path<String>, axum::Json(
 
 /// What this platform offers: `appos login` saves it, `appos hosts` shows it,
 /// `appos new` writes its WIT files into the app.
+/// The kits' fakes, for `appos sync` (wasm_kit.rs): their files by path,
+/// in base64. Public, like the contract.
+async fn fakes(State(shell): S) -> Response {
+    use base64::Engine as _;
+    match crate::wasm_kit::fake_files(&shell.kits, &shell.engine) {
+        Ok(files) => {
+            let files: BTreeMap<String, String> =
+                files.into_iter().map(|(path, bytes)| (path, base64::engine::general_purpose::STANDARD.encode(bytes))).collect();
+            axum::Json(files).into_response()
+        }
+        Err(e) => {
+            eprintln!("the kits' fakes: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "the kits' fakes could not be made").into_response()
+        }
+    }
+}
+
 async fn spec(State(shell): S) -> Response {
     let apps = shell
         .state
@@ -928,7 +947,7 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
     let access = crate::access::of(shell, who, app);
     let started = Instant::now();
     let user = crate::access::user(shell, who);
-    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access, user, shell.state.serving()).await;
+    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access, user, shell.live()).await;
     drop(permit);
     if cost.sent > 0 {
         shell.outbox.wake();
@@ -1006,7 +1025,7 @@ async fn kit_page(
         page: Some(crate::kit::Page { method: req.method.to_string(), path: below.to_string(), url: format!("{}/{name}", shell.origin) }),
         deadline: Instant::now() + KIT_PAGE_TIME,
         may,
-        serving: shell.state.serving(),
+        live: shell.live(),
     });
     let request =
         KitRequest { method: req.method.to_string(), path: req.path.clone(), params, query: req.query, form: req.form, origin: shell.origin.clone(), htmx };
@@ -1383,6 +1402,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_platform_api_serves_the_kits_fakes_without_a_token() {
+        let platform = platform_router(shell(), None);
+        let resp = platform.oneshot(Request::builder().uri("/_platform/fakes").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(to_bytes(resp.into_body(), 1024).await.unwrap().as_ref(), b"{}", "kv and the user bring no fakes");
+    }
+
+    #[tokio::test]
     async fn an_oversized_app_request_is_rejected_before_dispatch() {
         let app = router(shell());
         let response = app.oneshot(Request::builder().method("POST").uri("/missing").body(Body::from(vec![b'x'; 256 * 1024 + 1])).unwrap()).await.unwrap();
@@ -1495,7 +1522,7 @@ mod tests {
     async fn desk_shell(policy: Option<&str>) -> (tempfile::TempDir, Arc<Shell>) {
         let dir = tempfile::tempdir().unwrap();
         let policy = match policy {
-            Some(text) => Some(crate::access::Policies::built_in(text, desk_kits().names()).await.unwrap()),
+            Some(text) => Some(Arc::new(crate::access::Policies::built_in(text, desk_kits().names()).await.unwrap())),
             None => None,
         };
         let parts = crate::shell::Parts { kits: desk_kits(), policy, ..crate::testing::parts(dir.path().join("data"), Default::default()) };

@@ -7,9 +7,13 @@ use crate::terminal_println as println;
 
 const USAGE: &str = "\
 PROGRAM [--addr 127.0.0.1:8080] [--platform-addr IP:PORT] [--name NAME] [--git URL]
-        [--origin URL] [--data DIR] [--risk FILE] [--auth FILE --policy FILE | --no-auth] [APP...]
+        [--origin URL] [--data DIR] [--risk FILE] [--auth FILE --policy FILE | --no-auth]
+        [--kit DIR]... [APP...]
 PROGRAM --contract    the WIT apps build against, as JSON (appos sync --shell)
+PROGRAM --fakes DIR   writes the kits' fakes into DIR, for appos dev (appos sync --shell)
 PROGRAM --dev APP...  what appos dev --shell runs: the apps, open, reloading on each line on stdin
+
+--kit DIR: a kit in Wasm, its kit.toml in DIR; once per kit
 PROGRAM --version";
 
 /// What the command line asks for.
@@ -18,7 +22,10 @@ pub(crate) enum Run {
     /// Serve as `appos dev` does: each line on stdin reloads the apps
     /// (`stdin_reloads`).
     Dev(Box<crate::Options>),
-    Contract,
+    /// The contract with these Wasm kits.
+    Contract(Vec<PathBuf>),
+    /// Write the fakes into this directory.
+    Fakes(PathBuf),
     /// --help, --version: printed already.
     Nothing,
 }
@@ -27,7 +34,7 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
     fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<String> {
         args.next().filter(|v| !v.starts_with("--") && v != "-h").ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))
     }
-    let (mut dev, mut contract) = (false, false);
+    let (mut dev, mut contract, mut fakes) = (false, false, None);
     let mut opts = crate::Options {
         addr: "127.0.0.1:8080".into(),
         platform_addr: None,
@@ -37,6 +44,7 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
         origin: None,
         data: PathBuf::from("appos-data"),
         apps: vec![],
+        kits: vec![],
         reload: None,
         risk: Default::default(),
         keep_examples: false,
@@ -57,6 +65,8 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
             "--no-auth" => opts.no_auth = true,
             "--dev" => dev = true,
             "--contract" => contract = true,
+            "--fakes" => fakes = Some(PathBuf::from(value(&mut args, &arg)?)),
+            "--kit" => opts.kits.push(value(&mut args, &arg)?.into()),
             "--risk" => {
                 let path = value(&mut args, &arg)?;
                 opts.risk = crate::Risk::load(std::path::Path::new(&path))?;
@@ -74,12 +84,16 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
         }
     }
     if contract {
-        return Ok(Run::Contract);
+        return Ok(Run::Contract(opts.kits));
+    }
+    if let Some(dir) = fakes {
+        return Ok(Run::Fakes(dir));
     }
     if dev {
         let Some(first) = opts.apps.first() else { anyhow::bail!("--dev runs apps: give their directories") };
         let mut dev = crate::Options::dev(first.clone(), opts.addr.clone(), tokio::sync::mpsc::channel(1).1);
         dev.apps = opts.apps.clone();
+        dev.kits = opts.kits.clone();
         dev.risk = opts.risk;
         return Ok(Run::Dev(Box::new(dev)));
     }

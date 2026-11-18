@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+# A platform's fakes (/_platform/fakes) arrive in base64.
+base64 = "0.22"
 appos-shell = { path = "../shell" }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }

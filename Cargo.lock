@@ -80,6 +80,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "appos-shell",
+ "base64 0.22.1",
  "chrono",
  "oxc_allocator",
  "oxc_ast",

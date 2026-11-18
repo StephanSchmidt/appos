@@ -39,7 +39,7 @@ pub struct Shell {
     /// Sign-in, when `--auth` set it up.
     pub auth: Option<Auth>,
     /// Who may call what, when `--policy` set it up (access.rs).
-    pub policy: Option<Policies>,
+    pub policy: Option<Arc<Policies>>,
     /// Deploys unzip, compile and run init one at a time, outside the
     /// state's lock: a zip bomb or a slow compile can't pile up.
     pub loads: tokio::sync::Semaphore,
@@ -58,7 +58,7 @@ pub struct Parts {
     pub kits: Kits,
     pub keep_examples: bool,
     pub auth: Option<Auth>,
-    pub policy: Option<Policies>,
+    pub policy: Option<Arc<Policies>>,
 }
 
 impl Shell {
@@ -66,7 +66,7 @@ impl Shell {
     /// the kits' deliveries; in a Tokio runtime.
     pub fn new(p: Parts) -> anyhow::Result<Arc<Shell>> {
         let state = State::open(p.platform.clone(), p.risk.clone())?;
-        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits, state.serving());
+        let outbox = crate::outbox::start(p.db.clone(), p.platform.clone(), &p.kits, state.live(p.policy.clone()));
         Ok(Arc::new(Shell {
             origin: p.origin,
             name: p.name,
@@ -85,5 +85,10 @@ impl Shell {
             state,
             loads: tokio::sync::Semaphore::new(1),
         }))
+    }
+
+    /// What is live, for kits: the apps that serve and the policy.
+    pub fn live(&self) -> crate::state::Live {
+        self.state.live(self.policy.clone())
     }
 }

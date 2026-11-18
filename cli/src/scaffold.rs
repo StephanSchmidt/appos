@@ -88,10 +88,26 @@ pub fn shell_contract(shell: &str) -> anyhow::Result<BTreeMap<String, String>> {
     serde_json::from_slice(&out.stdout).with_context(|| format!("{shell} --contract printed no contract; is it built with appos_shell::Platform::main?"))
 }
 
+/// The fakes of a platform binary's kits (`<shell> --fakes DIR`), by path
+/// below the app's fakes/.
+fn shell_fakes(shell: &str) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+    let dir = tempfile::tempdir()?;
+    let out = Command::new(shell).arg("--fakes").arg(dir.path().join("fakes")).output().with_context(|| format!("could not run {shell}"))?;
+    anyhow::ensure!(out.status.success(), "{shell} --fakes failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let fakes = read_tree(&dir.path().join("fakes"));
+    for path in fakes.keys() {
+        platform::check_fake_path(path)?;
+    }
+    Ok(fakes)
+}
+
 /// The contract an app is built against.
 struct Contract {
     /// WIT files by path below wit/.
     wit: BTreeMap<String, String>,
+    /// The fakes of the platform's kits, by path below fakes/: Wasm kits
+    /// `appos dev` runs in place of them.
+    fakes: BTreeMap<String, Vec<u8>>,
     /// The platform it is from; None: built into this CLI.
     from: Option<String>,
     /// Where that platform keeps app repositories.
@@ -102,11 +118,17 @@ struct Contract {
 fn contract() -> anyhow::Result<Contract> {
     if let Some(p) = Config::load()?.current() {
         match platform::fetch_spec(&p.url) {
-            Ok(spec) => return Ok(Contract { wit: spec.wit, from: Some(format!("platform {} ({})", p.name, spec.framework)), git: spec.git }),
+            Ok(spec) => {
+                let fakes = platform::fetch_fakes(&p.url).unwrap_or_else(|e| {
+                    eprintln!("warning: {e:#}; no fakes of the platform's kits for appos dev");
+                    BTreeMap::new()
+                });
+                return Ok(Contract { wit: spec.wit, fakes, from: Some(format!("platform {} ({})", p.name, spec.framework)), git: spec.git });
+            }
             Err(e) => eprintln!("warning: {e:#}; using the built-in contract"),
         }
     }
-    Ok(Contract { wit: builtin_wit(), from: None, git: None })
+    Ok(Contract { wit: builtin_wit(), fakes: BTreeMap::new(), from: None, git: None })
 }
 
 pub fn new(name: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
@@ -115,11 +137,12 @@ pub fn new(name: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
     if dir.exists() {
         anyhow::bail!("{} already exists", dir.display());
     }
-    let Contract { wit, from, git } = contract()?;
+    let Contract { wit, fakes, from, git } = contract()?;
     let against = from.unwrap_or_else(|| "the built-in contract, fine for local development".into());
     let remote = git.map(|g| format!("{}/{name}.git", g.trim_end_matches('/')));
     let owner = git_owner();
     write_project(&dir, name, &wit, &owner, group, lang)?;
+    sync_fakes(&dir, &fakes)?;
 
     let git = git_instructions(name, remote.as_deref());
     let pad = " ".repeat(name.len() + 5);
@@ -236,12 +259,13 @@ fn replace(file: &str, text: &str, pairs: &[(&str, String)]) -> anyhow::Result<S
 pub fn sync(shell: Option<&str>) -> anyhow::Result<()> {
     let dir = std::env::current_dir()?;
     crate::app_info(&dir)?;
-    let Contract { wit, from, .. } = match shell {
-        Some(shell) => Contract { wit: shell_contract(shell)?, from: Some(shell.to_string()), git: None },
+    let Contract { wit, fakes, from, .. } = match shell {
+        Some(shell) => Contract { wit: shell_contract(shell)?, fakes: shell_fakes(shell)?, from: Some(shell.to_string()), git: None },
         None => contract()?,
     };
     let from = from.map_or("the contract built into appos".to_string(), |p| format!("the contract of {p}"));
-    let changed = sync_files(&dir, &wit)?;
+    let mut changed = sync_files(&dir, &wit)?;
+    changed.extend(sync_fakes(&dir, &fakes)?);
     let sdk = Lang::of(&dir).map(|l| format!("{} is the SDK of this appos, ", l.sdk_path())).unwrap_or_default();
     if changed.is_empty() {
         println!("Up to date: {sdk}wit/ is {from}.");
@@ -289,6 +313,55 @@ fn sync_files(dir: &Path, wit: &BTreeMap<String, String>) -> anyhow::Result<Vec<
         changed.push("tsconfig.json (verbatimModuleSyntax)".to_string());
     }
     Ok(changed)
+}
+
+/// Puts `fakes` into the app's fakes/, replacing what it held; answers
+/// which kits' fakes changed.
+fn sync_fakes(dir: &Path, fakes: &BTreeMap<String, Vec<u8>>) -> anyhow::Result<Vec<String>> {
+    let fakes_dir = dir.join("fakes");
+    let had = read_tree(&fakes_dir);
+    if &had == fakes {
+        return Ok(vec![]);
+    }
+    let kit = |path: &String| path.split('/').next().unwrap_or_default().to_string();
+    let kits: std::collections::BTreeSet<String> = had.keys().chain(fakes.keys()).map(kit).collect();
+    let mut changed = vec![];
+    for name in kits {
+        let of = |files: &BTreeMap<String, Vec<u8>>| files.iter().filter(|(p, _)| kit(p) == name).map(|(p, b)| (p.clone(), b.clone())).collect::<Vec<_>>();
+        match (of(&had), of(fakes)) {
+            (was, now) if was == now => {}
+            (_, now) if now.is_empty() => changed.push(format!("fakes/{name} (removed)")),
+            _ => changed.push(format!("fakes/{name}")),
+        }
+    }
+    if fakes_dir.exists() {
+        std::fs::remove_dir_all(&fakes_dir).with_context(|| format!("could not remove {}", fakes_dir.display()))?;
+    }
+    for (path, bytes) in fakes {
+        let file = fakes_dir.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file, bytes).with_context(|| format!("could not write {}", file.display()))?;
+    }
+    Ok(changed)
+}
+
+/// Every file below `root`, by path below it.
+fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, depth: u32, files: &mut BTreeMap<String, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() && depth < 8 {
+                walk(root, &path, depth + 1, files);
+            } else if let (Ok(rel), Ok(bytes)) = (path.strip_prefix(root), std::fs::read(&path)) {
+                files.insert(rel.to_string_lossy().replace('\\', "/"), bytes);
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    walk(root, root, 0, &mut files);
+    files
 }
 
 /// The .wit files below the app's wit/, by path below it.
@@ -508,6 +581,21 @@ mod tests {
         for name in ["assets", "admin", "Events", ""] {
             assert!(new(name, "", Lang::Rust).is_err(), "the CLI created an app the shell refuses: {name:?}");
         }
+    }
+
+    #[test]
+    fn sync_puts_the_platforms_fakes_into_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = |pairs: &[(&str, &str)]| pairs.iter().map(|(p, b)| (p.to_string(), b.as_bytes().to_vec())).collect::<BTreeMap<_, _>>();
+        let crm = files(&[("acme-crm/kit.toml", "[kit]"), ("acme-crm/kit.wasm", "wasm"), ("acme-crm/wit/crm.wit", "package acme:crm;")]);
+        assert_eq!(sync_fakes(dir.path(), &BTreeMap::new()).unwrap(), Vec::<String>::new());
+        assert!(!dir.path().join("fakes").exists(), "no fakes, no folder");
+        assert_eq!(sync_fakes(dir.path(), &crm).unwrap(), ["fakes/acme-crm"]);
+        assert_eq!(read_tree(&dir.path().join("fakes")), crm);
+        assert_eq!(sync_fakes(dir.path(), &crm).unwrap(), Vec::<String>::new());
+        let erp = files(&[("acme-erp/kit.toml", "[kit]"), ("acme-erp/kit.wasm", "wasm")]);
+        assert_eq!(sync_fakes(dir.path(), &erp).unwrap(), ["fakes/acme-crm (removed)", "fakes/acme-erp"]);
+        assert_eq!(read_tree(&dir.path().join("fakes")), erp);
     }
 
     #[test]

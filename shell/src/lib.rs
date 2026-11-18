@@ -26,6 +26,7 @@ pub mod terminal;
 mod testing;
 mod tx;
 mod usage;
+mod wasm_kit;
 mod web;
 
 pub use manifest::{Manifest, Risk, validate_app_id};
@@ -59,6 +60,9 @@ pub struct Options {
     /// App directories, or their `app.toml` files. A deployed app of the
     /// same id replaces one of these.
     pub apps: Vec<PathBuf>,
+    /// Directories of Wasm kits, each with its kit.toml (wasm_kit.rs):
+    /// loaded with the platform's own.
+    pub kits: Vec<PathBuf>,
     /// Each message reloads every app from disk (used by `appos dev`).
     pub reload: Option<tokio::sync::mpsc::Receiver<()>>,
     /// The grants' risk levels, as the company rates them.
@@ -126,8 +130,14 @@ impl Platform {
                     opts.reload = Some(args::stdin_reloads());
                     serve_with(*opts, kits).await
                 }
-                args::Run::Contract => {
+                args::Run::Contract(dirs) => {
+                    let kits = wasm_kit::with_dirs(kits, &dirs)?;
                     crate::terminal_println!("{}", serde_json::to_string_pretty(&kits.contract())?);
+                    Ok(())
+                }
+                args::Run::Fakes(dir) => {
+                    let n = kits.write_fakes(&dir)?;
+                    crate::terminal_println!("{n} fakes in {}", dir.display());
                     Ok(())
                 }
                 args::Run::Nothing => Ok(()),
@@ -135,7 +145,9 @@ impl Platform {
         }
         .await;
         if let Err(error) = result {
-            eprintln!("error: {error:#}");
+            // Synchronous: the log queue's thread would not get to it
+            // before exit.
+            crate::terminal_eprintln!("error: {error:#}");
             std::process::exit(1);
         }
     }
@@ -154,6 +166,7 @@ impl Options {
             git: None,
             origin: None,
             data: dir.join("appos-data"),
+            kits: fakes(&dir),
             apps: vec![dir],
             reload: Some(reload),
             risk: Default::default(),
@@ -163,6 +176,21 @@ impl Options {
             no_auth: true,
         }
     }
+}
+
+/// The kits `appos dev` runs the app at `dir` with: the built-in ones and
+/// the fakes `appos sync` put into its fakes/.
+pub fn dev_kits(dir: &std::path::Path) -> anyhow::Result<kit::Kits> {
+    wasm_kit::add_dirs(kit::Kits::builtin(), &fakes(dir), false)
+}
+
+/// The fakes `appos sync` put into the app at `dir` (fakes/<kit>/kit.toml):
+/// Wasm kits that stand in for the platform's.
+fn fakes(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir.join("fakes")) else { return vec![] };
+    let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("kit.toml").is_file()).collect();
+    dirs.sort();
+    dirs
 }
 
 /// Loads the apps from directories, with the checks a deployed bundle gets
@@ -203,12 +231,14 @@ pub async fn serve(opts: Options) -> anyhow::Result<()> {
 
 async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     check_auth(&opts)?;
+    let kits = wasm_kit::with_dirs(kits, &opts.kits)?;
     opts.risk.check(&kits)?;
     if opts.no_auth {
         println!("--no-auth: no sign-in and no policy; anyone may do anything, on the admin screen and the platform API too");
     }
     let engine = runtime::engine()?;
     let db = tx::open_db(&opts.data.join("appos.db"))?;
+    kits.start(&engine, &opts.data, &db)?;
     // No platform.db yet: the first start, with no last one to compare with.
     let first = !opts.data.join("platform.db").exists();
     let platform = platform::PlatformDb::open(&opts.data.join("platform.db"))?;
@@ -232,9 +262,9 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
         Some(path) => {
             let policies = access::Policies::load(path, kits.names()).await?;
             println!("{}: {} rules", policies.file_name(), policies.current().rules());
-            Some(policies)
+            Some(Arc::new(policies))
         }
-        None if token.is_some() => Some(access::Policies::built_in(&auth::token::policy(&kits.names()), kits.names()).await?),
+        None if token.is_some() => Some(Arc::new(access::Policies::built_in(&auth::token::policy(&kits.names()), kits.names()).await?)),
         None => None,
     };
     let shell = shell::Shell::new(shell::Parts {
@@ -342,6 +372,7 @@ mod check_auth_tests {
             origin: None,
             data: PathBuf::new(),
             apps: vec![],
+            kits: vec![],
             reload: None,
             risk: Default::default(),
             keep_examples: false,
@@ -368,6 +399,7 @@ mod check_auth_tests {
             origin: origin.map(Into::into),
             data: PathBuf::new(),
             apps: vec![],
+            kits: vec![],
             reload: None,
             risk: Default::default(),
             keep_examples: false,

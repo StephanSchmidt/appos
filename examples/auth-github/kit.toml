@@ -1,0 +1,16 @@
+# A sign-in kit: auth.toml names it (provider = "kit").
+[kit]
+id = "auth-github"
+name = "Sign-in with GitHub"
+version = "0.1.0"
+wasm = "auth_github.wasm"                 # make build puts it here
+
+[sign-in]
+hosts = ["github.com", "api.github.com"]  # all it may call
+
+[config]
+client-id = "Iv1.0123456789abcdef"        # your GitHub OAuth app's
+org = "kitewell"                          # only its members sign in
+
+[config-env]
+client-secret = "GITHUB_CLIENT_SECRET"    # the OAuth app's secret, never in this file

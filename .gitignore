@@ -73,8 +73,14 @@ appos-data/
 !/examples/*/clippy.toml
 !/examples/*/rust-toolchain.toml
 !/examples/*/wit/*.wit
-# The sign-in plugin example: how auth.toml names it.
+# The sign-in kit example: how auth.toml names it, and its kit.toml.
 !/examples/*/auth.toml
+!/examples/*/kit.toml
+# The example platform builds its CRM's fake (crm-fake/), for appos dev.
+!/examples/acme-platform/build.rs
+!/examples/acme-platform/crm-fake/Cargo.toml
+!/examples/acme-platform/crm-fake/Cargo.lock
+!/examples/acme-platform/crm-fake/src/**
 !/examples/*/src/**
 !/examples/*/templates/**
 # TypeScript examples (scriptc): packages and compiler settings.

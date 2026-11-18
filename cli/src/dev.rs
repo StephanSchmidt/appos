@@ -124,6 +124,7 @@ pub async fn dev(addr: Option<&str>, shell: Option<&str>) -> anyhow::Result<()> 
     // The app should build against the contract of the shell it runs in.
     match shell {
         Some(shell) => scaffold::warn_if_stale(&dir, &scaffold::shell_contract(shell)?, shell),
+        None if dir.join("fakes").is_dir() => scaffold::warn_if_stale(&dir, &appos_shell::dev_kits(&dir)?.contract(), "this appos with the app's fakes/"),
         None => scaffold::warn_if_stale(&dir, &scaffold::builtin_wit(), "this appos"),
     }
 

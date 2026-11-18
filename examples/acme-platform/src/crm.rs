@@ -6,6 +6,10 @@
 //! It has a page of its own too, /crm/<id>: the customer and its notes
 //! (templates/customer.html), with a form to add one. policy.csv says who
 //! may open it: `p, group:sales, crm, crm-read` (and crm-write to add).
+//!
+//! Its fake (crm-fake/, built by build.rs) has the same functions with
+//! made-up customers: `appos sync --shell` puts it into an app, and
+//! `appos dev` runs it where the CRM can't.
 
 use std::sync::{Arc, Mutex};
 
@@ -235,6 +239,10 @@ impl Kit for Crm {
         vec![show, add]
     }
 
+    fn fake(&self) -> Option<Vec<u8>> {
+        Some(include_bytes!(concat!(env!("OUT_DIR"), "/crm-fake.wasm")).to_vec())
+    }
+
     fn run(&self, cx: Context, msg: Message) -> Run<'_> {
         Box::pin(async move {
             anyhow::ensure!(msg.function == ADD_NOTE, "no command {}", msg.function);
@@ -296,5 +304,13 @@ mod tests {
             contract["appos.wit"]
         );
         assert!(contract["deps/acme-crm/crm.wit"].starts_with("package acme:crm@0.1.0;"));
+    }
+
+    #[test]
+    fn the_fake_stands_in_for_the_kit() {
+        let kits = appos_shell::kit::Kits::builtin()
+            .with(Crm::open(":memory:").unwrap())
+            .unwrap();
+        assert_eq!(kits.check_fakes().unwrap(), ["acme-crm"]);
     }
 }

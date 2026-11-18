@@ -12,12 +12,13 @@
 //! it is. CPU-bound code yields every tick of the epoch so the limit can
 //! strike there too.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use tokio::time::{Instant, timeout_at};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable, types::ComponentItem};
+use wasmtime::component::{Component, HasSelf, InstancePre, Linker, ResourceTable, Val, types::ComponentItem};
 use wasmtime::{Config, Engine, ResourceLimiter, Store, Trap};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -27,7 +28,7 @@ use crate::bundle::Checked;
 use crate::kit::{self, About, Context, Kits, User};
 use crate::manifest::Manifest;
 use crate::platform::Outcome;
-use crate::state::Serving;
+use crate::state::Live;
 use crate::tx::{Db, Tx};
 
 wasmtime::component::bindgen!({
@@ -120,6 +121,9 @@ const MAX_RUNS: u32 = 10;
 const MAX_TABLE_ELEMENTS: usize = 100_000;
 /// How often running apps yield, so a time limit can stop them.
 const TICK: Duration = Duration::from_millis(10);
+/// Calls deep a chain may go: an app calls a Wasm kit (1), which calls
+/// another (2), and so on. It bounds the memory of one request.
+pub const MAX_DEPTH: u32 = 4;
 
 pub(crate) const FRAMEWORK: &str = "appos:framework/";
 /// Interfaces every app may import without a grant.
@@ -225,6 +229,12 @@ pub struct Ctx {
     denied: Option<String>,
     /// What kits get with a call: set for a request.
     context: Option<Context>,
+    /// How deep in a chain of Wasm kit calls this store runs: 0 for an
+    /// app, 1 for the kit it calls.
+    depth: u32,
+    /// A Wasm kit this store called went over its budget, which is this
+    /// request's.
+    over_kit: bool,
 }
 
 /// Track allocations across all memories/tables in the store. Wasmtime
@@ -336,6 +346,29 @@ pub(crate) fn imports(engine: &Engine, component: &Component) -> Vec<(String, Ve
         .collect()
 }
 
+/// The functions a component imports, with their types, by
+/// "acme:crm/leads#count-leads": a Wasm kit checks them (wasm_kit.rs).
+fn import_types(engine: &Engine, component: &Component) -> HashMap<String, wasmtime::component::types::ComponentFunc> {
+    let mut uses = HashMap::new();
+    for (name, item) in component.component_type().imports(engine) {
+        if let ComponentItem::ComponentInstance(i) = item.ty {
+            for (f, item) in i.exports(engine) {
+                if let ComponentItem::ComponentFunc(func) = item.ty {
+                    uses.insert(format!("{}#{f}", name.split('@').next().unwrap_or(name)), func);
+                }
+            }
+        }
+    }
+    uses
+}
+
+/// Links appos:framework/log, which Wasm kits may use too.
+pub(crate) fn add_log(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
+    types::add_to_linker::<Ctx, HasSelf<Ctx>>(linker, |c| c)?;
+    log::add_to_linker::<Ctx, HasSelf<Ctx>>(linker, |c| c)?;
+    Ok(())
+}
+
 /// Refuses grants no kit offers, and imports the manifest doesn't grant.
 fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -> anyhow::Result<()> {
     let unknown: Vec<&String> = m.capabilities.grant.iter().filter(|g| kits.grant(g).is_none()).collect();
@@ -378,6 +411,7 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
     let manifest = app.manifest.clone();
     let id = &manifest.app.id;
     anyhow::ensure!(!kits.page_names().contains(id.as_str()), "app id {id:?}: the platform's own pages are at /{id}");
+    anyhow::ensure!(!kits.taken().contains(id.as_str()), "app id {id:?} is a kit's name");
     check_imports(&imports(engine, &component), &manifest, kits)?;
 
     let mut linker: Linker<Ctx> = Linker::new(engine);
@@ -387,11 +421,11 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
     log::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     page::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     // The import check made sure the app calls only the functions it's granted.
-    kits.link(&mut linker, &manifest.capabilities.grant)?;
+    kits.link(&mut linker, &manifest.capabilities.grant, &import_types(engine, &component))?;
     let pre = AppPre::new(linker.instantiate_pre(&component)?)?;
 
     let budget = Budget::of(&manifest, AdminLimits::default());
-    let mut store = new_store(engine, &manifest, db.clone(), Phase::Init { routes: vec![], menu: vec![] }, budget);
+    let mut store = new_store(engine, &manifest.app.id, db.clone(), Phase::Init { routes: vec![], menu: vec![] }, budget, empty_wasi);
     let deadline = Instant::now() + manifest.time_limit();
     let init = timeout_at(deadline, async {
         let instance = pre.instantiate_async(&mut store).await?;
@@ -421,11 +455,19 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked) -> anyhow
     })
 }
 
-fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget) -> Store<Ctx> {
+/// An app's WASI: no files, no network, no environment.
+fn empty_wasi(_: &mut wasmtime_wasi::WasiCtxBuilder) {}
+
+/// A store for `id`; `wasi` adds to its WASI what it may use besides the
+/// output.
+fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, wasi: impl FnOnce(&mut wasmtime_wasi::WasiCtxBuilder)) -> Store<Ctx> {
     // Writing past MAX_LOG fails, and println! panics on that.
     let output = MemoryOutputPipe::new(MAX_LOG);
+    let mut builder = WasiCtx::builder();
+    builder.stdout(output.clone()).stderr(output.clone());
+    wasi(&mut builder);
     let ctx = Ctx {
-        wasi: WasiCtx::builder().stdout(output.clone()).stderr(output.clone()).build(),
+        wasi: builder.build(),
         table: ResourceTable::new(),
         over_memory: false,
         memory_limit: budget.memory,
@@ -435,7 +477,7 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
         memory: Default::default(),
         tables: Default::default(),
         phase,
-        app_id: m.app.id.clone(),
+        app_id: id.to_string(),
         db,
         io_used: 0,
         tx: Tx::default(),
@@ -445,6 +487,8 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
         access: Access::ALL,
         denied: None,
         context: None,
+        depth: 0,
+        over_kit: false,
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| c);
@@ -459,7 +503,7 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
 /// writes are dropped and the request runs again from the start, this time
 /// alone. All runs together get the budget's time. Only the run that
 /// counts prints its log lines.
-/// `serving` tells kits which apps serve.
+/// `live` tells kits which apps serve.
 pub async fn call(
     app: &LoadedApp,
     handler: &str,
@@ -467,7 +511,7 @@ pub async fn call(
     budget: Budget,
     access: Access,
     user: Option<User>,
-    serving: Serving,
+    live: Live,
 ) -> (Result<Page, Failed>, Cost) {
     let deadline = Instant::now() + budget.time;
     let held = &app.manifest.capabilities.grant;
@@ -477,7 +521,7 @@ pub async fn call(
         page: Some(kit::Page { method: req.method.clone(), path: req.path.clone(), url: format!("{}{}", req.origin, req.base) }),
         deadline: deadline.into_std(),
         may: held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect(),
-        serving,
+        live,
     });
     let timeout = || timed_out(budget);
     let mut cost = Cost::default();
@@ -539,7 +583,7 @@ async fn run_once(
     cx: &Context,
 ) -> (Result<Page, Failed>, Ctx, u64) {
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
-    let mut store = new_store(app.pre.engine(), &app.manifest, app.db.clone(), Phase::Start { page, done: false }, budget);
+    let mut store = new_store(app.pre.engine(), &app.manifest.app.id, app.db.clone(), Phase::Start { page, done: false }, budget, empty_wasi);
     store.data_mut().tx = Tx::with_deadline(deadline.into_std());
     store.data_mut().access = access;
     store.data_mut().context = Some(cx.clone());
@@ -560,7 +604,12 @@ async fn run_once(
         Ok(Ok(())) => Ok(page),
         Ok(Err(_)) if done => Ok(page),
         Ok(Err(e)) => {
-            let over = ctx.over_memory || ctx.over_tables || ctx.over_host || ctx.io_used > IO_BUDGET || e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel);
+            let over = ctx.over_memory
+                || ctx.over_tables
+                || ctx.over_host
+                || ctx.over_kit
+                || ctx.io_used > IO_BUDGET
+                || e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel);
             let kind = if over { Outcome::OverBudget } else { Outcome::Crashed };
             let error = if ctx.over_memory {
                 anyhow::anyhow!("over budget: asked for more than {} MB of memory", ctx.memory_limit >> 20)
@@ -574,6 +623,126 @@ async fn run_once(
         Err(_) => Err(timed_out(budget)),
     };
     (result, ctx, fuel)
+}
+
+/// A Wasm kit's sandbox (wasm_kit.rs): its component, linked to what it
+/// may call, and what it gets besides.
+pub(crate) struct KitSandbox {
+    pub pre: InstancePre<Ctx>,
+    /// Its name: where policy.csv gives it grants, its log lines' name.
+    pub name: String,
+    /// The grants it holds, in kit.toml's order: a grant's place is its bit.
+    pub held: Vec<String>,
+    /// Commands it sends go into the outbox here.
+    pub db: Db,
+    /// Its own directory, "/" in its WASI.
+    pub dir: std::path::PathBuf,
+    /// Environment variables: its [config], and [config-env] read.
+    pub env: Vec<(String, String)>,
+}
+
+/// What a call into a Wasm kit may use: what its caller has left. The kit
+/// runs within its caller's deadline (the context's) and gets back what
+/// it didn't use.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Left {
+    pub fuel: u64,
+    /// I/O units used so far: the caller's and the kit's count together.
+    pub io: u32,
+    /// The kit's depth in the chain: 1 for a call from an app.
+    pub depth: u32,
+}
+
+/// How a call into a Wasm kit went, for its caller.
+pub(crate) struct Called {
+    pub result: wasmtime::Result<()>,
+    pub left: Left,
+    /// A grant the policy denied the kit: it ends the caller's request too.
+    pub denied: Option<String>,
+    /// It went over the budget, the caller's.
+    pub over: bool,
+}
+
+/// Calls `export`, an interface and one of its functions, of a Wasm kit, in a fresh instance with
+/// its own memory limit, for `cx` (the caller's context, as the kit sees
+/// it: kit.rs `Context::to_kit`). Commands the kit sent go out once the
+/// call returns. A command's run is such a call too, with the whole budget.
+pub(crate) async fn call_kit(
+    kit: &KitSandbox,
+    cx: Context,
+    access: Access,
+    left: Left,
+    (interface, function): (&str, &str),
+    params: &[Val],
+    results: &mut [Val],
+) -> Called {
+    let deadline = Instant::from_std(cx.deadline());
+    let budget = Budget { fuel: left.fuel, memory: MEMORY, time: cx.time_left() };
+    let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
+    let mut store = new_store(kit.pre.engine(), &kit.name, kit.db.clone(), Phase::Start { page, done: false }, budget, |wasi| {
+        // The kit's own: its directory, the network, its configuration.
+        // `start` made it; should it be gone, the kit finds no "/".
+        let _ = wasi.preopened_dir(&kit.dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
+        wasi.inherit_network().allow_ip_name_lookup(true);
+        for (key, value) in &kit.env {
+            wasi.env(key, value);
+        }
+    });
+    let ctx = store.data_mut();
+    ctx.tx = Tx::with_deadline(cx.deadline());
+    ctx.access = access;
+    ctx.context = Some(cx);
+    ctx.io_used = left.io;
+    ctx.depth = left.depth;
+    let what = format!("{}::{function}", interface.split('@').next().unwrap_or(interface).rsplit('/').next().unwrap_or(interface));
+    let ran = timeout_at(deadline, async {
+        let instance = kit.pre.instantiate_async(&mut store).await?;
+        let found = instance.get_export_index(&mut store, None, interface).and_then(|i| instance.get_export_index(&mut store, Some(&i), function));
+        let func = found.and_then(|f| instance.get_func(&mut store, f)).ok_or_else(|| wasmtime::format_err!("the kit exports no {what}"))?;
+        func.call_async(&mut store, params, results).await
+    })
+    .await;
+    let fuel = store.get_fuel().unwrap_or(0);
+    let mut ctx = store.into_data();
+    let over = ctx.over_memory || ctx.over_tables || ctx.over_host || ctx.over_kit;
+    let left = Left { fuel, io: ctx.io_used, depth: left.depth };
+    let denied = ctx.denied.take();
+    let result = match ran {
+        Err(_) => Err(wasmtime::format_err!("{what}: the request's time ran out in {}", kit.name)),
+        Ok(Err(e)) if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) => Err(e),
+        Ok(Err(e)) => Err(e.context(format!("{what} failed in {}", kit.name))),
+        Ok(Ok(())) => match timeout_at(deadline, ctx.database(|tx, db, id| tx.commit(db, id))).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e.context(format!("{what}: {}'s commands could not be sent", kit.name))),
+            Err(_) => Err(wasmtime::format_err!("{what}: the request's time ran out in {}", kit.name)),
+        },
+    };
+    if result.is_err() {
+        print_logs(&ctx);
+    }
+    Called { result, left, denied, over }
+}
+
+/// A Wasm kit's call from this store: how deep it runs, what the caller
+/// has left, and its context.
+impl Ctx {
+    pub(crate) fn kit_call(&self) -> wasmtime::Result<(Context, Left)> {
+        let depth = self.depth + 1;
+        if depth > MAX_DEPTH {
+            return Err(wasmtime::format_err!("a chain of kit calls deeper than {MAX_DEPTH}"));
+        }
+        Ok((self.context()?, Left { fuel: 0, io: self.io_used, depth }))
+    }
+
+    /// After a Wasm kit's call: what it used is this request's, and so is a
+    /// grant the policy denied it.
+    pub(crate) fn kit_called(&mut self, called: &Called) {
+        self.io_used = called.left.io;
+        self.over_kit |= called.over || self.io_used > IO_BUDGET;
+        if self.denied.is_none() {
+            self.denied.clone_from(&called.denied);
+        }
+    }
 }
 
 /// Prints the app's log lines and output, and returns them.
@@ -821,6 +990,19 @@ impl Ctx {
 mod tests {
     use super::*;
 
+    #[test]
+    fn kit_calls_go_at_most_max_depth_deep() {
+        let budget = Budget { fuel: FUEL, memory: MEMORY, time: Duration::from_secs(1) };
+        let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, empty_wasi);
+        let ctx = store.data_mut();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default() }));
+        ctx.depth = MAX_DEPTH - 1;
+        assert_eq!(ctx.kit_call().unwrap().1.depth, MAX_DEPTH);
+        ctx.depth = MAX_DEPTH;
+        assert_eq!(ctx.kit_call().err().unwrap().to_string(), "a chain of kit calls deeper than 4");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_blocked_kv_read_does_not_block_the_request_timer() {
         let engine = engine().unwrap();
@@ -862,7 +1044,7 @@ mod tests {
     fn store(engine: &Engine) -> Store<Ctx> {
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let db = crate::tx::in_memory();
-        new_store(engine, &manifest, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()))
+        new_store(engine, &manifest.app.id, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()), empty_wasi)
     }
 
     #[tokio::test]
@@ -889,7 +1071,7 @@ mod tests {
         let engine = engine().unwrap();
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let module = wasmtime::Module::new(&engine, "(module (memory 300))").unwrap();
-        let mut small = new_store(&engine, &manifest, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b);
+        let mut small = new_store(&engine, &manifest.app.id, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b, empty_wasi);
         assert!(wasmtime::Instance::new_async(&mut small, &module, &[]).await.is_err());
         assert!(small.data().over_memory);
         assert!(wasmtime::Instance::new_async(&mut store(&engine), &module, &[]).await.is_ok());

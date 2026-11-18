@@ -32,9 +32,16 @@
 //! Every function, page and `run` gets a `Context`, like Go's
 //! context.Context: the app, the signed-in user, the page and the
 //! deadline. AppOS builds it, never the caller, so a kit can trust it.
+//!
+//! A kit is Rust compiled into the platform, or Wasm (wasm_kit.rs,
+//! `WasmKit`). A Wasm kit may call other kits, as an app does, with
+//! grants of its own (`Kit::caller`); AppOS refuses a cycle. Every Rust
+//! kit can bring a fake (`Kit::fake`): a Wasm kit with the same functions
+//! and made-up data, which `appos dev` runs where the real one can't.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,10 +49,13 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasmtime::StoreContextMut;
-use wasmtime::component::Linker;
+use wasmtime::component::types::ComponentFunc;
+use wasmtime::component::{Linker, Val};
 
+use crate::access::Access;
 use crate::runtime::{Ctx, FRAMEWORK, MAX_VALUE, READ, WRITE};
-use crate::state::Serving;
+use crate::state::Live;
+pub use crate::wasm_kit::WasmKit;
 
 /// What kit functions take and return: tuples of these, and records that
 /// derive them.
@@ -76,7 +86,7 @@ pub(crate) struct About {
     /// The app's grants the policy lets this user use, at the call (or
     /// for a command, at the commit).
     pub may: Vec<String>,
-    pub serving: Serving,
+    pub live: Live,
 }
 
 impl Context {
@@ -126,7 +136,17 @@ impl Context {
     /// Whether an app serves now: deployed and on. To send people to
     /// another page while it doesn't.
     pub fn serves(&self, app: &str) -> bool {
-        self.0.serving.serves(app)
+        self.0.live.serves(app)
+    }
+
+    /// The context a Wasm kit called with this one gets: the same user,
+    /// page and deadline, with `name` as the caller and the grants of
+    /// `held` the policy lets this user use there.
+    pub(crate) fn to_kit(&self, name: &str, held: &[String]) -> (Context, Access) {
+        let access = self.0.live.access(self.user(), name, held);
+        let may = held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect();
+        let about = About { app: name.into(), user: self.0.user.clone(), page: self.0.page.clone(), deadline: self.0.deadline, may, live: self.0.live.clone() };
+        (Context::new(about), access)
     }
 }
 
@@ -194,6 +214,45 @@ struct Package {
     interfaces: BTreeSet<String>,
 }
 
+/// A kit that calls other kits, as an app does: its name, where policy.csv
+/// gives it grants (`p, anyone, scoring, leads-read`), and the grants it
+/// holds, in order: a grant's place is its bit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caller {
+    pub name: String,
+    pub grants: Vec<String>,
+}
+
+/// What a kit gets when the platform starts (`Kit::start`).
+pub struct Start<'a> {
+    engine: &'a wasmtime::Engine,
+    kits: &'a Kits,
+    data: &'a Path,
+    db: &'a crate::tx::Db,
+}
+
+impl Start<'_> {
+    /// What runs the platform's Wasm.
+    pub fn engine(&self) -> &wasmtime::Engine {
+        self.engine
+    }
+
+    /// Every kit of the platform.
+    pub fn kits(&self) -> &Kits {
+        self.kits
+    }
+
+    /// The platform's data directory, `--data`.
+    pub fn data(&self) -> &Path {
+        self.data
+    }
+
+    /// Where commands go into the outbox.
+    pub(crate) fn db(&self) -> &crate::tx::Db {
+        self.db
+    }
+}
+
 /// A kit: its WIT, its grants and the code behind its functions.
 pub trait Kit: Send + Sync + 'static {
     /// The WIT files apps build against, by file name. kv's WIT is the
@@ -215,6 +274,24 @@ pub trait Kit: Send + Sync + 'static {
     /// the kit's own, which no app can take: "/booking/:draft".
     fn routes(&self) -> Vec<KitRoute> {
         vec![]
+    }
+    /// Who it is when it calls other kits; none if it calls none. A Rust
+    /// kit calls Rust; a Wasm kit has one.
+    fn caller(&self) -> Option<Caller> {
+        None
+    }
+    /// Once the platform has all its kits, before it serves. An error
+    /// stops the platform.
+    fn start(&self, start: &Start<'_>) -> anyhow::Result<()> {
+        let _ = start;
+        Ok(())
+    }
+    /// The kit as a Wasm component: the same functions with made-up data,
+    /// for `appos dev` where the real kit can't run (`--fakes`). It keeps
+    /// its data in its own directory, "/" in its WASI. AppOS writes its
+    /// kit.toml from this kit's WIT and grants.
+    fn fake(&self) -> Option<Vec<u8>> {
+        None
     }
 }
 
@@ -392,10 +469,15 @@ impl Message {
         Ok(serde_json::from_str(&self.args)?)
     }
 
+    /// The arguments as JSON.
+    pub(crate) fn raw_args(&self) -> &str {
+        &self.args
+    }
+
     /// The message and its context, `time` to run.
-    pub(crate) fn of(w: crate::tx::Waiting, time: Duration, serving: Serving) -> (Context, Message) {
+    pub(crate) fn of(w: crate::tx::Waiting, time: Duration, live: Live) -> (Context, Message) {
         let sent: Sent = serde_json::from_str(&w.about).unwrap_or_default();
-        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may, serving };
+        let about = About { app: w.app, user: sent.user, page: None, deadline: Instant::now() + time, may: sent.may, live };
         (Context::new(about), Message { id: w.id, function: w.function, attempts: w.attempts, args: w.args })
     }
 }
@@ -405,6 +487,7 @@ struct Registered {
     kit: Arc<dyn Kit>,
     grants: Vec<Grant>,
     routes: Vec<KitRoute>,
+    caller: Option<Caller>,
     /// Every interface of its WIT, as apps import it:
     /// "acme:crm/leads@1.0.0". Filled in by `Kits::checked`.
     imports: Vec<String>,
@@ -414,7 +497,7 @@ struct Registered {
 
 impl Registered {
     fn new(kit: Arc<dyn Kit>, builtin: bool) -> Registered {
-        Registered { grants: kit.grants(), routes: kit.routes(), kit, imports: vec![], builtin }
+        Registered { grants: kit.grants(), routes: kit.routes(), caller: kit.caller(), kit, imports: vec![], builtin }
     }
 
     /// The interfaces its grants' functions are in, like "acme:crm/leads".
@@ -435,7 +518,7 @@ impl Default for Kits {
 
 /// A kit's WIT file, read: its package ("acme:crm"), version and
 /// interfaces.
-fn read_wit(file: &str, text: &str) -> anyhow::Result<(String, Option<String>, Vec<String>)> {
+pub(crate) fn read_wit(file: &str, text: &str) -> anyhow::Result<(String, Option<String>, Vec<String>)> {
     let read = wit_parser::UnresolvedPackageGroup::parse(file, text).map_err(|(map, e)| anyhow::anyhow!("kit WIT {file}: {}", e.render(&map)))?;
     let name = read.main.name;
     let interfaces = read.main.interfaces.iter().filter_map(|(_, i)| i.name.clone()).collect();
@@ -481,6 +564,42 @@ fn check_routes(all: &[Registered]) -> anyhow::Result<()> {
                 "page {pattern} twice"
             );
             anyhow::ensure!(*names.entry(name).or_insert(n) == n, "two kits have pages at /{name}");
+        }
+    }
+    Ok(())
+}
+
+/// Who calls whom, by the grants: a kit calls the kits offering its grants.
+fn calls(all: &[Registered]) -> Vec<Vec<usize>> {
+    let offers = |grant: &str| all.iter().position(|r| r.grants.iter().any(|g| g.name == grant));
+    all.iter().map(|r| r.caller.iter().flat_map(|c| &c.grants).filter_map(|g| offers(g)).collect()).collect()
+}
+
+/// The kits that call other kits: each name is its own, an app's id can't
+/// be one, and no kit gets kv (a kit keeps its own data). Calls go one
+/// way: a kit can't reach itself through others.
+fn check_callers(all: &[Registered]) -> anyhow::Result<()> {
+    let pages: HashMap<&str, usize> = all.iter().enumerate().flat_map(|(n, r)| r.routes.iter().map(move |p| (p.name(), n))).collect();
+    let mut names = HashSet::new();
+    for (n, r) in all.iter().enumerate() {
+        let Some(c) = &r.caller else { continue };
+        crate::manifest::validate_app_id(&c.name).map_err(|e| anyhow::anyhow!("kit {:?}: {e}", c.name))?;
+        anyhow::ensure!(names.insert(c.name.as_str()), "two kits are called {}", c.name);
+        anyhow::ensure!(pages.get(c.name.as_str()).is_none_or(|p| *p == n), "kit {}: another kit's pages are at /{}", c.name, c.name);
+        anyhow::ensure!(c.grants.len() <= crate::manifest::MAX_GRANTS, "kit {}: more than {} grants", c.name, crate::manifest::MAX_GRANTS);
+        for g in &c.grants {
+            anyhow::ensure!(g != KV_READ && g != KV_WRITE, "kit {}: kits get no kv ({g}); a kit keeps its own data, in its directory", c.name);
+        }
+    }
+    let calls = calls(all);
+    fn reaches(calls: &[Vec<usize>], from: usize, to: usize, seen: &mut HashSet<usize>) -> bool {
+        calls[from].iter().any(|&next| next == to || (seen.insert(next) && reaches(calls, next, to, seen)))
+    }
+    for (n, r) in all.iter().enumerate() {
+        if let Some(c) = &r.caller
+            && reaches(&calls, n, n, &mut HashSet::new())
+        {
+            anyhow::bail!("kit {} calls itself, through its grants: kits call one way", c.name);
         }
     }
     Ok(())
@@ -556,6 +675,7 @@ impl Kits {
         }
         packages(&all)?;
         check_routes(&all)?;
+        check_callers(&all)?;
         for r in all.iter_mut().filter(|r| !r.builtin) {
             let mut imports = vec![];
             for (file, text) in r.kit.wit() {
@@ -568,10 +688,68 @@ impl Kits {
         Ok(Kits(Arc::new(all)))
     }
 
-    /// The names the kits' pages are at, like "booking": no app can have
-    /// one as its id.
+    /// The names the kits' pages are at, like "booking".
     pub fn page_names(&self) -> BTreeSet<&str> {
         self.0.iter().flat_map(|r| &r.routes).map(KitRoute::name).collect()
+    }
+
+    /// The kits' names, those of their pages and of those that call other
+    /// kits: no app can have one as its id.
+    pub fn taken(&self) -> BTreeSet<&str> {
+        let mut taken = self.page_names();
+        taken.extend(self.0.iter().filter_map(|r| r.caller.as_ref()).map(|c| c.name.as_str()));
+        taken
+    }
+
+    /// Starts every kit, once the platform has them all: a kit that calls
+    /// others needs their grants. An error stops the platform.
+    pub(crate) fn start(&self, engine: &wasmtime::Engine, data: &Path, db: &crate::tx::Db) -> anyhow::Result<()> {
+        for r in self.0.iter() {
+            if let Some(c) = &r.caller {
+                let unknown: Vec<&String> = c.grants.iter().filter(|g| self.grant(g).is_none()).collect();
+                anyhow::ensure!(unknown.is_empty(), "kit {}: no kit offers {}", c.name, unknown.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", "));
+            }
+        }
+        // The kits it calls start before a kit: no cycles (check_callers).
+        let calls = calls(&self.0);
+        let mut started = vec![false; self.0.len()];
+        while let Some(n) = (0..self.0.len()).find(|&n| !started[n] && calls[n].iter().all(|&c| started[c] || c == n)) {
+            self.0[n].kit.start(&Start { engine, kits: self, data, db })?;
+            started[n] = true;
+        }
+        Ok(())
+    }
+
+    /// Writes the kits' fakes into `dir`, replacing what it held, as
+    /// `--fakes` does: one directory per kit, with its kit.toml.
+    pub fn write_fakes(&self, dir: &Path) -> anyhow::Result<usize> {
+        crate::wasm_kit::write_fakes(self, &crate::runtime::engine()?, dir)
+    }
+
+    /// Starts each kit's fake as `appos dev` does, alone with the built-in
+    /// kits, and answers their names: for a platform's tests.
+    pub fn check_fakes(&self) -> anyhow::Result<Vec<String>> {
+        crate::wasm_kit::check_fakes(self)
+    }
+
+    /// The kits that bring a fake, each with a name of its own, its WIT,
+    /// its grants and its commands: what `--fakes` writes.
+    pub(crate) fn fakes(&self, engine: &wasmtime::Engine) -> anyhow::Result<Vec<Fake>> {
+        let mut fakes: Vec<Fake> = vec![];
+        for r in self.0.iter().filter(|r| !r.builtin) {
+            let Some(wasm) = r.kit.fake() else { continue };
+            let package = r.kit.wit().first().and_then(|(file, text)| read_wit(file, text).ok()).map(|(p, ..)| p.replace(':', "-"));
+            let mut name = package.unwrap_or_else(|| "kit".into());
+            if fakes.iter().any(|f| f.name == name) {
+                name = format!("{name}-{}", fakes.len() + 1);
+            }
+            let mut linker = Linker::new(engine);
+            let held: Vec<String> = r.grants.iter().map(|g| g.name.clone()).collect();
+            let mut commands = vec![];
+            r.kit.link(&mut KitLinker { linker: &mut linker, grants: &r.grants, held: &held, uses: &HashMap::new(), commands: &mut commands })?;
+            fakes.push(Fake { name, wit: r.kit.wit(), grants: r.grants.clone(), commands, wasm });
+        }
+        Ok(fakes)
     }
 
     /// The kit's page for a request: the route, what its params took and
@@ -624,11 +802,12 @@ impl Kits {
 
     /// Links the functions the app's grants allow, kit by kit. `held` is
     /// the app's grants as app.toml lists them: a grant's place there is
-    /// its bit in the request's `Access`.
-    pub(crate) fn link(&self, linker: &mut Linker<Ctx>, held: &[String]) -> anyhow::Result<()> {
+    /// its bit in the request's `Access`. `uses` is the functions the app
+    /// imports, with their types, by "acme:crm/leads#count-leads".
+    pub(crate) fn link(&self, linker: &mut Linker<Ctx>, held: &[String], uses: &HashMap<String, ComponentFunc>) -> anyhow::Result<()> {
         for r in self.0.iter() {
             if r.grants.iter().any(|g| held.contains(&g.name)) {
-                r.kit.link(&mut KitLinker { linker, grants: &r.grants, held })?;
+                r.kit.link(&mut KitLinker { linker, grants: &r.grants, held, uses, commands: &mut vec![] })?;
             }
             // An app imports an interface for its types alone when another
             // uses them (`use flow.{draft}`): it is there, with no
@@ -641,6 +820,17 @@ impl Kits {
     }
 }
 
+/// A kit's fake, as `--fakes` writes it (wasm_kit.rs).
+pub(crate) struct Fake {
+    /// Like "acme-crm": its package's.
+    pub name: String,
+    pub wit: Vec<(String, String)>,
+    pub grants: Vec<Grant>,
+    /// Its functions that are commands, like "acme:crm/customers#add-note".
+    pub commands: Vec<String>,
+    pub wasm: Vec<u8>,
+}
+
 /// How a kit links its functions for one app.
 pub struct KitLinker<'a> {
     linker: &'a mut Linker<Ctx>,
@@ -648,6 +838,10 @@ pub struct KitLinker<'a> {
     grants: &'a [Grant],
     /// The app's.
     held: &'a [String],
+    /// The functions the app imports, with their types.
+    uses: &'a HashMap<String, ComponentFunc>,
+    /// The kit's commands, as linked.
+    commands: &'a mut Vec<String>,
 }
 
 impl KitLinker<'_> {
@@ -714,11 +908,57 @@ impl KitLinker<'_> {
         P: ComponentNamedList + Lift + Serialize + Send + Sync + 'static,
     {
         let Some(checked) = self.checked(interface, function)? else { return Ok(()) };
+        self.commands.push(checked.name.clone());
         let to = interface_of(&checked.name).to_string();
         self.linker.instance(interface)?.func_wrap(function, move |mut store: StoreContextMut<'_, Ctx>, params: P| {
             let ctx = store.data_mut();
             ctx.in_request(&checked.what, &checked.grant, checked.bit, checked.cost)?;
             let args = serde_json::to_string(&params).map_err(|e| wasmtime::format_err!("{}: {e}", checked.what))?;
+            if args.len() > MAX_VALUE {
+                return Err(wasmtime::format_err!("{}: the arguments are {} bytes, more than {MAX_VALUE}", checked.what, args.len()));
+            }
+            ctx.send(to.clone(), checked.name.clone(), args)
+        })?;
+        Ok(())
+    }
+}
+
+/// For Wasm kits (wasm_kit.rs): functions whose types the kit's component
+/// has, not Rust.
+impl KitLinker<'_> {
+    /// The type the app imports a function with, if it does:
+    /// "acme:crm/leads", "count-leads".
+    pub(crate) fn uses(&self, interface: &str, function: &str) -> Option<&ComponentFunc> {
+        self.uses.get(&format!("{}#{function}", interface.split('@').next().unwrap_or(interface)))
+    }
+
+    /// Links a function that answers now, as `func` does.
+    pub(crate) fn func_dynamic<F>(&mut self, interface: &str, function: &str, f: F) -> anyhow::Result<()>
+    where
+        F: for<'b> Fn(StoreContextMut<'b, Ctx>, &'b [Val], &'b mut [Val]) -> Answer<'b, ()> + Send + Sync + 'static,
+    {
+        let Some(checked) = self.checked(interface, function)? else { return Ok(()) };
+        let (checked, f) = (Arc::new(checked), Arc::new(f));
+        self.linker.instance(interface)?.func_new_async(function, move |mut store: StoreContextMut<'_, Ctx>, _, params, results| {
+            let (checked, f) = (checked.clone(), f.clone());
+            Box::new(async move {
+                store.data_mut().in_request(&checked.what, &checked.grant, checked.bit, checked.cost)?;
+                f(store, params, results).await
+            })
+        })?;
+        Ok(())
+    }
+
+    /// Links a command, as `command` does: its arguments are kept as JSON
+    /// (wasm_kit.rs `to_json`).
+    pub(crate) fn command_dynamic(&mut self, interface: &str, function: &str) -> anyhow::Result<()> {
+        let Some(checked) = self.checked(interface, function)? else { return Ok(()) };
+        self.commands.push(checked.name.clone());
+        let to = interface_of(&checked.name).to_string();
+        self.linker.instance(interface)?.func_new(function, move |mut store: StoreContextMut<'_, Ctx>, _, params, _| {
+            let ctx = store.data_mut();
+            ctx.in_request(&checked.what, &checked.grant, checked.bit, checked.cost)?;
+            let args = serde_json::Value::Array(params.iter().map(crate::wasm_kit::to_json).collect::<wasmtime::Result<_>>()?).to_string();
             if args.len() > MAX_VALUE {
                 return Err(wasmtime::format_err!("{}: the arguments are {} bytes, more than {MAX_VALUE}", checked.what, args.len()));
             }
@@ -891,7 +1131,7 @@ mod tests {
             htmx: false,
             now: "2026-11-18T12:00:00Z".into(),
         };
-        runtime::call(app, handler, &req, Budget::of(&app.manifest, AdminLimits::default()), access, user, Serving::default()).await
+        runtime::call(app, handler, &req, Budget::of(&app.manifest, AdminLimits::default()), access, user, Live::default()).await
     }
 
     #[tokio::test]
@@ -932,7 +1172,7 @@ mod tests {
             [("test", "acme:crm/leads#add-lead", r#"["web"]"#), ("test", "acme:crm/leads#add-lead", r#"["ads"]"#)]
         );
 
-        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), &kits, Serving::default()).wake();
+        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), &kits, Live::default()).wake();
         for _ in 0..200 {
             if crate::tx::outbox(&db).unwrap().is_empty() {
                 break;
@@ -969,6 +1209,44 @@ mod tests {
         assert_eq!(page.err().unwrap().error.to_string(), "denied user-read");
         let err = load_wat(&kits, "", wat, crate::tx::in_memory()).await.err().unwrap().to_string();
         assert!(err.contains("uses users::current, which needs user-read"), "{err}");
+    }
+
+    /// A kit called `name` that offers `offers` and calls with `holds`, in
+    /// the package acme:<offers>.
+    struct Calls {
+        name: &'static str,
+        offers: &'static str,
+        holds: Vec<String>,
+    }
+
+    impl Kit for Calls {
+        fn wit(&self) -> Vec<(String, String)> {
+            vec![(format!("{}.wit", self.offers), format!("package acme:{}@1.0.0;\ninterface i {{ f: func(); }}\n", self.offers))]
+        }
+        fn grants(&self) -> Vec<Grant> {
+            vec![Grant::new(self.offers, "f", &[&format!("acme:{}/i#f", self.offers)], 1)]
+        }
+        fn caller(&self) -> Option<Caller> {
+            Some(Caller { name: self.name.into(), grants: self.holds.clone() })
+        }
+        fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn kits_call_one_way() {
+        let kit = |name, offers, holds: &[&str]| Calls { name, offers, holds: holds.iter().map(|g| g.to_string()).collect() };
+        let a = || kit("a", "a-call", &["b-call"]);
+        assert!(Kits::builtin().with(a()).unwrap().with(kit("b", "b-call", &[])).is_ok());
+        let err = Kits::builtin().with(a()).unwrap().with(kit("b", "b-call", &["c-call"])).unwrap().with(kit("c", "c-call", &["a-call"])).err().unwrap();
+        assert_eq!(err.to_string(), "kit a calls itself, through its grants: kits call one way");
+        let err = Kits::builtin().with(kit("a", "a-call", &["a-call"])).err().unwrap();
+        assert!(err.to_string().contains("kit a calls itself"));
+        let err = Kits::builtin().with(a()).unwrap().with(kit("a", "b-call", &[])).err().unwrap();
+        assert_eq!(err.to_string(), "two kits are called a");
+        let err = Kits::builtin().with(kit("a", "a-call", &["kv-write"])).err().unwrap();
+        assert!(err.to_string().contains("kits get no kv (kv-write)"), "{err}");
     }
 
     #[tokio::test]

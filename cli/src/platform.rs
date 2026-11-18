@@ -43,6 +43,36 @@ fn check_contract_files(files: &BTreeMap<String, String>) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// A fake's file, below the app's fakes/: <kit>/kit.toml, <kit>/kit.wasm
+/// or <kit>/wit/<file>.wit.
+pub fn check_fake_path(path: &str) -> anyhow::Result<()> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(['\\', ':']) && !part.chars().any(char::is_control);
+    let fits = match parts[..] {
+        [_, "kit.toml" | "kit.wasm"] => true,
+        [_, "wit", file] => file.ends_with(".wit"),
+        _ => false,
+    };
+    anyhow::ensure!(fits && parts.iter().all(|p| safe(p)), "unsafe fake filename {path:?}");
+    Ok(())
+}
+
+/// The fakes of a platform's kits (`/_platform/fakes`), by path below the
+/// app's fakes/: what `appos dev` runs in place of the kits.
+pub fn fetch_fakes(url: &str) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+    use base64::Engine as _;
+    let text = call(url, None, "/_platform/fakes", None, "")?;
+    let files: BTreeMap<String, String> = serde_json::from_str(&text).context("the platform's fakes are no JSON")?;
+    files
+        .into_iter()
+        .map(|(path, data)| {
+            check_fake_path(&path)?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(data).with_context(|| format!("fake {path}"))?;
+            Ok((path, bytes))
+        })
+        .collect()
+}
+
 /// The config file; it is created by the first `appos login`.
 pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("APPOS_CONFIG") {
@@ -334,6 +364,18 @@ pub fn fetch_spec(url: &str) -> anyhow::Result<Spec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_platforms_fakes_stay_in_fakes() {
+        for ok in ["acme-crm/kit.toml", "acme-crm/kit.wasm", "acme-crm/wit/crm.wit"] {
+            assert!(check_fake_path(ok).is_ok(), "{ok}");
+        }
+        for bad in
+            ["kit.toml", "../kit.toml", "acme-crm/../../x/kit.toml", "acme-crm/run.sh", "acme-crm/wit/x.sh", "/etc/kit.toml", "a/b/kit.toml", "C:/kit.toml"]
+        {
+            assert!(check_fake_path(bad).is_err(), "{bad}");
+        }
+    }
 
     fn add_platform(config: &mut Config, name: &str) -> anyhow::Result<()> {
         config.upsert(Platform { name: name.into(), url: format!("https://{name}.example"), token: None });

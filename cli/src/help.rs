@@ -24,8 +24,8 @@ Apps:
                        grants and limits, your data and requests) and
                        the command that runs it
   appos sync           update the app's SDK (src/appos.rs, src/appos.ts or
-                       src/main/java/app/Appos.java) and wit/ to this
-                       appos and the current platform
+                       src/main/java/app/Appos.java), wit/ and fakes/ to
+                       this appos and the current platform
   appos guide          how apps work: routes, the page, htmx, storage, styles, rules
 
 Platforms (the shells you deploy to, like kubectl contexts). Not needed for
@@ -502,8 +502,13 @@ It warns when the SDK (src/appos.rs, src/appos.ts or
 src/main/java/app/Appos.java) or wit/ differ from this appos's; `appos
 sync` updates them.
 
+An app that calls a platform's kits runs on their fakes: kits in Wasm
+with the same functions and made-up data, which appos sync puts into
+fakes/ (one folder per kit, with its kit.toml). A fake keeps its data in
+appos-data/kits/<kit>. Without fakes/, only appos's own kits are there.
+
 --shell runs the app in a platform's binary instead, one built with
-appos_shell::Platform::main, so the app can call the platform's kits.
+appos_shell::Platform::main, with the platform's real kits.
 Get their WIT first with appos sync --shell <binary>.
 
 One dev server per app: if one is already running for this app, appos dev
@@ -733,7 +738,8 @@ SDK as src/appos.rs (src/appos.ts in a TypeScript app,
 src/main/java/app/Appos.java in a Java app; a Zig app keeps its own), and
 the contract of the current platform (or the one
 built into appos, or with --shell that of a platform's binary) into wit/,
-removing contract files it doesn't have. In
+removing contract files it doesn't have, and the fakes of the platform's
+kits into fakes/, which appos dev runs in their place. In
 a TypeScript app it sets \"verbatimModuleSyntax\": true in tsconfig.json,
 which deps.json needs (appos audit --help); an import that brings only
 types is then `import type`, and the build says where one isn't.
