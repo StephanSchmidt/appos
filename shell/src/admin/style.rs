@@ -477,6 +477,11 @@ tr.reason pre { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient:
 .grants td { white-space: nowrap; }
 .grants td:nth-child(3) { width: 100%; color: var(--muted); }
 .grants tr.sets td { background: var(--accent-2); }
+.uses { min-width: 560px; }
+.uses td { white-space: nowrap; }
+.uses td:nth-child(3) { width: 100%; }
+.uses td a { color: var(--link); text-decoration: underline; text-underline-offset: 3px; }
+.uses td a:hover { color: var(--accent-12); }
 .grants tr.sets code { font-weight: 700; color: var(--accent-12); }
 .partfoot { margin: 12px 24px 8px; font-size: 13.5px; color: var(--muted); }
 .partfoot a, .grants .when { color: var(--link); text-decoration: underline; text-underline-offset: 3px; }

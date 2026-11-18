@@ -492,6 +492,37 @@ impl Registered {
     fn interfaces(&self) -> BTreeSet<&str> {
         self.grants.iter().flat_map(|g| &g.functions).map(|f| interface_of(f)).collect()
     }
+
+    /// Its name for people: a Wasm kit's id, else its interface, or their
+    /// package if they share one: "appos:framework/kv", "acme:crm".
+    fn label(&self) -> String {
+        if let Some(id) = &self.wasm {
+            return id.clone();
+        }
+        let interfaces = self.interfaces();
+        let packages: BTreeSet<&str> = interfaces.iter().map(|i| i.split_once('/').map_or(*i, |(p, _)| p)).collect();
+        match (interfaces.len(), packages.len()) {
+            (0, _) => self.name(),
+            (1, _) => interfaces.into_iter().next().unwrap_or_default().to_string(),
+            (_, 1) => packages.into_iter().next().unwrap_or_default().to_string(),
+            _ => interfaces.into_iter().collect::<Vec<_>>().join(", "),
+        }
+    }
+}
+
+/// A kit as the admin screen shows it: what an app uses through a grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Offer {
+    /// A Wasm kit's id, else its interfaces: `Registered::label`.
+    pub name: String,
+    /// A Wasm kit's id.
+    pub wasm: Option<String>,
+    /// One of AppOS's own, like kv.
+    pub builtin: bool,
+    /// Loaded: for a Wasm kit, a version of it is.
+    pub up: bool,
+    /// The grants it holds: the kits it calls.
+    pub calls: Vec<String>,
 }
 
 /// The kits of a platform: the shell's own first, then the platform's.
@@ -720,6 +751,13 @@ impl Kits {
             todo.extend(r.caller.iter().flat_map(|c| &c.grants).map(String::as_str));
         }
         None
+    }
+
+    /// The kit that offers `grant`.
+    pub(crate) fn offer(&self, grant: &str) -> Option<Offer> {
+        let r = self.0.iter().find(|r| r.grants.iter().any(|g| g.name == grant))?;
+        let calls = r.caller.iter().flat_map(|c| c.grants.iter().cloned()).collect();
+        Some(Offer { name: r.label(), wasm: r.wasm.clone(), builtin: r.builtin, up: r.kit.up(), calls })
     }
 
     /// The kit that offers an interface, and its grants.

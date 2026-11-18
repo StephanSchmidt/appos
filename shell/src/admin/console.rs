@@ -1414,8 +1414,8 @@ impl Board<'_> {
         };
         let (unit, _) = v.zoom.per();
         let cols = format!(
-            r#"<div class="c-row c-colhead d"><span class="c-n">#</span>{}{}<span class="c-lim">Mem</span><span class="c-lim">Time</span><span class="c-lim">Fuel</span>{}{}{}</div>"#,
-            sort_link(Sort::Az, "App", "c-name"),
+            r#"<div class="c-row c-colhead d"><span class="c-n">#</span><span class="c-kind" data-hint="An app, or a kit: apps call kits">Kind</span>{}{}<span class="c-lim">Mem</span><span class="c-lim">Time</span><span class="c-lim">Fuel</span>{}{}{}</div>"#,
+            sort_link(Sort::Az, "Name", "c-name"),
             sort_link(Sort::Group, "Group", "c-gcol"),
             sort_link(Sort::Needs, "Status", "c-st"),
             sort_link(Sort::Failures, &format!("{} ······ {}", v.zoom.step(CELLS as i64 - 1), v.zoom.step(0)), "c-cells"),
@@ -1468,7 +1468,8 @@ impl Board<'_> {
         // and what Find looks in, as the shell does.
         let select = escape(&v.path(Some(&a.id)));
         let open = escape(&v.to(Page::Story).path(Some(&a.id)));
-        let find = escape(&[a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or("")].map(str::to_lowercase).join("\n"));
+        let kind = if a.is_kit() { "kit" } else { "app" };
+        let find = escape(&[a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), kind].map(str::to_lowercase).join("\n"));
         let limits = limit_cells(a);
         // The group in words; the Group knob narrows to it, a click on the row selects.
         let group = group_of(a);
@@ -1485,11 +1486,12 @@ impl Board<'_> {
             None => format!("{name}: {}", a.line()),
         };
         format!(
-            r#"<div class="c-row{sel}" data-app="{id}" data-href="{select}" data-open="{open}" data-find="{find}" data-status="{word}"><span class="c-n d">{n}</span><a class="c-name {name_ink}" href="{href}"{current} data-hint="{why}">{name}</a>{group_html}{limits}<span class="c-st {tone}">{word}</span><span class="c-cells">{cells}</span><span class="c-rate">{rate}</span></div>"#,
+            r#"<div class="c-row{sel}" data-app="{id}" data-href="{select}" data-open="{open}" data-find="{find}" data-status="{word}"><span class="c-n d">{n}</span><span class="c-kind {kind_ink}">{kind}</span><a class="c-name {name_ink}" href="{href}"{current} data-hint="{why}">{name}</a>{group_html}{limits}<span class="c-st {tone}">{word}</span><span class="c-cells">{cells}</span><span class="c-rate">{rate}</span></div>"#,
             sel = if selected { " sel" } else { "" },
             current = if selected { r#" aria-current="true""# } else { "" },
             id = escape(&a.id),
-            name = if a.is_kit() { format!(r#"{}<span class="d"> kit</span>"#, escape(&a.name)) } else { escape(&a.name) },
+            name = escape(&a.name),
+            kind_ink = if a.is_kit() { "k" } else { "d" },
             n = i + 1,
             tone = ink.class(),
             name_ink = if ink == Ink::Dim { Ink::White } else { ink }.class(),
@@ -2382,7 +2384,7 @@ pub(super) const CSS: &str = r#"
 .c-list::-webkit-scrollbar { display: none; }
 /* A toast takes two rows' room; the readouts below stay put. */
 .c-toast ~ .c-listwrap { --c-rows: 10; }
-.c-row { display: grid; grid-template-columns: 28px minmax(0, 1.2fr) minmax(0, 1.2fr) 6ch 4ch 5ch 80px 158px 56px; align-items: center; gap: 8px; height: var(--c-row); padding: 0 4px;
+.c-row { display: grid; grid-template-columns: 28px 5ch minmax(0, 1.2fr) minmax(0, 1.2fr) 6ch 4ch 5ch 80px 158px 56px; align-items: center; gap: 8px; height: var(--c-row); padding: 0 4px;
   white-space: nowrap; }
 .c-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .c-row.sel { background: var(--c-sel); }
@@ -2392,6 +2394,8 @@ pub(super) const CSS: &str = r#"
 @keyframes c-changed { from { background: rgba(116, 205, 255, .35); } to { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { .c-row.changed { animation: none; } }
 .c-rate, .c-lim { text-align: right; }
+.c-kind { text-align: center; }
+.c-row .c-kind.k { color: var(--c-ink); box-shadow: inset 0 0 0 1px var(--c-dim); border-radius: 2px; }
 .c-cells { display: flex; gap: 2px; overflow: visible; }
 .c-cells i { flex: none; width: 8px; height: 12px; background: #16222f; }
 .c-cells i.k1, .c-sq.k1 { background: #2b5a85; } .c-cells i.k2, .c-sq.k2 { background: #4b94d1; } .c-cells i.k3, .c-sq.k3 { background: #8fd6ff; }
@@ -2563,9 +2567,9 @@ pub(super) const CSS: &str = r#"
   .c-tick { order: -1; flex-basis: 100%; padding: 0 12px; }
   .c-lcd { height: auto; min-height: 488px; }
   .c-head { flex-wrap: wrap; row-gap: 4px; }
-  .c-row:not(.c-req):not(.c-ver) { grid-template-columns: minmax(0, 1fr) 72px 40px; grid-template-areas: "name st rate" "cells cells cells";
+  .c-row:not(.c-req):not(.c-ver) { grid-template-columns: minmax(0, 1fr) 5ch 72px 40px; grid-template-areas: "name kind st rate" "cells cells cells cells";
     height: auto; gap: 4px 8px; padding: 4px; }
-  .c-row:not(.c-req):not(.c-ver) > .c-name { grid-area: name; } .c-row:not(.c-req):not(.c-ver) > .c-st { grid-area: st; }
+  .c-row:not(.c-req):not(.c-ver) > .c-name { grid-area: name; } .c-row:not(.c-req):not(.c-ver) > .c-kind { grid-area: kind; } .c-row:not(.c-req):not(.c-ver) > .c-st { grid-area: st; }
   .c-row:not(.c-req):not(.c-ver) > .c-rate { grid-area: rate; } .c-row:not(.c-req):not(.c-ver) > .c-cells { grid-area: cells; }
   .c-row .c-n, .c-row .c-lim, .c-row .c-gcol { display: none; }
   .c-cells i { flex: 1 1 0; width: auto; }

@@ -1208,7 +1208,22 @@ mod tests {
         let admin = axum::http::Request::builder().uri("/admin/apps/test").body(axum::body::Body::empty()).unwrap();
         let response = crate::web::platform_router(shell.clone(), None).oneshot(admin).await.unwrap();
         let body = String::from_utf8(axum::body::to_bytes(response.into_body(), 1 << 22).await.unwrap().to_vec()).unwrap();
-        assert!(body.contains("Waits for crm, which it uses") && body.contains(r#"CRM<span class="d"> kit</span>"#), "{body}");
+        assert!(body.contains("Waits for crm, which it uses"), "{body}");
+        // The list says which is the kit; the app's detail, the kits it
+        // uses; the kit's, what uses it.
+        assert!(body.contains(r#"<span class="c-kind k">kit</span><a class="c-name"#) && body.contains(r#"<span class="c-kind d">app</span>"#), "{body}");
+        let uses = body.split(r#"id="kits""#).nth(1).and_then(|p| p.split("</table>").next()).unwrap_or_default();
+        assert!(
+            uses.contains(r#"<a href="/admin/apps/crm">CRM</a>"#) && uses.contains("Deployed, 1.0.0 live") && uses.contains("<code>leads-read</code>"),
+            "{uses}"
+        );
+        assert!(uses.contains(">Off</span>") && !uses.contains("Serves"), "{uses}");
+        let admin = axum::http::Request::builder().uri("/admin/apps/crm").body(axum::body::Body::empty()).unwrap();
+        let response = crate::web::platform_router(shell.clone(), None).oneshot(admin).await.unwrap();
+        let body = String::from_utf8(axum::body::to_bytes(response.into_body(), 1 << 22).await.unwrap().to_vec()).unwrap();
+        let users = body.split(r#"id="users""#).nth(1).and_then(|p| p.split("</table>").next()).unwrap_or_default();
+        assert!(users.contains(r#"<a href="/admin/apps/test">"#) && users.contains("<td>App</td>") && users.contains(">Waits for crm</span>"), "{users}");
+        assert!(body.contains("It uses no kit"), "crm holds no grant");
         shell.state.turn("crm", true, Actor::Cli, None, None).await.unwrap();
         assert_eq!(get(&shell, "/test").await.0, 200);
     }

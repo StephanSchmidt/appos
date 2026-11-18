@@ -6,6 +6,7 @@
 use axum::extract::{Path, RawQuery, State};
 use axum::response::Response;
 
+use crate::kit::{Kits, Offer};
 use crate::log_filter::{PLATFORM, Pick};
 use crate::manifest::Band;
 use crate::platform::{Kind, Request, Version, VersionStatus, now_ms};
@@ -44,7 +45,7 @@ fn act(a: &App, action: &str, fields: &[(&str, &str)], button: &str) -> String {
 
 /// The app: its header, its requests with its changes, routes, versions
 /// and last failures.
-pub(super) fn detail(shell: &Shell, a: &App, marks: &[Mark], all_versions: bool) -> String {
+pub(super) fn detail(shell: &Shell, apps: &[App], a: &App, marks: &[Mark], all_versions: bool) -> String {
     let requests = plural(a.reqs.len(), "request");
     let log = escape(&of_app(&a.id));
     let group = a.group().map(|g| format!("{} · ", escape(g))).unwrap_or_default();
@@ -94,7 +95,7 @@ pub(super) fn detail(shell: &Shell, a: &App, marks: &[Mark], all_versions: bool)
     };
     format!(
         r#"<section class="detail" aria-labelledby="dt-h"><div class="dhead">{icon}<span class="dname"><h3 id="dt-h">{name}</h3><span class="sub">{sub}</span></span>{limits}{switch}</div>{off}
-{chart}{routes}{risk}{versions}{failures}</section>"#,
+{chart}{routes}{kits}{risk}{versions}{failures}</section>"#,
         icon = icon_html(a, 48),
         // Nothing to draw for an app that isn't running and had nothing happen.
         chart = if a.running.is_some() || !marks.is_empty() || a.reqs.iter().any(|r| column(r.at, now_ms()).is_some()) {
@@ -104,10 +105,126 @@ pub(super) fn detail(shell: &Shell, a: &App, marks: &[Mark], all_versions: bool)
         },
         name = escape(&a.name),
         routes = routes_table(a),
+        kits = kits_part(shell, apps, a),
         risk = risk_table(shell, a),
         versions = versions_table(shell, a, all_versions),
         failures = last_failures(a),
     )
+}
+
+/// A kit it uses: through its own grants, or through another kit's.
+struct Used {
+    offer: Offer,
+    /// The grants it is used through.
+    grants: Vec<String>,
+    /// The kit whose grants those are, if not the app's own.
+    through: Option<String>,
+}
+
+/// The kits behind `grants`, then the kits those call, each once.
+fn used(kits: &Kits, grants: &[String]) -> Vec<Used> {
+    let mut all: Vec<Used> = vec![];
+    let add = |all: &mut Vec<Used>, grant: &str, through: Option<&str>| {
+        let Some(offer) = kits.offer(grant) else { return };
+        match all.iter_mut().find(|u| u.offer.name == offer.name) {
+            Some(u) if u.through.as_deref() == through => u.grants.push(grant.to_string()),
+            Some(_) => {}
+            None => all.push(Used { offer, grants: vec![grant.to_string()], through: through.map(str::to_string) }),
+        }
+    };
+    for g in grants {
+        add(&mut all, g, None);
+    }
+    let mut i = 0;
+    while i < all.len() {
+        let (calls, via) = (all[i].offer.calls.clone(), all[i].offer.name.clone());
+        for g in &calls {
+            add(&mut all, g, Some(&via));
+        }
+        i += 1;
+    }
+    all
+}
+
+/// A kit's or an app's name, linked to its page.
+fn named(apps: &[App], id: &str) -> String {
+    let name = apps.iter().find(|x| x.id == id).map_or(id, |x| x.name.as_str());
+    format!(r#"<a href="/admin/apps/{}">{}</a>"#, escape(id), escape(name))
+}
+
+/// Whether it serves now, or what keeps it from serving.
+fn serving(off: bool, up: bool, waits: Option<&str>) -> String {
+    match (up, off, waits) {
+        (false, ..) => badge(Tone::Critical, "Not loaded", false),
+        (_, true, _) => badge(Tone::Warning, "Off", false),
+        (_, _, Some(kit)) => badge(Tone::Warning, &format!("Waits for {kit}"), false),
+        _ => badge(Tone::Success, "Serves", false),
+    }
+}
+
+/// The kits it uses, by the grants it holds and through those kits; for a
+/// kit, also what uses it, which waits while it is off.
+pub(super) fn kits_part(shell: &Shell, apps: &[App], a: &App) -> String {
+    let Some(r) = &a.running else { return String::new() };
+    let (kits, live) = (shell.kits.now(), shell.state.live(None));
+    let codes = |grants: &[String]| grants.iter().map(|g| format!("<code>{}</code>", escape(g))).collect::<Vec<_>>().join(" ");
+    let rows: String = used(&kits, &r.manifest.capabilities.grant)
+        .iter()
+        .map(|u| {
+            let o = &u.offer;
+            let (name, from) = match &o.wasm {
+                Some(id) => {
+                    let kit = apps.iter().find(|x| x.id == *id);
+                    let live = kit.and_then(|k| k.versions.iter().find(|v| v.status == VersionStatus::Live)).map(|v| format!("Deployed, {} live", v.version));
+                    let folder = kit.and_then(App::folder_version).map(|v| format!("From its folder, {v}"));
+                    (named(apps, id), live.or(folder).unwrap_or_else(|| "Deployed, none live".into()))
+                }
+                None => (format!("<code>{}</code>", escape(&o.name)), if o.builtin { "Built into AppOS" } else { "In the platform" }.to_string()),
+            };
+            let through = match &u.through {
+                Some(via) => {
+                    format!(r#" <span class="none">through {}</span>"#, apps.iter().find(|x| x.id == *via).map_or_else(|| escape(via), |x| escape(&x.name)))
+                }
+                None => String::new(),
+            };
+            let off = o.wasm.as_deref().is_some_and(|id| shell.state.is_off(id));
+            let now = serving(off, o.up, live.kit_waits(&kits, &o.calls).as_deref());
+            format!(r#"<tr><td>{name}</td><td>{}</td><td>{}{through}</td><td>{now}</td></tr>"#, escape(&from), codes(&u.grants))
+        })
+        .collect();
+    let head = r#"<thead><tr><th scope="col">Kit</th><th scope="col">From</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead>"#;
+    let uses = if rows.is_empty() {
+        r#"<p class="empty">It uses no kit: it holds no grant.</p>"#.to_string()
+    } else {
+        format!(
+            r#"<div class="scroll"><table class="uses" aria-labelledby="kits-h">{head}<tbody>{rows}</tbody></table></div><p class="partfoot">While a kit it uses is off or not loaded, it waits: visitors get a page saying so.</p>"#
+        )
+    };
+    let mut part = format!(r#"<div class="part" id="kits"><h4 id="kits-h">Kits it uses <small>· by the grants it holds</small></h4>{uses}</div>"#);
+    if let Some(offers) = &r.manifest.kit {
+        let offered: Vec<&str> = offers.grants.iter().map(|g| g.name.as_str()).collect();
+        let rows: String = apps
+            .iter()
+            .filter(|b| b.id != a.id)
+            .filter_map(|b| {
+                let grants: Vec<String> = b.running.as_ref()?.manifest.capabilities.grant.iter().filter(|g| offered.contains(&g.as_str())).cloned().collect();
+                (!grants.is_empty()).then(|| {
+                    let now = serving(b.off.is_some(), true, b.waits.as_ref().map(|(k, _)| k.as_str()));
+                    let kind = if b.is_kit() { "Kit" } else { "App" };
+                    format!(r#"<tr><td>{}</td><td>{kind}</td><td>{}</td><td>{now}</td></tr>"#, named(apps, &b.id), codes(&grants))
+                })
+            })
+            .collect();
+        let users = if rows.is_empty() {
+            r#"<p class="empty">Nothing uses it now.</p>"#.to_string()
+        } else {
+            format!(
+                r#"<div class="scroll"><table class="uses" aria-labelledby="users-h"><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Grants</th><th scope="col">Now</th></tr></thead><tbody>{rows}</tbody></table></div>"#
+            )
+        };
+        part += &format!(r#"<div class="part" id="users"><h4 id="users-h">Used by <small>· these wait while it is off</small></h4>{users}</div>"#);
+    }
+    part
 }
 
 /// Per route, the last hour, all versions.

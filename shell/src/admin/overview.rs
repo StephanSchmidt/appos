@@ -68,7 +68,7 @@ pub(super) fn dashboard(shell: &Shell, viewer: &Viewer, url: &str, selected: Opt
         let all = marks(&changes, &apps, None, now);
         body += &format!(r#"<div class="row">{}{}</div>"#, requests_chart(&apps, &all, now), failures_chart(&apps, &all, now));
         let own = marks(changes.iter().filter(|e| e.app_id == app.id), &apps, Some(&app.id), now);
-        body += &format!(r#"<div class="row" id="detail">{}{}</div>"#, heat(&apps, &app.id, now), detail(shell, app, &own, all_versions));
+        body += &format!(r#"<div class="row" id="detail">{}{}</div>"#, heat(&apps, &app.id, now), detail(shell, &apps, app, &own, all_versions));
         body += &inventory(&apps, &shell.risk);
         body += &history(&apps, &events);
         body += &format!(
@@ -166,15 +166,16 @@ pub(super) fn inventory(apps: &[App], risk: &Risk) -> String {
                 n => format!(r#"<a class="bad" href="{}" title="{}'s refused deploys">{n}</a>"#, escape(&of_app_kinds(&a.id, Pick::One(Kind::Refused))), escape(&a.name)),
             };
             format!(
-                r#"<tr><th scope="row"><a class="who-app" href="/admin/apps/{id}#detail">{}<span class="names"><b>{}</b><code class="id">{id}</code></span></a></th><td>{group}</td><td>{owner}</td><td>{version}</td><td>{level}</td><td class="chips">{grants}</td><td class="num">{}</td><td class="changed">{changed}</td><td class="num">{refused}</td></tr>"#,
+                r#"<tr><th scope="row"><a class="who-app" href="/admin/apps/{id}#detail">{}<span class="names"><b>{}</b><code class="id">{id}</code></span></a></th><td>{}</td><td>{group}</td><td>{owner}</td><td>{version}</td><td>{level}</td><td class="chips">{grants}</td><td class="num">{}</td><td class="changed">{changed}</td><td class="num">{refused}</td></tr>"#,
                 icon_html(a, 24),
                 escape(&a.name),
+                if a.is_kit() { "Kit" } else { "App" },
                 thousands(a.reqs.len() as u64),
             )
         })
         .collect();
     format!(
-        r#"<section class="card inventory" id="inventory" aria-labelledby="inv-h"><div class="cardhead"><h2 id="inv-h">Inventory <small>· an app is as risky as its riskiest grant <span class="bands">{}</span></small></h2></div><div class="scroll"><table><thead><tr><th scope="col">App</th><th scope="col">Group</th><th scope="col">Owner</th><th scope="col">Live version</th><th scope="col">Risk</th><th scope="col">Grants and their risk</th><th scope="col" class="num">Requests, last hour</th><th scope="col">Last change</th><th scope="col" class="num">Refused deploys</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#,
+        r#"<section class="card inventory" id="inventory" aria-labelledby="inv-h"><div class="cardhead"><h2 id="inv-h">Inventory <small>· an app is as risky as its riskiest grant <span class="bands">{}</span></small></h2></div><div class="scroll"><table><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Group</th><th scope="col">Owner</th><th scope="col">Live version</th><th scope="col">Risk</th><th scope="col">Grants and their risk</th><th scope="col" class="num">Requests, last hour</th><th scope="col">Last change</th><th scope="col" class="num">Refused deploys</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#,
         risk_legend(),
     )
 }
