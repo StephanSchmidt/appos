@@ -1,7 +1,8 @@
 //! Commands on their way to kits (kit.rs). A request's commit puts them in
 //! the outbox, in appos.db with its kv writes (tx.rs): no commit, no
-//! message. One delivery task per kit takes them out, oldest first, and
-//! hands each to `Kit::run`. A slow kit holds up only its own messages.
+//! message. One delivery task per interface takes them out, oldest first,
+//! and hands each to its kit's `run`, with the sender's context. A slow
+//! kit holds up only its own messages.
 //!
 //! Delivery is at least once: a message the kit failed, or that took too
 //! long, comes again later with the same id, after 1 s, 2 s, 4 s and so on
@@ -47,15 +48,15 @@ impl Outbox {
     }
 }
 
-/// Starts one delivery task per kit; in a Tokio runtime. A message that
-/// waits for an admin is logged in `platform`.
+/// Starts one delivery task per interface; in a Tokio runtime. A message
+/// that waits for an admin is logged in `platform`.
 pub fn start(db: Db, platform: PlatformDb, kits: &Kits) -> Outbox {
     let tasks = kits
-        .packages()
+        .interfaces()
         .into_iter()
-        .map(|(package, kit)| {
+        .map(|(interface, kit)| {
             let wake = Arc::new(Notify::new());
-            let to = Deliver { package, kit, db: db.clone(), platform: platform.clone() };
+            let to = Deliver { interface, kit, db: db.clone(), platform: platform.clone() };
             tokio::spawn(deliver(to, wake.clone()));
             wake
         })
@@ -65,34 +66,34 @@ pub fn start(db: Db, platform: PlatformDb, kits: &Kits) -> Outbox {
 
 /// Where one delivery task delivers, and what it needs.
 struct Deliver {
-    package: String,
+    interface: String,
     kit: Arc<dyn Kit>,
     db: Db,
     platform: PlatformDb,
 }
 
 async fn deliver(to: Deliver, wake: Arc<Notify>) {
-    let (db, package) = (&to.db, &to.package);
+    let (db, interface) = (&to.db, &to.interface);
     loop {
         let batch = {
-            let (db, package) = (db.clone(), package.clone());
-            tokio::task::spawn_blocking(move || tx::due(&db, &package, now_ms(), BATCH)).await
+            let (db, interface) = (db.clone(), interface.clone());
+            tokio::task::spawn_blocking(move || tx::due(&db, &interface, now_ms(), BATCH)).await
         };
         match batch {
             Ok(Ok(batch)) if !batch.is_empty() => {
                 for message in batch {
                     if let Err(e) = try_one(&to, message).await {
-                        eprintln!("{package}: the outbox could not be updated: {e}");
+                        eprintln!("{interface}: the outbox could not be updated: {e}");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
                 continue;
             }
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("{package}: the outbox could not be read: {e}"),
-            Err(e) => eprintln!("{package}: the outbox could not be read: {e}"),
+            Ok(Err(e)) => eprintln!("{interface}: the outbox could not be read: {e}"),
+            Err(e) => eprintln!("{interface}: the outbox could not be read: {e}"),
         }
-        let next = tx::next_due(db, package).ok().flatten();
+        let next = tx::next_due(db, interface).ok().flatten();
         let wait = next.map_or(IDLE, |due| Duration::from_millis((due - now_ms()).max(0) as u64).min(IDLE));
         tokio::select! {
             _ = wake.notified() => {}
@@ -106,7 +107,10 @@ async fn deliver(to: Deliver, wake: Arc<Notify>) {
 async fn try_one(to: &Deliver, waiting: Waiting) -> rusqlite::Result<()> {
     let (id, attempts, function, app) = (waiting.id.clone(), waiting.attempts, waiting.function.clone(), waiting.app.clone());
     let (db, kit) = (&to.db, to.kit.clone());
-    let run = tokio::spawn(async move { kit.run(Message::of(waiting)).await });
+    let run = tokio::spawn(async move {
+        let (cx, msg) = Message::of(waiting, RUN_TIME);
+        kit.run(cx, msg).await
+    });
     let abort = run.abort_handle();
     let result = match tokio::time::timeout(RUN_TIME, run).await {
         Ok(Ok(result)) => result,
@@ -148,7 +152,7 @@ fn backoff(attempts: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::{Grant, KitLinker, Run};
+    use crate::kit::{Context, Grant, KitLinker, Run};
 
     /// A kit whose every command fails, or panics.
     struct Down {
@@ -165,7 +169,7 @@ mod tests {
         fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
             Ok(())
         }
-        fn run(&self, _: Message) -> Run<'_> {
+        fn run(&self, _: Context, _: Message) -> Run<'_> {
             let panics = self.panics;
             Box::pin(async move {
                 assert!(!panics, "the kit's own bug");
@@ -177,7 +181,8 @@ mod tests {
     fn sent(db: &Db) -> Waiting {
         let mut t = tx::Tx::default();
         let args = r#"["web"]"#.into();
-        t.send(tx::Outgoing { id: "m1".into(), kit: "acme:crm".into(), function: "acme:crm/leads#add-lead".into(), args });
+        let (interface, function, about) = ("acme:crm/leads".into(), "acme:crm/leads#add-lead".into(), "{}".into());
+        t.send(tx::Outgoing { id: "m1".into(), interface, function, args, about });
         assert!(t.commit(db, "webinars").unwrap());
         tx::outbox(db).unwrap().remove(0)
     }
@@ -186,7 +191,7 @@ mod tests {
     async fn a_failed_command_is_tried_again_then_waits_for_an_admin() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
         sent(&db);
-        let to = Deliver { package: "acme:crm".into(), kit: Arc::new(Down { panics: false }), db: db.clone(), platform: platform.clone() };
+        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: false }), db: db.clone(), platform: platform.clone() };
         for n in 1..=MAX_ATTEMPTS {
             try_one(&to, tx::outbox(&db).unwrap().remove(0)).await.unwrap();
             let w = tx::outbox(&db).unwrap().remove(0);
@@ -205,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn a_kit_that_panics_fails_the_message_not_delivery() {
         let (db, platform) = (tx::in_memory(), PlatformDb::in_memory());
-        let to = Deliver { package: "acme:crm".into(), kit: Arc::new(Down { panics: true }), db: db.clone(), platform };
+        let to = Deliver { interface: "acme:crm/leads".into(), kit: Arc::new(Down { panics: true }), db: db.clone(), platform };
         try_one(&to, sent(&db)).await.unwrap();
         let w = tx::outbox(&db).unwrap().remove(0);
         assert!(w.error.as_deref().is_some_and(|e| e.starts_with("the kit crashed")), "{:?}", w.error);

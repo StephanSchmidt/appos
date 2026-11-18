@@ -24,7 +24,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::access::Access;
 use crate::bundle::Checked;
-use crate::kit::Kits;
+use crate::kit::{self, About, Context, Kits, User};
 use crate::manifest::Manifest;
 use crate::platform::Outcome;
 use crate::tx::{Db, Tx};
@@ -222,6 +222,8 @@ pub struct Ctx {
     /// The grant a host call needed and the policy denied; it ended the
     /// request.
     denied: Option<String>,
+    /// What kits get with a call: set for a request.
+    context: Option<Context>,
 }
 
 /// Track allocations across all memories/tables in the store. Wasmtime
@@ -318,14 +320,15 @@ pub fn engine() -> anyhow::Result<Engine> {
 }
 
 /// The interfaces a component imports, without versions, each with the
-/// functions it uses from them.
+/// functions it uses from them (not its types: a record is no call).
 pub(crate) fn imports(engine: &Engine, component: &Component) -> Vec<(String, Vec<String>)> {
     component
         .component_type()
         .imports(engine)
         .filter_map(|(name, item)| match item.ty {
             ComponentItem::ComponentInstance(i) => {
-                Some((name.split('@').next().unwrap_or(name).to_string(), i.exports(engine).map(|(f, _)| f.to_string()).collect()))
+                let functions = i.exports(engine).filter(|(_, ty)| matches!(ty.ty, ComponentItem::ComponentFunc(_))).map(|(f, _)| f.to_string()).collect();
+                Some((name.split('@').next().unwrap_or(name).to_string(), functions))
             }
             _ => None,
         })
@@ -436,6 +439,7 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
         output,
         access: Access::ALL,
         denied: None,
+        context: None,
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| c);
@@ -450,8 +454,16 @@ fn new_store(engine: &Engine, m: &Manifest, db: Db, phase: Phase, budget: Budget
 /// writes are dropped and the request runs again from the start, this time
 /// alone. All runs together get the budget's time. Only the run that
 /// counts prints its log lines.
-pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget, access: Access) -> (Result<Page, Failed>, Cost) {
+pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget, access: Access, user: Option<User>) -> (Result<Page, Failed>, Cost) {
     let deadline = Instant::now() + budget.time;
+    let held = &app.manifest.capabilities.grant;
+    let cx = Context::new(About {
+        app: app.manifest.app.id.clone(),
+        user,
+        page: Some(kit::Page { method: req.method.clone(), path: req.path.clone(), url: format!("{}{}", req.origin, req.base) }),
+        deadline: deadline.into_std(),
+        may: held.iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g.clone()).collect(),
+    });
     let timeout = || timed_out(budget);
     let mut cost = Cost::default();
     for run in 1..=MAX_RUNS {
@@ -467,7 +479,7 @@ pub async fn call(app: &LoadedApp, handler: &str, req: &Request, budget: Budget,
                 Err(_) => return (Err(timeout()), cost),
             }
         };
-        let (result, mut ctx, fuel) = run_once(app, handler, req, deadline, budget, access).await;
+        let (result, mut ctx, fuel) = run_once(app, handler, req, deadline, budget, access, &cx).await;
         cost.fuel = fuel;
         cost.io = ctx.io_used;
         let page = match result {
@@ -502,11 +514,20 @@ fn timed_out(budget: Budget) -> Failed {
 /// One run in a fresh instance. page.done stops the app right there (as a
 /// trap the shell expects); returning from `start` without it ends the app
 /// the same way. The instance is dropped either way. Returns the fuel used.
-async fn run_once(app: &LoadedApp, handler: &str, req: &Request, deadline: Instant, budget: Budget, access: Access) -> (Result<Page, Failed>, Ctx, u64) {
+async fn run_once(
+    app: &LoadedApp,
+    handler: &str,
+    req: &Request,
+    deadline: Instant,
+    budget: Budget,
+    access: Access,
+    cx: &Context,
+) -> (Result<Page, Failed>, Ctx, u64) {
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
     let mut store = new_store(app.pre.engine(), &app.manifest, app.db.clone(), Phase::Start { page, done: false }, budget);
     store.data_mut().tx = Tx::with_deadline(deadline.into_std());
     store.data_mut().access = access;
+    store.data_mut().context = Some(cx.clone());
     let ran = timeout_at(deadline, async {
         let instance = app.pre.instantiate_async(&mut store).await?;
         instance.appos_framework_handler().call_start(&mut store, handler, req).await
@@ -742,18 +763,22 @@ impl log::Host for Ctx {
 
 /// kv's functions, for the kv kit (kit.rs), which checked the call.
 impl Ctx {
-    pub(crate) fn app_id(&self) -> &str {
-        &self.app_id
-    }
-
     pub(crate) async fn kv_get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
         check_key("kv::get", &key)?;
         self.database(move |tx, db, id| tx.get(db, id, &key)).await
     }
 
-    /// A command to a kit (kit.rs), sent when the request commits.
-    pub(crate) fn send(&mut self, kit: String, function: String, args: String) {
-        self.tx.send(crate::tx::Outgoing { id: crate::auth::session::random(16), kit, function, args });
+    /// What kits get with a call; only while handling a request.
+    pub(crate) fn context(&self) -> wasmtime::Result<Context> {
+        self.context.clone().ok_or_else(|| wasmtime::format_err!("kits can only be called while handling a request"))
+    }
+
+    /// A command to a kit (kit.rs), sent when the request commits, with
+    /// the user as they are now.
+    pub(crate) fn send(&mut self, interface: String, function: String, args: String) -> wasmtime::Result<()> {
+        let about = serde_json::to_string(&self.context()?.sent())?;
+        self.tx.send(crate::tx::Outgoing { id: crate::auth::session::random(16), interface, function, args, about });
+        Ok(())
     }
 
     pub(crate) fn kv_set(&mut self, key: String, value: String) -> wasmtime::Result<()> {

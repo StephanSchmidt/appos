@@ -24,6 +24,7 @@ export type { Request };
 export * as kv from "../bindings/kv.ts";
 export * as log from "../bindings/log.ts";
 export * as page from "../bindings/page.ts";
+export * as users from "../bindings/users.ts";
 
 // Routes and modules
 

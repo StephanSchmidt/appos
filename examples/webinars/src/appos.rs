@@ -23,6 +23,9 @@ wit_bindgen::generate!({
 
 pub use self::appos::framework::types::Request;
 pub use self::appos::framework::{log, page, registry};
+/// Who is signed in: `users::current()`, with the grant user-read.
+#[allow(unused_imports)]
+pub use self::appos::framework::users;
 pub use self::exports::appos::framework::handler::Guest as App;
 
 /// A route: method, path and the function that handles it. `path` is below

@@ -70,8 +70,8 @@ RULES. FORMS, STORAGE and ERRORS are what keeps an app safe and easy to
 change as it grows.
 
 Each section also prints on its own: appos guide <section>, one of files,
-lifecycle, request, page, templates, htmx, forms, storage, errors, styles,
-rules, git, dev, testing, typescript, java.
+lifecycle, request, page, templates, htmx, forms, storage, users, errors,
+styles, rules, git, dev, testing, typescript, java.
 
 FILES (as appos new creates them)
   app.toml             id, name, version, owner (who to ask about the app,
@@ -248,9 +248,8 @@ STORAGE
   bug may have written it. get_json returns kv::Unreadable for a value that
   isn't the JSON of a T (see ERRORS); the scans log and leave out an entry
   they can't read.
-  Private to the app, and shared by all its visitors: apps don't see who
-  is signed in, so everyone sees the same state. Keys up to 1 KB, values up
-  to 1 MB.
+  Private to the app, and shared by all its visitors: everyone sees the
+  same state. Keys up to 1 KB, values up to 1 MB.
   Needs grants in app.toml: "kv-read" for get and scan, "kv-write" for set
   and delete. An app that only shows data grants only "kv-read".
   Each request is a transaction. Its writes are applied together when it
@@ -267,6 +266,13 @@ STORAGE
   Each request may spend 100 I/O units. kv::get and kv::scan cost 1, a
   scan of 1000 keys too, so list with one scan, not a get per item.
   kv::set and kv::delete cost 5, so one request writes at most 20 keys.
+
+USERS
+  users::current() -> Option<users::User>   who is signed in; None for
+    nobody. A User has id (stable, from the sign-in), email, name and
+    groups (the sign-in's, and those the platform's policy puts them in).
+  Needs the grant "user-read" in app.toml. Data of one person goes in kv
+  under a key with their id.
 
 ERRORS
   Four kinds, each handled one way:
@@ -734,8 +740,8 @@ const HELP_GUIDE: &str = "appos guide [section]
 
 Prints how apps work: routes, the page, htmx, storage, styles, rules.
 With a section, only that one: files, lifecycle, request, page, templates,
-htmx, forms, storage, errors, styles, rules, git, dev, testing, typescript,
-java.
+htmx, forms, storage, users, errors, styles, rules, git, dev, testing,
+typescript, java.
 ";
 
 /// A command's help, for `appos <command> --help`.
@@ -774,6 +780,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("htmx", "HTMX"),
     ("forms", "FORMS"),
     ("storage", "STORAGE"),
+    ("users", "USERS"),
     ("errors", "ERRORS"),
     ("styles", "STYLES"),
     ("rules", "RULES"),

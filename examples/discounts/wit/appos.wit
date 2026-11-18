@@ -9,10 +9,10 @@
 //           the shell sends the result to the browser.
 //
 // `kv` needs grants in the app's manifest: `kv-read` for get and scan,
-// `kv-write` for set and delete.
+// `kv-write` for set and delete. `users` needs `user-read`.
 // The platform's policy can say who may use a grant: a host call it
 // denies ends the request, writes nothing, and the shell sends the visitor
-// to sign in or shows "not allowed". Apps don't see who is signed in.
+// to sign in or shows "not allowed".
 package appos:framework@0.1.0;
 
 interface types {
@@ -77,6 +77,22 @@ interface kv {
     scan: func(prefix: string, after: option<string>, limit: u32, reverse: bool) -> list<tuple<string, string>>;
 }
 
+/// Who is signed in. Only callable during `start`.
+interface users {
+    record user {
+        /// What the sign-in calls them; stable.
+        id: string,
+        email: string,
+        name: string,
+        /// The sign-in's groups and those the platform's policy puts
+        /// them in.
+        groups: list<string>,
+    }
+
+    /// None when nobody is signed in.
+    current: func() -> option<user>;
+}
+
 interface handler {
     use types.{request};
 
@@ -89,6 +105,7 @@ world app {
     import page;
     import log;
     import kv;
+    import users;
 
     export handler;
 }

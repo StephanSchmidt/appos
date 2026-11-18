@@ -34,7 +34,7 @@ pub const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
 const GET: &str = "SELECT value FROM kv WHERE app = ?1 AND key = ?2";
 const SET: &str = "INSERT INTO kv (app, key, value) VALUES (?1, ?2, ?3) ON CONFLICT (app, key) DO UPDATE SET value = ?3";
 const DELETE: &str = "DELETE FROM kv WHERE app = ?1 AND key = ?2";
-const SEND: &str = "INSERT INTO outbox (id, kit, function, app, args, at, due) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)";
+const SEND: &str = "INSERT INTO outbox (id, interface, function, app, args, about, at, due) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)";
 
 #[derive(Default)]
 pub struct Tx {
@@ -50,12 +50,14 @@ pub struct Tx {
 /// A command to a kit, until the commit puts it in the outbox.
 pub struct Outgoing {
     pub id: String,
-    /// The kit's WIT package, like "acme:crm".
-    pub kit: String,
+    /// Where it goes: the interface, like "acme:crm/customers".
+    pub interface: String,
     /// Like "acme:crm/customers#new-customer".
     pub function: String,
     /// The arguments, as JSON.
     pub args: String,
+    /// The sender's context: the user and what they may (kit::Sent, JSON).
+    pub about: String,
 }
 
 fn deadline_error() -> rusqlite::Error {
@@ -230,7 +232,7 @@ impl Tx {
         let at = crate::platform::now_ms();
         for m in &self.messages {
             before_statement(&tx, self.deadline)?;
-            tx.execute(SEND, params![m.id, m.kit, m.function, app, m.args, at])?;
+            tx.execute(SEND, params![m.id, m.interface, m.function, app, m.args, m.about, at])?;
         }
         before_statement(&tx, self.deadline)?;
         tx.commit()?;
@@ -281,9 +283,9 @@ fn create(conn: &Connection) -> anyhow::Result<()> {
          CREATE TABLE IF NOT EXISTS examples (app TEXT NOT NULL, handler TEXT NOT NULL, request TEXT NOT NULL, PRIMARY KEY (app, handler));
          -- Commands waiting for their kit. due: when to try (next); none once
          -- delivery gave up, until an admin retries.
-         CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kit TEXT NOT NULL, function TEXT NOT NULL, app TEXT NOT NULL, args TEXT NOT NULL,
-             at INTEGER NOT NULL, due INTEGER, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
-         CREATE INDEX IF NOT EXISTS outbox_due ON outbox (kit, due);",
+         CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, interface TEXT NOT NULL, function TEXT NOT NULL, app TEXT NOT NULL, args TEXT NOT NULL,
+             about TEXT NOT NULL, at INTEGER NOT NULL, due INTEGER, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
+         CREATE INDEX IF NOT EXISTS outbox_due ON outbox (interface, due);",
     )?;
     Ok(())
 }
@@ -312,11 +314,13 @@ pub fn entries(db: &Db, app: &str) -> rusqlite::Result<Vec<(String, String)>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
     pub id: String,
-    pub kit: String,
+    pub interface: String,
     pub function: String,
     /// The app that sent it.
     pub app: String,
     pub args: String,
+    /// The sender's context (kit::Sent, JSON).
+    pub about: String,
     /// When it was sent (unix ms).
     pub at: i64,
     /// When delivery tries next; none once it gave up.
@@ -326,32 +330,35 @@ pub struct Waiting {
     pub error: Option<String>,
 }
 
-const WAITING: &str = "SELECT id, kit, function, app, args, at, due, attempts, error FROM outbox";
+const WAITING: &str = "SELECT id, interface, function, app, args, about, at, due, attempts, error FROM outbox";
 
 fn waiting(r: &rusqlite::Row) -> rusqlite::Result<Waiting> {
     Ok(Waiting {
         id: r.get(0)?,
-        kit: r.get(1)?,
+        interface: r.get(1)?,
         function: r.get(2)?,
         app: r.get(3)?,
         args: r.get(4)?,
-        at: r.get(5)?,
-        due: r.get(6)?,
-        attempts: r.get(7)?,
-        error: r.get(8)?,
+        about: r.get(5)?,
+        at: r.get(6)?,
+        due: r.get(7)?,
+        attempts: r.get(8)?,
+        error: r.get(9)?,
     })
 }
 
-/// The kit's messages due by `now`, in the order sent, at most `limit`.
-pub fn due(db: &Db, kit: &str, now: i64, limit: u32) -> rusqlite::Result<Vec<Waiting>> {
+/// The interface's messages due by `now`, in the order sent, at most
+/// `limit`.
+pub fn due(db: &Db, interface: &str, now: i64, limit: u32) -> rusqlite::Result<Vec<Waiting>> {
     let conn = db.lock();
-    let mut stmt = conn.prepare(&format!("{WAITING} WHERE kit = ?1 AND due <= ?2 ORDER BY rowid LIMIT ?3"))?;
-    stmt.query_map(params![kit, now, limit], waiting)?.collect()
+    let mut stmt = conn.prepare(&format!("{WAITING} WHERE interface = ?1 AND due <= ?2 ORDER BY rowid LIMIT ?3"))?;
+    stmt.query_map(params![interface, now, limit], waiting)?.collect()
 }
 
-/// When the kit's next message is due; none while it has none to try.
-pub fn next_due(db: &Db, kit: &str) -> rusqlite::Result<Option<i64>> {
-    db.lock().query_row("SELECT MIN(due) FROM outbox WHERE kit = ?1", [kit], |r| r.get(0))
+/// When the interface's next message is due; none while it has none to
+/// try.
+pub fn next_due(db: &Db, interface: &str) -> rusqlite::Result<Option<i64>> {
+    db.lock().query_row("SELECT MIN(due) FROM outbox WHERE interface = ?1", [interface], |r| r.get(0))
 }
 
 /// The kit ran it: it leaves the outbox.
@@ -499,7 +506,8 @@ mod tests {
     }
 
     fn message(id: &str) -> Outgoing {
-        Outgoing { id: id.into(), kit: "acme:crm".into(), function: "acme:crm/leads#add-lead".into(), args: r#"["web"]"#.into() }
+        let (interface, function, args, about) = ("acme:crm/leads".into(), "acme:crm/leads#add-lead".into(), r#"["web"]"#.into(), "{}".into());
+        Outgoing { id: id.into(), interface, function, args, about }
     }
 
     #[test]
@@ -530,13 +538,13 @@ mod tests {
         assert!(tx.commit(&db, APP).unwrap());
         let m = outbox(&db).unwrap().remove(0);
         assert_eq!((m.app.as_str(), m.attempts, m.due), (APP, 0, Some(m.at)));
-        assert_eq!(due(&db, "acme:crm", m.at, 10).unwrap(), std::slice::from_ref(&m));
-        assert!(due(&db, "acme:crm", m.at - 1, 10).unwrap().is_empty());
-        assert!(due(&db, "acme:other", m.at, 10).unwrap().is_empty());
-        assert_eq!(next_due(&db, "acme:crm").unwrap(), Some(m.at));
+        assert_eq!(due(&db, "acme:crm/leads", m.at, 10).unwrap(), std::slice::from_ref(&m));
+        assert!(due(&db, "acme:crm/leads", m.at - 1, 10).unwrap().is_empty());
+        assert!(due(&db, "acme:crm/deals", m.at, 10).unwrap().is_empty());
+        assert_eq!(next_due(&db, "acme:crm/leads").unwrap(), Some(m.at));
         delivered(&db, "m1").unwrap();
         assert!(outbox(&db).unwrap().is_empty());
-        assert_eq!(next_due(&db, "acme:crm").unwrap(), None);
+        assert_eq!(next_due(&db, "acme:crm/leads").unwrap(), None);
     }
 
     fn put(db: &Db, pairs: &[(&str, &str)]) {

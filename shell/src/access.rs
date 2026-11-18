@@ -25,7 +25,7 @@
 //! app (`Access`); a kit call tests a bit. The file is checked every 2 s and read again when it changes; a
 //! file with a mistake leaves the policy as it was.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -35,6 +35,7 @@ use casbin::{CoreApi, DefaultModel, Enforcer, MemoryAdapter, MgmtApi};
 use parking_lot::{Mutex, RwLock};
 
 use crate::auth::{ANYONE, SIGNED_IN, Who};
+use crate::kit::User;
 use crate::manifest::{MAX_GRANTS, validate_app_id};
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::runtime::LoadedApp;
@@ -93,6 +94,17 @@ pub fn of(shell: &Shell, who: &Who, app: &LoadedApp) -> Access {
     let Some(policies) = &shell.policy else { return Access::ALL };
     let m = &app.manifest;
     policies.current().access(who, &m.app.id, m.app.group.as_deref().unwrap_or("").trim(), &m.capabilities.grant)
+}
+
+/// Who is signed in, for kits and apps (kit.rs): the identity, with the
+/// groups the sign-in gave and those policy.csv puts them in.
+pub fn user(shell: &Shell, who: &Who) -> Option<User> {
+    let id = who.identity()?;
+    let groups = match &shell.policy {
+        Some(policies) => policies.current().groups(who),
+        None => id.groups.clone(),
+    };
+    Some(User { id: id.id.clone(), email: id.email.clone(), name: id.name.clone(), groups })
 }
 
 /// A request's subjects, the app, its group and the grants it holds.
@@ -168,6 +180,24 @@ impl Policy {
         }
         cache.insert(key, access);
         access
+    }
+
+    /// The groups someone is in: the sign-in's, and those the `g` lines
+    /// put them in, also through other groups. Sorted, without `group:`.
+    pub fn groups(&self, who: &Who) -> Vec<String> {
+        let mut subjects: BTreeSet<String> = who.subjects().into_iter().collect();
+        loop {
+            let before = subjects.len();
+            for m in &self.lines.1 {
+                if subjects.contains(&m[0]) {
+                    subjects.insert(m[1].clone());
+                }
+            }
+            if subjects.len() == before {
+                break;
+            }
+        }
+        subjects.iter().filter_map(|s| s.strip_prefix("group:")).map(str::to_string).collect()
     }
 
     /// Whether someone may do a platform act (`admin`).
@@ -427,6 +457,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_users_groups_come_from_the_sign_in_and_the_policy() {
+        let p = Policy::parse("g, bob@acme.com, group:sales\ng, group:sales, group:revenue\ng, group:ops, group:platform\n", &kv()).await.unwrap();
+        assert_eq!(p.groups(&person("Bob@Acme.com", &["ops"])), ["ops", "platform", "revenue", "sales"]);
+        assert_eq!(p.groups(&person("eve@acme.com", &[])), Vec::<String>::new());
+        assert_eq!(p.groups(&Who::default()), Vec::<String>::new());
+    }
+
+    #[tokio::test]
     async fn apps_by_id_group_or_all() {
         let p = Policy::parse("p, group:marketing, apps:Marketing, kv-read\np, group:ops, *, kv-*\n", &kv()).await.unwrap();
         let marketing = person("m@acme.com", &["marketing"]);
@@ -451,7 +489,7 @@ mod tests {
     async fn mistakes_refuse_the_file_with_the_line() {
         let err = |text: &'static str| async move { Policy::parse(text, &kv()).await.err().map(|e| e.to_string()).unwrap_or_default() };
         assert!(err("p, anyone, webinars, kv-read\np, anyone, webinars, kv-fly").await.contains("line 2"));
-        assert!(err("p, anyone, webinars, kv-fly").await.contains("no grant; known: kv-read, kv-write, admin"));
+        assert!(err("p, anyone, webinars, kv-fly").await.contains("no grant; known: kv-read, kv-write, user-read, admin"));
         assert!(err("p, anyone, webinars, *").await.contains("would also give admin"));
         assert!(err("p, anyone, webinars, admin").await.contains("give * as the app"));
         assert!(err("p, bob, webinars, kv-read").await.contains("is no one"));

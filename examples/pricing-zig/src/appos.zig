@@ -11,6 +11,7 @@ pub const Request = wit.types.Request;
 pub const kv = wit.kv;
 pub const log = wit.log;
 pub const page = wit.page;
+pub const users = wit.users;
 
 /// A key and its value, as the request's params, query and form have them.
 pub const Pair = @Tuple(&.{ []const u8, []const u8 });

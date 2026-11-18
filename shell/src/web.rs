@@ -915,7 +915,8 @@ async fn run(shell: &Arc<Shell>, who: &Who, app: &LoadedApp, route: &runtime::Ro
     }
     let access = crate::access::of(shell, who, app);
     let started = Instant::now();
-    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access).await;
+    let user = crate::access::user(shell, who);
+    let (result, cost) = runtime::call(app, &route.handler, &request, shell.state.budget(app), access, user).await;
     drop(permit);
     if cost.sent > 0 {
         shell.outbox.wake();

@@ -8,6 +8,7 @@ use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 
 use crate::auth::Who;
+use crate::kit::Sent;
 use crate::outbox::MAX_ATTEMPTS;
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::shell::Shell;
@@ -42,28 +43,31 @@ fn messages_html(shell: &Shell, viewer: &Viewer) -> Response {
 }
 
 fn table(apps: &[App], waiting: &[Waiting], now: i64) -> String {
-    let mut by_kit: BTreeMap<&str, Vec<&Waiting>> = BTreeMap::new();
+    let mut by_interface: BTreeMap<&str, Vec<&Waiting>> = BTreeMap::new();
     for w in waiting {
-        by_kit.entry(&w.kit).or_default().push(w);
+        by_interface.entry(&w.interface).or_default().push(w);
     }
-    let rows: String = by_kit
+    let rows: String = by_interface
         .iter()
-        .flat_map(|(kit, ws)| {
+        .flat_map(|(interface, ws)| {
             let failed = ws.iter().filter(|w| w.due.is_none()).count();
             let summary =
                 format!(r#"<span class="id">{}{}</span>"#, plural(ws.len(), "message"), if failed > 0 { format!(", {failed} failed") } else { String::new() });
-            let kit_row = format!(r#"<tr><th scope="rowgroup" colspan="2"><span class="names"><span>{}</span>{summary}</span></th></tr>"#, escape(kit));
-            std::iter::once(kit_row).chain(ws.iter().map(move |w| row(apps, w, now)))
+            let head = format!(r#"<tr><th scope="rowgroup" colspan="2"><span class="names"><span>{}</span>{summary}</span></th></tr>"#, escape(interface));
+            std::iter::once(head).chain(ws.iter().map(move |w| row(apps, w, now)))
         })
         .collect();
     format!(r#"<div class="scroll"><table><thead><tr><th scope="col">Command</th><th scope="col">State</th></tr></thead><tbody>{rows}</tbody></table></div>"#)
 }
 
 fn row(apps: &[App], w: &Waiting, now: i64) -> String {
-    let function = w.function.split_once('/').map_or(w.function.as_str(), |(_, f)| f);
+    let function = w.function.split_once('#').map_or(w.function.as_str(), |(_, f)| f);
     let app =
         format!(r#"<a href="/admin/apps/{}">{}</a>"#, form_urlencoded::byte_serialize(w.app.as_bytes()).collect::<String>(), escape(name_of(apps, &w.app)));
-    let what = format!(r#"<span class="names"><span><code>{}</code></span><span class="id">from {app}, sent {}</span></span>"#, escape(function), clock(w.at));
+    let sent: Sent = serde_json::from_str(&w.about).unwrap_or_default();
+    let user = sent.user.map(|u| format!(" for {}", escape(&u.email))).unwrap_or_default();
+    let what =
+        format!(r#"<span class="names"><span><code>{}</code></span><span class="id">from {app}{user}, sent {}</span></span>"#, escape(function), clock(w.at));
     let error = w.error.as_deref().map(|e| format!(r#"<span class="id">{}</span>"#, escape(e))).unwrap_or_default();
     let state = match w.due {
         None => format!(
@@ -129,11 +133,19 @@ mod tests {
 
         let mut t = tx::Tx::default();
         let args = r#"["web"]"#.into();
-        t.send(tx::Outgoing { id: "m1".into(), kit: "acme:crm".into(), function: "acme:crm/leads#add-lead".into(), args });
+        let about = r#"{"user":{"id":"ann","email":"ann@acme.com","name":"Ann","groups":[]},"may":[]}"#.into();
+        t.send(tx::Outgoing { id: "m1".into(), interface: "acme:crm/leads".into(), function: "acme:crm/leads#add-lead".into(), args, about });
         assert!(t.commit(&shell.db, "test").unwrap());
         tx::failed(&shell.db, "m1", MAX_ATTEMPTS, None, "the CRM is down").unwrap();
         let page = html(&shell).await;
-        for part in ["acme:crm", "<code>leads#add-lead</code>", "Failed 10 times, waits for you", "the CRM is down", r#"action="/admin/messages/m1/retry""#] {
+        for part in [
+            "acme:crm/leads",
+            "<code>add-lead</code>",
+            "for ann@acme.com",
+            "Failed 10 times, waits for you",
+            "the CRM is down",
+            r#"action="/admin/messages/m1/retry""#,
+        ] {
             assert!(page.contains(part), "{part}");
         }
 
