@@ -12,6 +12,7 @@ mod auth;
 pub mod bundle;
 mod deploy;
 pub mod deps;
+mod fetch;
 pub mod kit;
 mod log_filter;
 mod manifest;

@@ -23,6 +23,9 @@
 //! [capabilities]
 //! grant = ["crm-read"]                # other kits' grants it calls with
 //!
+//! [http]
+//! hosts = ["api.acme.com"]            # the only hosts http.fetch may call
+//!
 //! [limits]
 //! seconds = 5                         # for its pages, as in app.toml
 //!
@@ -36,7 +39,8 @@
 //! what its caller has left of the request's fuel, I/O and time, and memory
 //! of its own. A chain of calls goes at most `MAX_DEPTH` deep. Unlike an app
 //! it has a directory of its own (data/kits/<id>, "/" in its WASI), the
-//! network and its configuration as environment variables. It gets no kv:
+//! network, `http.fetch` to its [http] hosts (fetch.rs) and its
+//! configuration as environment variables. It gets no kv:
 //! it keeps its own data. What it takes and gives are values: no
 //! resources, streams or futures. A command to it runs once the sender
 //! committed, with a whole budget of its own.
@@ -49,8 +53,7 @@
 //! a new version replaces the old one in place, once everything that uses
 //! the kit still fits it (`fits`).
 //!
-//! A sign-in kit (auth/sign_in_kit.rs) has a kit.toml too, with
-//! `[sign-in] hosts = [...]`, the hosts it may fetch from, and no WIT or
+//! A sign-in kit (auth/sign_in_kit.rs) has a kit.toml too, with no WIT or
 //! grants: auth.toml names it, and `config.get` gives it its [config].
 
 use std::collections::{BTreeMap, HashMap};
@@ -87,13 +90,13 @@ struct KitToml {
     config: BTreeMap<String, String>,
     #[serde(default, rename = "config-env")]
     config_env: BTreeMap<String, String>,
-    #[serde(default, rename = "sign-in")]
-    sign_in: Option<SignInToml>,
+    #[serde(default)]
+    http: HttpToml,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SignInToml {
+struct HttpToml {
     #[serde(default)]
     hosts: Vec<String>,
 }
@@ -145,6 +148,8 @@ pub struct Offers {
     pub wit: Vec<PathBuf>,
     /// Its fake, below its directory.
     pub fake: Option<PathBuf>,
+    /// The hosts it may fetch from, in lower case.
+    pub hosts: Vec<String>,
     config: BTreeMap<String, String>,
     config_env: BTreeMap<String, String>,
 }
@@ -153,8 +158,8 @@ pub struct Offers {
 /// kit offers.
 pub(crate) fn manifest(text: &str) -> anyhow::Result<Manifest> {
     let toml: KitToml = toml::from_str(text)?;
-    anyhow::ensure!(toml.sign_in.is_none(), "a sign-in kit: auth.toml names it (provider = \"kit\")");
-    anyhow::ensure!(!toml.kit.wit.is_empty(), "wit = [...]: the WIT of what it offers");
+    anyhow::ensure!(!toml.kit.wit.is_empty(), "wit = [...]: the WIT of what it offers (a sign-in kit isn't deployed: auth.toml names it)");
+    let hosts = crate::fetch::hosts(&toml.http.hosts)?;
     let mut grants = vec![];
     for (name, g) in &toml.grants {
         crate::manifest::validate_grant_name(name).map_err(|e| anyhow::anyhow!("[grants.{name}]: {e}"))?;
@@ -171,7 +176,7 @@ pub(crate) fn manifest(text: &str) -> anyhow::Result<Manifest> {
         anyhow::ensure!(!toml.config.contains_key(key), "{key} is in [config] and [config-env]: give it once");
     }
     let About { id, name, version, owner, group, wasm, wit, commands, fake } = toml.kit;
-    let offers = Offers { grants, commands, wit, fake, config: toml.config, config_env: toml.config_env };
+    let offers = Offers { grants, commands, wit, fake, hosts, config: toml.config, config_env: toml.config_env };
     Ok(Manifest { app: AppInfo { id, name, version, owner, group, wasm }, capabilities: toml.capabilities, limits: toml.limits, kit: Some(offers) })
 }
 
@@ -352,7 +357,8 @@ pub(crate) fn version(
     let dir = data.join("kits").join(&id);
     std::fs::create_dir_all(&dir).with_context(|| format!("its directory, {}", dir.display()))?;
     let held = manifest.capabilities.grant.clone();
-    let sandbox = KitSandbox { pre, name: id.clone(), label: label.to_string(), held: held.clone(), db, dir, env: env.into_iter().collect() };
+    let hosts = offers.hosts.clone().into();
+    let sandbox = KitSandbox { pre, name: id.clone(), label: label.to_string(), held: held.clone(), db, dir, env: env.into_iter().collect(), hosts };
     Ok(KitVersion { id, wit: files.wit, grants: offers.grants.clone(), held, commands: offers.commands.clone(), versions, exports, sandbox, fake: files.fake })
 }
 
@@ -371,12 +377,12 @@ pub(crate) fn sign_in(dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> anyho
     let toml: KitToml = toml::from_str(&read_text(&file)?).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
     crate::manifest::validate_app_id(&toml.kit.id).map_err(|e| anyhow::anyhow!("{}: id: {e}", file.display()))?;
     let at = |e: anyhow::Error| e.context(file.display().to_string());
-    let Some(sign_in) = &toml.sign_in else { bail!("{}: no [sign-in]: not a sign-in kit", file.display()) };
     let offers = !toml.kit.wit.is_empty() || !toml.kit.commands.is_empty() || !toml.grants.is_empty() || !toml.capabilities.grant.is_empty();
     anyhow::ensure!(!offers, "{}: a sign-in kit offers apps nothing and calls no kits: no wit, commands, grants or capabilities", file.display());
     let path = dir.join(&toml.kit.wasm);
     let wasm = std::fs::read(&path).with_context(|| format!("wasm = {:?}: {}", toml.kit.wasm, path.display())).map_err(at)?;
-    Ok(SignIn { hosts: sign_in.hosts.clone(), config: config(&toml.config, &toml.config_env, env).map_err(at)?, wasm, id: toml.kit.id })
+    let hosts = crate::fetch::hosts(&toml.http.hosts).map_err(at)?;
+    Ok(SignIn { hosts, config: config(&toml.config, &toml.config_env, env).map_err(at)?, wasm, id: toml.kit.id })
 }
 
 /// [config] and [config-env], read from `env`.
@@ -494,7 +500,7 @@ impl Kit for WasmKit {
             anyhow::ensure!(args.len() == types.len(), "{}: {} arguments, not {}", msg.function, args.len(), types.len());
             let params = args.iter().zip(&types).map(|(a, t)| from_json(a, t)).collect::<anyhow::Result<Vec<_>>>()?;
             let (cx, access) = cx.to_kit(&kit.sandbox.name, &kit.sandbox.held);
-            let left = Left { fuel: FUEL, io: 0, depth: 1 };
+            let left = Left { fuel: FUEL, io: 0, depth: 1, waits: false };
             let Called { result, denied, .. } = call_kit(&kit.sandbox, cx, access, left, (&kit.versioned(interface), name), &params, &mut []).await;
             if let Some(grant) = denied {
                 bail!("denied {grant}");
@@ -971,6 +977,57 @@ mod tests {
         assert!(format!("{err:#}").contains("leads::count-leads has other types than kit crm-wasm gives it"), "{err:#}");
     }
 
+    /// A service on a free port: a GET answers, a POST keeps its body.
+    async fn service(posted: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}/leads", listener.local_addr().unwrap().port());
+        let app = axum::Router::new().route(
+            "/leads",
+            axum::routing::get(|| async { "leads" }).post(move |body: String| async move {
+                posted.lock().push(body);
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_wasm_kit_fetches_from_its_hosts() {
+        let posted = Arc::new(Mutex::new(vec![]));
+        let url = service(posted.clone()).await;
+        let kit = include_str!("testing-fetch-kit.wat").replace("{url}", &url).replace("{len}", &url.len().to_string());
+        let fetches = KIT_TOML.replace("[capabilities]\ngrant = [\"bonus-read\"]\n", "[http]\nhosts = [\"127.0.0.1\"]\n");
+        let page = |kit: String, toml: String| async move {
+            let (dir, db) = (tempfile::tempdir().unwrap(), crate::tx::in_memory());
+            let kits = platform(&Bonus::default(), &kit, &toml, dir.path(), &db).await.unwrap();
+            let app = app(&kits, "'leads-read'", include_bytes!("testing-kit.wat"), db).await.unwrap();
+            let (page, cost) = run(&app, "read", None, Live::default()).await;
+            (page.unwrap_or_else(|f| panic!("{:#}", f.error)).html[0].1.clone(), cost.io)
+        };
+        assert_eq!(page(kit.clone(), fetches.clone()).await, ("seven".to_string(), 2 + runtime::FETCH));
+        assert_eq!(page(kit.clone(), KIT_TOML.to_string()).await.0, "other", "127.0.0.1 is not its host");
+        let post = kit.replace("i32.const 0 i32.const 3 ;; GET", "i32.const 3 i32.const 4 ;; POST");
+        assert_eq!(page(post, fetches.clone()).await.0, "other", "a call the app waits for only reads");
+
+        // A command changes things: it may POST.
+        let (dir, db) = (tempfile::tempdir().unwrap(), crate::tx::in_memory());
+        let kits = platform(&Bonus::default(), &kit, &fetches, dir.path(), &db).await.unwrap();
+        let sender = app(&kits, "'leads-write'", include_bytes!("testing-command.wat"), db.clone()).await.unwrap();
+        assert!(run(&sender, "send", Some(ann()), Live::default()).await.0.is_ok());
+        crate::outbox::start(db.clone(), crate::platform::PlatformDb::in_memory(), Live::of_kits(kits.clone()));
+        for _ in 0..300 {
+            if posted.lock().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(*posted.lock(), ["web", "ads"]);
+
+        // An app calls a kit that fetches; it can't fetch itself.
+        let err = app(&kits, "", kit.as_bytes(), crate::tx::in_memory()).await.err().unwrap();
+        assert!(format!("{err:#}").contains("uses http, which only kits can"), "{err:#}");
+    }
+
     /// A fake of acme:crm/leads: count-leads answers 7, add-lead does
     /// nothing.
     const FAKE: &str = r#"(component
@@ -1099,8 +1156,11 @@ mod tests {
         assert!(fails(&base.replace("\"crm\"", "\"CRM!\"")).contains("id"));
         assert!(fails(&format!("{base}[kit2]\n")).contains("unknown field"));
         assert!(fails(&base.replace("wit = [", "commands = [\"acme:crm/leads#add\"]\nwit = [")).contains("no grant allows acme:crm/leads#add"));
-        assert!(fails(&format!("{base}[sign-in]\nhosts = []\n")).contains("a sign-in kit"));
-        assert!(fails(&base.replace("wit = [\"crm.wit\"]\n", "")).contains("wit = [...]"));
+        assert!(fails(&format!("{base}[sign-in]\n")).contains("unknown field"));
+        assert!(fails(&base.replace("wit = [\"crm.wit\"]\n", "")).contains("a sign-in kit isn't deployed"));
+        assert!(fails(&format!("{base}[http]\nhosts = [\"https://api.acme.com\"]\n")).contains("give the host alone"));
+        let fetches = Manifest::parse_kit(&format!("{base}[http]\nhosts = [\"API.acme.com\"]\n")).unwrap();
+        assert_eq!(fetches.kit.unwrap().hosts, ["api.acme.com"]);
     }
 
     // Wasm kits deployed while the platform runs, as apps are.
@@ -1198,7 +1258,8 @@ mod tests {
         use crate::platform::Actor;
         let dir = tempfile::tempdir().unwrap();
         let shell = crate::testing::shell(dir.path().to_path_buf());
-        deploy(&shell, &crm(CRM)).await.unwrap();
+        let fetches = format!("{CRM_KIT}[http]\nhosts = [\"api.acme.com\"]\n");
+        deploy(&shell, &kit_zip(&fetches, CRM, ("crm.wit", CRM_WIT))).await.unwrap();
         deploy(&shell, &app_zip("'leads-read'", include_bytes!("testing-kit.wat"))).await.unwrap();
         shell.state.turn("crm", false, Actor::Cli, None, None).await.unwrap();
         let (status, body) = get(&shell, "/test").await;
@@ -1224,6 +1285,7 @@ mod tests {
         let users = body.split(r#"id="users""#).nth(1).and_then(|p| p.split("</table>").next()).unwrap_or_default();
         assert!(users.contains(r#"<a href="/admin/apps/test">"#) && users.contains("<td>App</td>") && users.contains(">Waits for crm</span>"), "{users}");
         assert!(body.contains("It uses no kit"), "crm holds no grant");
+        assert!(body.contains("fetches from api.acme.com"), "{body}");
         shell.state.turn("crm", true, Actor::Cli, None, None).await.unwrap();
         assert_eq!(get(&shell, "/test").await.0, 200);
     }

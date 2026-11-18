@@ -65,6 +65,8 @@ struct Detail<'a> {
 struct Running {
     label: String,
     grants: String,
+    /// The hosts a kit may fetch from.
+    hosts: Option<String>,
     risk: Option<String>,
     origin: String,
 }
@@ -204,6 +206,7 @@ pub(super) fn detail(shell: &Shell, apps: &[App], a: &App, marks: &[Mark], all_v
         Running {
             label: r.label.clone(),
             grants: if grants.is_empty() { "nothing".to_string() } else { grants.join(", ") },
+            hosts: r.manifest.kit.as_ref().filter(|k| !k.hosts.is_empty()).map(|k| k.hosts.join(", ")),
             risk: risk_of(&shell.risk, a),
             origin: shell.origin.clone(),
         }

@@ -483,7 +483,8 @@ KITS
                        [grants.<grant>]: what each grant allows (the admin
                        screen shows it) and its functions, as
                        <package>/<interface>#<function>; [capabilities]: the
-                       grants it holds itself, the kits it calls
+                       grants it holds itself, the kits it calls; [http]
+                       hosts: the only hosts it may fetch from
   api/<name>.wit       what it offers: the package kit:<name>, its
                        interfaces and functions. Once the kit is deployed,
                        appos sync brings it into each app's wit/
@@ -498,6 +499,11 @@ KITS
   grant to [capabilities] and its interface to the world, like
   import acme:crm/customers@0.1.0;, and run appos sync for its WIT and its
   fake; appos dev runs the kit with the fakes of the kits it calls.
+  To call a service, list its host in [http] hosts, add
+  import appos:framework/http@0.1.0; to the world and call http::fetch:
+  https only (http to localhost), no redirects followed, each fetch as
+  much of the request's I/O as a kv write. A call an app waits for only
+  reads, so GET there; POST and the rest in its commands and on its page.
   Apps call a kit once it is deployed and they hold its grant: appos sync
   in the app brings its WIT and its fake. A deploy that changes what an app
   uses is refused.

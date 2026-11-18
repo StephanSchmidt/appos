@@ -1,24 +1,29 @@
-// The contract between the shell and a sign-in plugin: a WebAssembly
+// The contract between the shell and a sign-in kit: a WebAssembly
 // component for a sign-in the built-in providers (dev, header, oidc) don't
-// do. auth.toml names it:
+// do. auth.toml names it (provider = "kit", kit = "acme-sign-in"), and its
+// kit.toml says the rest:
 //
-//   provider = "plugin"
-//   wasm = "acme-auth.wasm"          # found next to auth.toml
+//   [kit]
+//   id = "acme-sign-in"
+//   name = "Acme sign-in"
+//   version = "1.0.0"
+//   wasm = "acme-auth.wasm"          # found next to kit.toml
+//   [http]
 //   hosts = ["login.acme.com"]       # the only hosts http.fetch may call
 //   [config]                         # what config.get returns
 //   tenant = "acme"
 //   [config-env]                     # secrets: config.get("client-secret")
 //   client-secret = "ACME_SECRET"    # is $ACME_SECRET, never in the file
 //
-// The shell owns the session: a plugin runs only while someone signs in,
+// The shell owns the session: a kit runs only while someone signs in,
 // in a fresh sandbox per step, with no files, no environment, no storage
-// and no network but `http.fetch` to `hosts`.
+// and no network but `http.fetch` to its hosts.
 //
 //   GET  /_auth/sign-in    start: show a page, or redirect to the identity
 //                          provider with `state`, `nonce`, `challenge`
-//   POST /_auth/sign-in    finish: a form the plugin's page posted
+//   POST /_auth/sign-in    finish: a form the kit's page posted
 //   GET  /_auth/callback   finish: back from the identity provider; the
-//                          shell has checked `state` before the plugin runs
+//                          shell has checked `state` before the kit runs
 package appos:auth@0.1.0;
 
 interface types {
@@ -70,13 +75,14 @@ interface types {
     }
 }
 
-/// What auth.toml's [config] and [config-env] give the plugin.
+/// What kit.toml's [config] and [config-env] give the kit.
 interface config {
     get: func(key: string) -> option<string>;
 }
 
-/// Outgoing HTTP: only to auth.toml's `hosts`, over https (http only to
-/// localhost). Redirects are not followed; a 3xx comes back as it is.
+/// Outgoing HTTP, as appos:framework/http for other kits: only to kit.toml's
+/// [http] hosts, over https (http only to localhost). Redirects are not
+/// followed; a 3xx comes back as it is.
 interface http {
     record request {
         /// GET, POST, PUT, PATCH or DELETE.
@@ -94,7 +100,7 @@ interface http {
     }
 
     /// An error is why the call was not made or failed: a host not in
-    /// `hosts`, no answer in time.
+    /// kit.toml's [http] hosts, no answer in time.
     fetch: func(req: request) -> result<response, string>;
 }
 

@@ -13,7 +13,7 @@
 //! name = "Acme sign-in"
 //! version = "1.0.0"
 //! wasm = "acme-auth.wasm"
-//! [sign-in]
+//! [http]
 //! hosts = ["login.acme.com"]       # the only hosts it may call
 //! [config]                         # what config.get returns
 //! tenant = "acme"
@@ -23,8 +23,7 @@
 //!
 //! The kit is a sandbox like an app: it may call `config.get` and
 //! `http.fetch`, and nothing else. No files, no environment, no kv; fetch
-//! only to `hosts`, over https (http only to localhost), without following
-//! redirects. Each step runs in a fresh instance with an app's fuel and
+//! only to its [http] hosts, as any kit (fetch.rs). Each step runs in a fresh instance with an app's fuel and
 //! memory, for at most 10 seconds. A kit that fails shows "sign-in
 //! unavailable"; the site goes on.
 
@@ -46,6 +45,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use super::oidc::secure;
 use super::routes::{Pending, Step};
 use super::{Identity, need, take_str};
+use crate::fetch;
 use crate::runtime::{ALLOWED_WASI, FUEL, MEMORY, imports, is_local};
 use crate::terminal_errorln as eprintln;
 
@@ -66,8 +66,7 @@ pub use types::Request;
 const TIME: Duration = Duration::from_secs(10);
 /// Fetches in one step.
 const MAX_FETCHES: u32 = 20;
-/// Bytes of an answer to a fetch, and of a page the kit shows.
-const MAX_BODY: u64 = 1 << 20;
+/// Bytes of a page the kit shows.
 const MAX_PAGE: usize = 256 * 1024;
 /// Bytes of what one step prints.
 const MAX_OUTPUT: usize = 16 * 1024;
@@ -90,13 +89,8 @@ impl SignInKit {
     pub fn parse(table: &mut toml::Table, dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<SignInKit> {
         let kit = need(take_str(table, "kit")?, "kit", "kit = \"sign-in\", the kit's directory")?;
         let found = crate::wasm_kit::sign_in(&dir.join(&kit), env).with_context(|| format!("kit = {kit:?}"))?;
-        for h in &found.hosts {
-            if h.contains(['/', ':', '@', '?', '#']) || h.chars().any(char::is_whitespace) {
-                bail!("kit = {kit:?}: [sign-in] hosts: {h:?}: give the host alone, like \"login.acme.com\"");
-            }
-        }
         let pre = compile(&found.wasm).with_context(|| format!("kit {}", found.id))?;
-        Ok(SignInKit { file: found.id, pre, hosts: Arc::new(found.hosts.into_iter().map(|h| h.to_lowercase()).collect()), config: Arc::new(found.config) })
+        Ok(SignInKit { file: found.id, pre, hosts: Arc::new(found.hosts), config: Arc::new(found.config) })
     }
 
     pub async fn start(&self, req: Request) -> Step {
@@ -236,58 +230,15 @@ impl http::Host for Ctx {
         if self.fetches > MAX_FETCHES {
             return Ok(Err(format!("more than {MAX_FETCHES} fetches in one sign-in step")));
         }
-        if let Err(e) = allowed(&req.url, &self.hosts) {
+        if let Err(e) = fetch::allowed(&req.url, &self.hosts) {
             eprintln!("sign-in: fetch refused: {e}");
             return Ok(Err(e));
         }
+        let req = fetch::http::Request { method: req.method, url: req.url, headers: req.headers, body: req.body };
         let left = self.deadline.saturating_duration_since(Instant::now());
-        let sent = tokio::task::spawn_blocking(move || send(req, left)).await.map_err(|e| wasmtime::format_err!("fetch worker failed: {e}"))?;
-        Ok(sent)
+        let sent = fetch::send(req, left).await?;
+        Ok(sent.map(|r| http::Response { status: r.status, headers: r.headers, body: r.body }))
     }
-}
-
-/// Whether a sign-in kit may fetch `url`: https to one of `hosts`, or http to
-/// one of them on this machine.
-fn allowed(url: &str, hosts: &[String]) -> Result<(), String> {
-    let uri: ureq::http::Uri = url.parse().map_err(|_| format!("{url:?} is no URL"))?;
-    let host = uri.host().unwrap_or_default().to_lowercase();
-    let listed = hosts.contains(&host);
-    let local = ["localhost", "127.0.0.1", "[::1]", "::1"].contains(&host.as_str());
-    match uri.scheme_str() {
-        _ if !listed => Err(format!("{host:?} is not in kit.toml's hosts ({})", if hosts.is_empty() { "none".to_string() } else { hosts.join(", ") })),
-        Some("https") => Ok(()),
-        Some("http") if local => Ok(()),
-        _ => Err(format!("{url:?}: only https (http only to localhost)")),
-    }
-}
-
-fn send(req: http::Request, left: Duration) -> Result<http::Response, String> {
-    if left.is_zero() {
-        return Err("no time left in this sign-in step".into());
-    }
-    let method = req.method.to_ascii_uppercase();
-    if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method.as_str()) {
-        return Err(format!("method {method}: give GET, POST, PUT, PATCH or DELETE"));
-    }
-    let agent: ureq::Agent =
-        ureq::Agent::config_builder().timeout_global(Some(left)).http_status_as_error(false).max_redirects(0).max_redirects_will_error(false).build().into();
-    let mut builder = ureq::http::Request::builder().method(method.as_str()).uri(req.url.as_str());
-    for (name, value) in &req.headers {
-        if name.eq_ignore_ascii_case("host") {
-            return Err("the host header is the URL's".into());
-        }
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    let answer = if req.body.is_empty() {
-        agent.run(builder.body(()).map_err(|e| e.to_string())?)
-    } else {
-        agent.run(builder.body(req.body).map_err(|e| e.to_string())?)
-    };
-    let mut resp = answer.map_err(|e| e.to_string())?;
-    let headers = resp.headers().iter().filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))).collect();
-    let status = resp.status().as_u16();
-    let body = resp.body_mut().with_config().limit(MAX_BODY).read_to_string().map_err(|e| e.to_string())?;
-    Ok(http::Response { status, headers, body })
 }
 
 #[cfg(test)]
@@ -313,7 +264,7 @@ mod tests {
     /// A shell signing in with testing-plugin.wat, which fetches `url`.
     fn shell(hosts: &str, url: Option<&str>) -> Arc<Shell> {
         let config = url.map(|u| format!("[config]\nurl = \"{u}\"\n")).unwrap_or_default();
-        let dir = kit_dir(&format!("[sign-in]\nhosts = [\"{hosts}\"]\n{config}"));
+        let dir = kit_dir(&format!("[http]\nhosts = [\"{hosts}\"]\n{config}"));
         let shell = crate::testing::shell_with_auth(&format!("provider = \"kit\"\nkit = \"{}\"\n", dir.path().display()));
         drop(dir);
         shell
@@ -354,7 +305,7 @@ mod tests {
     async fn a_sign_in_kit_reaches_only_its_hosts_and_follows_no_redirect() {
         let service = service().await;
         for (hosts, url, said) in [
-            ("login.acme.com", format!("{service}/me"), "\"127.0.0.1\" is not in kit.toml's hosts (login.acme.com)"),
+            ("login.acme.com", format!("{service}/me"), "\"127.0.0.1\" is not in kit.toml's [http] hosts (login.acme.com)"),
             ("127.0.0.1", format!("{service}/moved"), "\"\" is not an email address"),
         ] {
             let app = crate::web::router(shell(hosts, Some(&url)));
@@ -381,7 +332,7 @@ mod tests {
 
     #[test]
     fn its_redirects_and_pages_are_checked() {
-        let dir = kit_dir("[sign-in]\n");
+        let dir = kit_dir("");
         let p = SignInKit::parse(&mut toml::from_str("kit = \".\"").unwrap(), dir.path(), &|_| None).unwrap();
         let redirect = |to: &str| matches!(p.step(types::Step::Redirect(to.into())), Step::Redirect(_));
         assert!(redirect("https://login.acme.com/authorize?x=1") && redirect("/webinars") && redirect("http://localhost:9000/x"));
@@ -390,20 +341,6 @@ mod tests {
         let done = |email: &str| p.step(types::Step::Done(types::Identity { id: "".into(), email: email.into(), name: "".into(), groups: vec![] }));
         assert!(matches!(done("Ann@Acme.com"), Step::Done(id) if id.email == "ann@acme.com"));
         assert!(matches!(done("nobody"), Step::Refuse(_)));
-    }
-
-    #[test]
-    fn sign_in_kits_fetch_only_from_their_hosts() {
-        let hosts = vec!["login.acme.com".to_string(), "127.0.0.1".to_string()];
-        assert!(allowed("https://login.acme.com/token", &hosts).is_ok());
-        assert!(allowed("https://LOGIN.acme.com:8443/x", &hosts).is_ok());
-        assert!(allowed("http://127.0.0.1:9000/me", &hosts).is_ok());
-        assert!(allowed("http://login.acme.com/token", &hosts).unwrap_err().contains("only https"));
-        assert!(allowed("https://evil.example/", &hosts).unwrap_err().contains("not in kit.toml's hosts"));
-        assert!(allowed("https://login.acme.com@evil.example/", &hosts).is_err());
-        assert!(allowed("https://login.acme.com.evil.example/", &hosts).is_err());
-        assert!(allowed("ftp://login.acme.com/", &hosts).is_err());
-        assert!(allowed("/relative", &hosts).is_err());
     }
 
     #[test]
@@ -417,15 +354,14 @@ mod tests {
                 .map(|p| p.config.as_ref().clone())
                 .map_err(|e| format!("{e:#}"))
         };
-        let config = parse("wasm = \"p.wat\"\n[sign-in]\nhosts = [\"login.acme.com\"]\n[config]\nurl = \"u\"\n[config-env]\nsecret = \"SET\"").unwrap();
+        let config = parse("wasm = \"p.wat\"\n[http]\nhosts = [\"login.acme.com\"]\n[config]\nurl = \"u\"\n[config-env]\nsecret = \"SET\"").unwrap();
         assert_eq!(config.into_iter().collect::<Vec<_>>(), [("secret".to_string(), "s3cret".to_string()), ("url".into(), "u".into())]);
-        assert!(parse("wasm = \"p.wat\"").unwrap_err().contains("no [sign-in]: not a sign-in kit"));
-        assert!(parse("wasm = \"missing.wasm\"\n[sign-in]").unwrap_err().contains("missing.wasm"));
-        assert!(parse("wasm = \"p.wat\"\n[sign-in]\nhosts = [\"https://login.acme.com\"]").unwrap_err().contains("give the host alone"));
-        assert!(parse("wasm = \"p.wat\"\n[sign-in]\n[config-env]\nsecret = \"UNSET\"").unwrap_err().contains("UNSET is not set"));
-        assert!(parse("wasm = \"p.wat\"\n[sign-in]\n[config]\nn = 1").unwrap_err().contains("invalid type"));
-        assert!(parse("wasm = \"p.wat\"\nwit = [\"x.wit\"]\n[sign-in]").unwrap_err().contains("offers apps nothing"));
-        let app = parse("wasm = \"app.wat\"\n[sign-in]").unwrap_err();
+        assert!(parse("wasm = \"missing.wasm\"").unwrap_err().contains("missing.wasm"));
+        assert!(parse("wasm = \"p.wat\"\n[http]\nhosts = [\"https://login.acme.com\"]").unwrap_err().contains("give the host alone"));
+        assert!(parse("wasm = \"p.wat\"\n[config-env]\nsecret = \"UNSET\"").unwrap_err().contains("UNSET is not set"));
+        assert!(parse("wasm = \"p.wat\"\n[config]\nn = 1").unwrap_err().contains("invalid type"));
+        assert!(parse("wasm = \"p.wat\"\nwit = [\"x.wit\"]").unwrap_err().contains("offers apps nothing"));
+        let app = parse("wasm = \"app.wat\"").unwrap_err();
         assert!(app.contains("imports appos:framework/registry, which sign-in kits can never use"), "{app}");
         let err = crate::auth::Auth::parse_in("provider = \"kit\"", "http://localhost", [7; 32], "127.0.0.1:8080", &|_| None, dir.path()).err().unwrap();
         assert!(err.to_string().contains("provider \"kit\" needs kit = \"sign-in\""), "{err}");

@@ -109,6 +109,8 @@ pub const QUEUE_WAIT: Duration = Duration::from_secs(10);
 pub const IO_BUDGET: u32 = 100;
 pub const READ: u32 = 1;
 pub const WRITE: u32 = 5;
+/// A kit's http.fetch costs as much as a write: 20 in one request.
+pub const FETCH: u32 = 5;
 /// Entries one page may add to <head>.
 const MAX_HEAD: usize = 20;
 /// Retained page output or init's route/menu metadata, outside Wasm memory.
@@ -246,6 +248,10 @@ pub struct Ctx {
     /// The Wasm kit that trapped in a call from this store: its id and
     /// label.
     kit_failed: Option<(String, String)>,
+    /// The hosts a Wasm kit may fetch from; none for an app.
+    hosts: Arc<[String]>,
+    /// A Wasm kit in a call its caller waits for: it only reads.
+    waits: bool,
 }
 
 /// Track allocations across all memories/tables in the store. Wasmtime
@@ -408,7 +414,9 @@ fn check_imports(imports: &[(String, Vec<String>)], m: &Manifest, kits: &Kits) -
                 }
             }
         } else if let Some(cap) = import.strip_prefix(FRAMEWORK) {
-            if !ALWAYS.contains(&cap) {
+            if cap == "http" && !m.is_kit() {
+                problems.push("uses http, which only kits can: an app calls a kit that fetches".to_string());
+            } else if !ALWAYS.contains(&cap) && cap != "http" {
                 problems.push(format!("uses {cap}, which no grant allows"));
             }
         } else if !ALLOWED_WASI.iter().any(|w| import.starts_with(w)) && !(m.is_kit() && import.starts_with("wasi:")) {
@@ -443,6 +451,9 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked, data: &Pa
     registry::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     log::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
     page::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
+    if manifest.is_kit() {
+        crate::fetch::http::add_to_linker::<Ctx, HasSelf<Ctx>>(&mut linker, |c| c)?;
+    }
     // The import check made sure the app calls only the functions it's granted.
     let types = import_types(engine, &component);
     let linked = kits.link(&mut linker, &manifest.capabilities.grant, &types)?;
@@ -464,7 +475,7 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked, data: &Pa
     if let Some(pre) = &pre {
         let budget = Budget::of(&manifest, AdminLimits::default());
         let phase = Phase::Init { routes: vec![], menu: vec![] };
-        let mut store = new_store(engine, &manifest.app.id, db.clone(), phase, budget, |wasi| own_wasi(wasi, kit.as_deref()));
+        let mut store = new_store(engine, &manifest.app.id, db.clone(), phase, budget, kit.as_deref().map(|k| &k.sandbox));
         let deadline = Instant::now() + manifest.time_limit();
         let init = timeout_at(deadline, async {
             let instance = pre.instantiate_async(&mut store).await?;
@@ -497,16 +508,8 @@ pub async fn load(engine: &Engine, db: Db, kits: &Kits, app: &Checked, data: &Pa
     })
 }
 
-/// What a store gets in its WASI: nothing for an app (no files, no
-/// network, no environment); for a kit its directory ("/"), the network
-/// and its configuration.
-fn own_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: Option<&crate::wasm_kit::KitVersion>) {
-    if let Some(kit) = kit {
-        kit_wasi(wasi, &kit.sandbox);
-    }
-}
-
-/// A Wasm kit's WASI. Its directory was made when it loaded; should it be
+/// A Wasm kit's WASI: its directory ("/"), the network and its
+/// configuration. Its directory was made when it loaded; should it be
 /// gone, the kit finds no "/".
 fn kit_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: &KitSandbox) {
     let _ = wasi.preopened_dir(&kit.dir, "/", wasmtime_wasi::FsPerms::ReadWrite);
@@ -516,14 +519,17 @@ fn kit_wasi(wasi: &mut wasmtime_wasi::WasiCtxBuilder, kit: &KitSandbox) {
     }
 }
 
-/// A store for `id`; `wasi` adds to its WASI what it may use besides the
-/// output.
-fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, wasi: impl FnOnce(&mut wasmtime_wasi::WasiCtxBuilder)) -> Store<Ctx> {
+/// A store for `id`. An app's WASI has nothing but the output (no files,
+/// no network, no environment); a Wasm kit's has `kit_wasi`, and it may
+/// fetch from its hosts.
+fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, kit: Option<&KitSandbox>) -> Store<Ctx> {
     // Writing past MAX_LOG fails, and println! panics on that.
     let output = MemoryOutputPipe::new(MAX_LOG);
     let mut builder = WasiCtx::builder();
     builder.stdout(output.clone()).stderr(output.clone());
-    wasi(&mut builder);
+    if let Some(kit) = kit {
+        kit_wasi(&mut builder, kit);
+    }
     let ctx = Ctx {
         wasi: builder.build(),
         table: ResourceTable::new(),
@@ -548,6 +554,8 @@ fn new_store(engine: &Engine, id: &str, db: Db, phase: Phase, budget: Budget, wa
         depth: 0,
         over_kit: false,
         kit_failed: None,
+        hosts: kit.map(|k| k.hosts.clone()).unwrap_or_default(),
+        waits: false,
     };
     let mut store = Store::new(engine, ctx);
     store.limiter(|c| c);
@@ -650,7 +658,7 @@ async fn run_once(
 ) -> (Result<Page, Failed>, Ctx, u64) {
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
     let phase = Phase::Start { page, done: false };
-    let mut store = new_store(pre.engine(), &app.manifest.app.id, app.db.clone(), phase, budget, |wasi| own_wasi(wasi, app.kit.as_deref()));
+    let mut store = new_store(pre.engine(), &app.manifest.app.id, app.db.clone(), phase, budget, app.kit.as_deref().map(|k| &k.sandbox));
     store.data_mut().tx = Tx::with_deadline(deadline.into_std());
     store.data_mut().access = access;
     store.data_mut().context = Some(cx.clone());
@@ -709,6 +717,8 @@ pub(crate) struct KitSandbox {
     pub dir: std::path::PathBuf,
     /// Environment variables: its [config], and [config-env] read.
     pub env: Vec<(String, String)>,
+    /// The hosts it may fetch from (kit.toml's [http]).
+    pub hosts: Arc<[String]>,
 }
 
 /// What a call into a Wasm kit may use: what its caller has left. The kit
@@ -721,6 +731,9 @@ pub(crate) struct Left {
     pub io: u32,
     /// The kit's depth in the chain: 1 for a call from an app.
     pub depth: u32,
+    /// Its caller waits for it, so it only reads (fetch: GET only); a
+    /// command doesn't.
+    pub waits: bool,
 }
 
 /// How a call into a Wasm kit went, for its caller.
@@ -752,13 +765,14 @@ pub(crate) async fn call_kit(
     let deadline = Instant::from_std(cx.deadline());
     let budget = Budget { fuel: left.fuel, memory: MEMORY, time: cx.time_left() };
     let page = Page { status: 200, redirect: None, head: vec![], html: vec![] };
-    let mut store = new_store(kit.pre.engine(), &kit.name, kit.db.clone(), Phase::Start { page, done: false }, budget, |wasi| kit_wasi(wasi, kit));
+    let mut store = new_store(kit.pre.engine(), &kit.name, kit.db.clone(), Phase::Start { page, done: false }, budget, Some(kit));
     let ctx = store.data_mut();
     ctx.tx = Tx::with_deadline(cx.deadline());
     ctx.access = access;
     ctx.context = Some(cx);
     ctx.io_used = left.io;
     ctx.depth = left.depth;
+    ctx.waits = left.waits;
     let what = format!("{}::{function}", interface.split('@').next().unwrap_or(interface).rsplit('/').next().unwrap_or(interface));
     let ran = timeout_at(deadline, async {
         let instance = kit.pre.instantiate_async(&mut store).await?;
@@ -770,7 +784,7 @@ pub(crate) async fn call_kit(
     let fuel = store.get_fuel().unwrap_or(0);
     let mut ctx = store.into_data();
     let over = ctx.over_memory || ctx.over_tables || ctx.over_host || ctx.over_kit;
-    let left = Left { fuel, io: ctx.io_used, depth: left.depth };
+    let left = Left { fuel, io: ctx.io_used, depth: left.depth, waits: left.waits };
     let denied = ctx.denied.take();
     // A trap in the kit's own code is the kit's; an error a host function
     // gave it (a kit it called, the policy) is not.
@@ -801,7 +815,7 @@ impl Ctx {
         if depth > MAX_DEPTH {
             return Err(wasmtime::format_err!("a chain of kit calls deeper than {MAX_DEPTH}"));
         }
-        Ok((self.context()?, Left { fuel: 0, io: self.io_used, depth }))
+        Ok((self.context()?, Left { fuel: 0, io: self.io_used, depth, waits: true }))
     }
 
     /// After a Wasm kit's call: what it used is this request's, and so is a
@@ -1018,6 +1032,31 @@ impl log::Host for Ctx {
     }
 }
 
+/// A Wasm kit's fetch (fetch.rs): to its hosts, in a request, from the
+/// request's I/O and time; GET only in a call its caller waits for.
+impl crate::fetch::http::Host for Ctx {
+    async fn fetch(&mut self, req: crate::fetch::http::Request) -> wasmtime::Result<Result<crate::fetch::http::Response, String>> {
+        if matches!(self.phase, Phase::Init { .. }) {
+            return Err(wasmtime::format_err!("http::fetch can only be called while handling a request"));
+        }
+        if self.waits && !req.method.eq_ignore_ascii_case("GET") {
+            let e = format!("{} {}: a call an app waits for only reads, so GET only; send a command to change things", req.method, req.url);
+            self.log(format!("warning: fetch refused: {e}"));
+            return Ok(Err(e));
+        }
+        if let Err(e) = crate::fetch::allowed(&req.url, &self.hosts) {
+            self.log(format!("warning: fetch refused: {e}"));
+            return Ok(Err(e));
+        }
+        self.io_used += FETCH;
+        if self.io_used > IO_BUDGET {
+            return Err(wasmtime::format_err!("over budget: more than {IO_BUDGET} I/O units in one request (last call: http::fetch)"));
+        }
+        let left = self.context()?.time_left();
+        crate::fetch::send(req, left).await
+    }
+}
+
 /// kv's functions, for the kv kit (kit.rs), which checked the call.
 impl Ctx {
     pub(crate) async fn kv_get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
@@ -1066,7 +1105,7 @@ mod tests {
     #[test]
     fn kit_calls_go_at_most_max_depth_deep() {
         let budget = Budget { fuel: FUEL, memory: MEMORY, time: Duration::from_secs(1) };
-        let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, |_| {});
+        let mut store = new_store(&engine().unwrap(), "test", crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, budget, None);
         let ctx = store.data_mut();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default(), own: None }));
@@ -1117,7 +1156,7 @@ mod tests {
     fn store(engine: &Engine) -> Store<Ctx> {
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let db = crate::tx::in_memory();
-        new_store(engine, &manifest.app.id, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()), |_| {})
+        new_store(engine, &manifest.app.id, db, Phase::Init { routes: vec![], menu: vec![] }, Budget::of(&manifest, AdminLimits::default()), None)
     }
 
     #[tokio::test]
@@ -1144,7 +1183,7 @@ mod tests {
         let engine = engine().unwrap();
         let manifest = Manifest::parse("[app]\nid = 'test'\nname = 'Test'\nversion = '1'").unwrap();
         let module = wasmtime::Module::new(&engine, "(module (memory 300))").unwrap();
-        let mut small = new_store(&engine, &manifest.app.id, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b, |_| {});
+        let mut small = new_store(&engine, &manifest.app.id, crate::tx::in_memory(), Phase::Init { routes: vec![], menu: vec![] }, b, None);
         assert!(wasmtime::Instance::new_async(&mut small, &module, &[]).await.is_err());
         assert!(small.data().over_memory);
         assert!(wasmtime::Instance::new_async(&mut store(&engine), &module, &[]).await.is_ok());
@@ -1213,5 +1252,44 @@ mod tests {
         let mut store = store(&engine);
         let refused = (0..17).any(|_| registry::Host::add_menu(store.data_mut(), "x".repeat(256 * 1024), "/".into()).is_err());
         assert!(refused);
+    }
+
+    /// A service on a free port that answers each request with its method.
+    async fn service() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let app = axum::Router::new().fallback(|method: axum::http::Method| async move { method.to_string() });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_kit_fetches_from_its_hosts_within_the_request() {
+        use crate::fetch::http::{Host as _, Request as Fetch};
+        let url = format!("{}/leads", service().await);
+        let fetch = |method: &str, url: &str| Fetch { method: method.into(), url: url.into(), headers: vec![], body: String::new() };
+        let mut store = store(&engine().unwrap());
+        let ctx = store.data_mut();
+        ctx.hosts = vec!["127.0.0.1".to_string()].into();
+        assert!(ctx.fetch(fetch("GET", &url)).await.unwrap_err().to_string().contains("only be called while handling a request"));
+        ctx.phase = Phase::Start { page: Page { status: 200, redirect: None, head: vec![], html: vec![] }, done: false };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        ctx.context = Some(Context::new(About { app: "test".into(), user: None, page: None, deadline, may: vec![], live: Live::default(), own: None }));
+
+        let answer = ctx.fetch(fetch("GET", &url)).await.unwrap().unwrap();
+        assert_eq!((answer.status, answer.body.as_str(), ctx.io_used), (200, "GET", FETCH));
+        let refused = ctx.fetch(fetch("GET", "https://elsewhere.example/")).await.unwrap().unwrap_err();
+        assert!(refused.contains("not in kit.toml's [http] hosts (127.0.0.1)"), "{refused}");
+        assert_eq!(ctx.io_used, FETCH, "a refused fetch costs nothing");
+
+        // A call its caller waits for only reads; a command or a page may change things.
+        ctx.waits = true;
+        assert!(ctx.fetch(fetch("POST", &url)).await.unwrap().unwrap_err().contains("GET only"));
+        assert_eq!(ctx.fetch(fetch("get", &url)).await.unwrap().unwrap().body, "GET");
+        ctx.waits = false;
+        assert_eq!(ctx.fetch(fetch("POST", &url)).await.unwrap().unwrap().body, "POST");
+
+        ctx.io_used = IO_BUDGET;
+        assert!(ctx.fetch(fetch("GET", &url)).await.unwrap_err().to_string().contains("over budget"));
     }
 }

@@ -2,7 +2,7 @@
 {%- if let Some(g) = group %}{{ g }} · {% endif -%}
 {%- if let Some(o) = owner %}owned by {{ o|safe }} · {% endif -%}
 {{ requests }} in the last hour · {% match running -%}
-{%- when Some(r) %}live <code>{{ r.label }}</code> · grants {{ r.grants }} · {% if let Some(risk) = r.risk %}<a href="#risk">{{ risk }}</a>{% endif %} · <a href="{{ log }}">its log</a> · <a href="{{ r.origin }}/{{ id }}">open the app</a>
+{%- when Some(r) %}live <code>{{ r.label }}</code> · grants {{ r.grants }} · {% if let Some(h) = r.hosts %}fetches from {{ h }} · {% endif %}{% if let Some(risk) = r.risk %}<a href="#risk">{{ risk }}</a>{% endif %} · <a href="{{ log }}">its log</a> · <a href="{{ r.origin }}/{{ id }}">open the app</a>
 {%- when None %}not running · <a href="{{ log }}">its log</a>
 {%- endmatch -%}
 </span></span>

@@ -387,7 +387,7 @@ id = "acme-sign-in"
 name = "Acme sign-in"
 version = "1.0.0"
 wasm = "acme-auth.wasm"
-[sign-in]
+[http]
 hosts = ["login.acme.com"]              # the only hosts it may call
 [config]                                # what config.get returns
 tenant = "acme"
@@ -396,8 +396,9 @@ client-secret = "ACME_SECRET"
 ```
 
 The kit is sandboxed like an app: no files, no environment, no storage.
-It may call `config.get` and `http.fetch`, which reaches only `hosts`, over
-https (http only to localhost), and follows no redirects. Each step runs in a
+It may call `config.get` and `http.fetch`, which reaches only its [http]
+hosts, over https (http only to localhost), and follows no redirects, as
+any kit's fetch. Each step runs in a
 fresh instance with an app's fuel and memory, for at most 10 s. A kit
 that doesn't load stops the shell at startup; one that fails while someone
 signs in shows "Sign-in isn't working right now", and the site goes on.

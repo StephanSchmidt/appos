@@ -8,7 +8,7 @@
 //!   [kit]
 //!   id = "auth-github"
 //!   wasm = "auth_github.wasm"
-//!   [sign-in]
+//!   [http]
 //!   hosts = ["github.com", "api.github.com"]
 //!   [config]
 //!   client-id = "Iv1.0123456789abcdef"   # the GitHub OAuth app's

@@ -5,7 +5,7 @@ name = "Sign-in with GitHub"
 version = "0.1.0"
 wasm = "auth_github.wasm"                 # make build puts it here
 
-[sign-in]
+[http]
 hosts = ["github.com", "api.github.com"]  # all it may call
 
 [config]

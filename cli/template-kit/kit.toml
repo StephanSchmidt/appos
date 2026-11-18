@@ -22,3 +22,7 @@ functions = ["kit:hello/greetings#greet"]
 # The grants it holds itself: the kits it calls, as an app holds them.
 [capabilities]
 grant = []
+
+# The only hosts http::fetch may call, like "api.acme.com"; appos guide kits.
+[http]
+hosts = []

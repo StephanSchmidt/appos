@@ -93,6 +93,33 @@ interface users {
     current: func() -> option<user>;
 }
 
+/// Outgoing HTTP, for kits: apps can't import it, they call a kit. Only to
+/// the hosts in kit.toml's [http], over https (http only to localhost).
+/// Redirects are not followed; a 3xx comes back as it is. A fetch costs as
+/// much as a kv write, from the same budget, within the request's time. A
+/// call an app waits for only reads: GET there; other methods in the
+/// kit's commands and on its pages.
+interface http {
+    record request {
+        /// GET, POST, PUT, PATCH or DELETE.
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        /// Up to 1 MB.
+        body: string,
+    }
+
+    /// An error is why the call was not made or failed: a host not in
+    /// kit.toml's [http] hosts, no answer in time.
+    fetch: func(req: request) -> result<response, string>;
+}
+
 interface handler {
     use types.{request};
 
