@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["full"] }
 ureq = "3"
 toml = "1"
 wasmtime = "50"
+# Reads kits' WIT, for the contract apps build against.
+wit-parser = "0.261"
 wasmtime-wasi = "50"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 

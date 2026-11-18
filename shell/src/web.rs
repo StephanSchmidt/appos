@@ -279,14 +279,13 @@ async fn icon(State(shell): S, Path(id): Path<String>) -> Response {
 // ---- platform API, for the appos CLI --------------------------------------
 
 /// The contract apps build against, served to `appos new`.
-const WIT: &[(&str, &str)] = &[("appos.wit", include_str!("../../wit/appos.wit"))];
 /// The contract of sign-in plugins (auth/plugin.rs).
 const SIGN_IN_WIT: &str = include_str!("../../wit-auth/auth.wit");
 
 /// The WIT package apps build against, as appos.wit names it:
 /// "appos:framework@0.1.0".
 fn framework() -> &'static str {
-    WIT[0].1.lines().find_map(|l| l.trim().strip_prefix("package ")?.strip_suffix(';')).unwrap_or_default()
+    crate::kit::APPOS_WIT.lines().find_map(|l| l.trim().strip_prefix("package ")?.strip_suffix(';')).unwrap_or_default()
 }
 
 /// A platform API answer: its JSON, or what went wrong.
@@ -690,7 +689,7 @@ async fn spec(State(shell): S) -> Response {
         risk: shell.risk.levels().clone(),
         apps,
         git: shell.git.clone(),
-        wit: WIT.iter().map(|(n, t)| (n.to_string(), t.to_string())).chain(shell.kits.wit()).collect(),
+        wit: shell.kits.contract(),
         sign_in: std::collections::BTreeMap::from([("auth.wit".to_string(), SIGN_IN_WIT.to_string())]),
         token: shell.policy.is_some(),
     })

@@ -7,6 +7,7 @@ mod names;
 mod access;
 mod admin;
 pub mod api;
+mod args;
 mod auth;
 pub mod bundle;
 mod deploy;
@@ -110,6 +111,53 @@ impl Platform {
     /// Loads the apps and serves them until the process ends.
     pub async fn serve(self, opts: Options) -> anyhow::Result<()> {
         serve_with(opts, self.kits?).await
+    }
+
+    /// The platform's binary: `appos-shell`'s command line with this
+    /// platform's kits. `--contract` prints the WIT apps build against
+    /// (`appos sync --shell`), `--dev APP` serves one app as `appos dev`
+    /// does (`appos dev --shell`). Exits on an error.
+    pub async fn main(self) {
+        let result = async {
+            let kits = self.kits?;
+            match args::parse(std::env::args().skip(1))? {
+                args::Run::Serve(opts) => serve_with(*opts, kits).await,
+                args::Run::Contract => {
+                    crate::terminal_println!("{}", serde_json::to_string_pretty(&kits.contract())?);
+                    Ok(())
+                }
+                args::Run::Nothing => Ok(()),
+            }
+        }
+        .await;
+        if let Err(error) = result {
+            eprintln!("error: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+impl Options {
+    /// What `appos dev` serves: the app in `dir`, with its data in
+    /// dir/appos-data, open (no sign-in), keeping the examples
+    /// `appos review` starts from, reloading on each message of `reload`.
+    pub fn dev(dir: PathBuf, addr: String, reload: tokio::sync::mpsc::Receiver<()>) -> Options {
+        Options {
+            addr,
+            platform_addr: None,
+            platform_api: false,
+            name: "dev".into(),
+            git: None,
+            origin: None,
+            data: dir.join("appos-data"),
+            apps: vec![dir],
+            reload: Some(reload),
+            risk: Default::default(),
+            keep_examples: true,
+            auth: None,
+            policy: None,
+            no_auth: true,
+        }
     }
 }
 

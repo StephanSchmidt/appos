@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "acme-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "appos-shell",
+ "chrono",
+ "rusqlite",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -116,6 +128,7 @@ dependencies = [
  "ureq",
  "wasmtime",
  "wasmtime-wasi",
+ "wit-parser",
  "zip",
 ]
 

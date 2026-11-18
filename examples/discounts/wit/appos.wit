@@ -106,6 +106,7 @@ world app {
     import log;
     import kv;
     import users;
+    // The platform's kits: appos new and appos sync add their interfaces.
 
     export handler;
 }

@@ -80,7 +80,9 @@ fn check_target(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn dev(addr: Option<&str>) -> anyhow::Result<()> {
+/// `shell`: a platform's binary to run the app in, with its kits
+/// (appos_shell::Platform::main); None: the shell built into appos.
+pub async fn dev(addr: Option<&str>, shell: Option<&str>) -> anyhow::Result<()> {
     let addr = addr.unwrap_or("127.0.0.1:8080").to_string();
     let dir = std::env::current_dir()?;
     let (id, wasm) = app_info(&dir)?;
@@ -119,9 +121,11 @@ pub async fn dev(addr: Option<&str>) -> anyhow::Result<()> {
     dev_lock.rewind()?;
     dev_lock.write_all(format!("{} {addr}\n", std::process::id()).as_bytes())?;
     dev_lock.flush()?;
-    // The local shell is this appos's: its contract and SDK are the ones
-    // the app should build against.
-    scaffold::warn_if_stale(&dir, &scaffold::builtin_wit(), "this appos");
+    // The app should build against the contract of the shell it runs in.
+    match shell {
+        Some(shell) => scaffold::warn_if_stale(&dir, &scaffold::shell_contract(shell)?, shell),
+        None => scaffold::warn_if_stale(&dir, &scaffold::builtin_wit(), "this appos"),
+    }
 
     // Preserve the inputs from before the first build: a save while Cargo
     // is running must still differ from the watcher's initial snapshot.
@@ -129,35 +133,56 @@ pub async fn dev(addr: Option<&str>) -> anyhow::Result<()> {
     let built_at = SystemTime::now();
     compile(&dir, &wasm)?;
 
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
     let watch_dir = dir.clone();
-    std::thread::spawn(move || watch(&watch_dir, tx, seen, built_at));
+    let Some(shell) = shell else {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        std::thread::spawn(move || {
+            watch(
+                &watch_dir,
+                move || {
+                    let _ = tx.blocking_send(());
+                },
+                seen,
+                built_at,
+            )
+        });
+        started(&addr, &id, "");
+        return appos_shell::serve(appos_shell::Options::dev(dir, addr, rx)).await;
+    };
+    // The platform's binary serves the app with its kits; a line on its
+    // stdin reloads it, and the end of stdin stops it.
+    let mut child = Command::new(shell)
+        .args(["--dev", "--addr", &addr])
+        .arg(&dir)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run {shell}"))?;
+    let mut stdin = child.stdin.take().context("no stdin for the shell")?;
+    std::thread::spawn(move || {
+        watch(
+            &watch_dir,
+            move || {
+                let _ = writeln!(stdin, "reload");
+            },
+            seen,
+            built_at,
+        )
+    });
+    started(&addr, &id, &format!(" in {shell}"));
+    let status = tokio::task::spawn_blocking(move || child.wait()).await??;
+    anyhow::ensure!(status.success(), "{shell} stopped: {status}");
+    Ok(())
+}
 
+fn started(addr: &str, id: &str, shell: &str) {
     println!(
-        "\nappos dev: http://{addr}/{id}\n  \
+        "\nappos dev: http://{addr}/{id}{shell}\n  \
          watching sources, templates, WIT and build configuration: changes rebuild and reload\n  \
          kv data in ./appos-data (stop, then delete it to start fresh), with each\n  \
          route's last request that worked, for appos review\n  \
          Ctrl-C to stop, or kill {}\n",
         std::process::id()
     );
-    appos_shell::serve(appos_shell::Options {
-        addr,
-        platform_addr: None,
-        platform_api: false,
-        name: "dev".into(),
-        git: None,
-        origin: None,
-        data: dir.join("appos-data"),
-        apps: vec![dir],
-        reload: Some(rx),
-        risk: Default::default(),
-        keep_examples: true,
-        auth: None,
-        policy: None,
-        no_auth: true,
-    })
-    .await
 }
 
 fn alternative_port(port: &str) -> u16 {
@@ -194,7 +219,7 @@ fn running_dev(lock: &Path) -> Option<(u32, String)> {
 
 /// Polls the app's sources; on a change, rebuilds and asks the shell to
 /// reload. A failed build leaves the last good version running.
-fn watch(dir: &Path, reload: tokio::sync::mpsc::Sender<()>, mut seen: std::collections::BTreeMap<PathBuf, sources::Stamp>, mut built_at: SystemTime) {
+fn watch(dir: &Path, mut reload: impl FnMut(), mut seen: std::collections::BTreeMap<PathBuf, sources::Stamp>, mut built_at: SystemTime) {
     loop {
         std::thread::sleep(Duration::from_millis(500));
         let now = sources::snapshot(dir);
@@ -209,9 +234,7 @@ fn watch(dir: &Path, reload: tokio::sync::mpsc::Sender<()>, mut seen: std::colle
         println!("\nchange detected, rebuilding...");
         built_at = SystemTime::now();
         match rebuild(dir, force) {
-            Ok(()) => {
-                let _ = reload.blocking_send(());
-            }
+            Ok(()) => reload(),
             Err(_) => eprintln!("build failed; the last good version keeps running"),
         }
     }

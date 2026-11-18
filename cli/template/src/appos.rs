@@ -19,6 +19,8 @@ wit_bindgen::generate!({
     world: "app",
     path: "wit",
     default_bindings_module: "crate::appos",
+    // The platform's kits' packages, in wit/deps/: as crate::appos::<namespace>::<package>.
+    generate_all,
 });
 
 pub use self::appos::framework::types::Request;

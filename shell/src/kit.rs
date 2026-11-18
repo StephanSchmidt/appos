@@ -26,7 +26,7 @@
 //! context.Context: the app, the signed-in user, the page and the
 //! deadline. AppOS builds it, never the caller, so a kit can trust it.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -165,6 +165,19 @@ impl Grant {
     }
 }
 
+/// appos.wit: the shell's own interfaces and the app world.
+pub const APPOS_WIT: &str = include_str!("../../wit/appos.wit");
+/// The line in appos.wit's app world after which the kits' imports go.
+const KIT_IMPORTS: &str = "    // The platform's kits: appos new and appos sync add their interfaces.\n";
+
+/// One WIT package of the kits.
+struct Package {
+    version: Option<String>,
+    /// By file name.
+    files: Vec<(String, String)>,
+    interfaces: BTreeSet<String>,
+}
+
 /// A kit: its WIT, its grants and the code behind its functions.
 pub trait Kit: Send + Sync + 'static {
     /// The WIT files apps build against, by file name. kv's WIT is the
@@ -251,6 +264,54 @@ impl Kits {
         Kits(Arc::new(all)).checked()
     }
 
+    /// The WIT apps build against, by path below an app's wit/: appos.wit,
+    /// whose app world imports every interface the kits offer, and each
+    /// kit's package under deps/. An app imports only what it calls, so it
+    /// needs only those grants.
+    pub fn contract(&self) -> BTreeMap<String, String> {
+        let packages = self.packages().expect("checked when the kits were added");
+        let mut imports = String::new();
+        for r in self.0.iter().filter(|r| !r.builtin) {
+            for interface in r.interfaces() {
+                let package = interface.split('/').next().unwrap_or(interface);
+                let version = packages.get(package).and_then(|p| p.version.as_ref()).map(|v| format!("@{v}")).unwrap_or_default();
+                imports.push_str(&format!("    import {interface}{version};\n"));
+            }
+        }
+        let appos = APPOS_WIT.replacen(KIT_IMPORTS, &format!("{KIT_IMPORTS}{imports}"), 1);
+        let mut wit = BTreeMap::from([("appos.wit".to_string(), appos)]);
+        for (package, p) in packages {
+            for (file, text) in p.files {
+                wit.insert(format!("deps/{}/{file}", package.replace(':', "-")), text);
+            }
+        }
+        wit
+    }
+
+    /// The kits' WIT packages ("acme:crm"), read and checked. A package may
+    /// be split across kits, with one version.
+    fn packages(&self) -> anyhow::Result<BTreeMap<String, Package>> {
+        let mut packages: BTreeMap<String, Package> = BTreeMap::new();
+        for r in self.0.iter().filter(|r| !r.builtin) {
+            for (file, text) in r.kit.wit() {
+                let read = wit_parser::UnresolvedPackageGroup::parse(&file, &text).map_err(|(map, e)| anyhow::anyhow!("kit WIT {file}: {}", e.render(&map)))?;
+                let name = read.main.name;
+                let (package, version) = (format!("{}:{}", name.namespace, name.name), name.version.map(|v| v.to_string()));
+                let p = packages.entry(package.clone()).or_insert_with(|| Package { version: version.clone(), files: vec![], interfaces: BTreeSet::new() });
+                anyhow::ensure!(p.version == version, "kit WIT {file}: {package} in two versions");
+                p.interfaces.extend(read.main.interfaces.iter().filter_map(|(_, i)| i.name.clone()));
+                p.files.push((file, text));
+            }
+        }
+        for r in self.0.iter().filter(|r| !r.builtin) {
+            for interface in r.interfaces() {
+                let (package, name) = interface.split_once('/').unwrap_or((interface, ""));
+                anyhow::ensure!(packages.get(package).is_some_and(|p| p.interfaces.contains(name)), "a grant names {interface}, which no kit's WIT has");
+            }
+        }
+        Ok(packages)
+    }
+
     fn checked(self) -> anyhow::Result<Kits> {
         let (mut names, mut functions, mut files) = (HashSet::new(), HashSet::new(), HashSet::from(["appos.wit".to_string()]));
         let mut interfaces = HashSet::new();
@@ -281,6 +342,7 @@ impl Kits {
                 anyhow::ensure!(interfaces.insert(i), "two kits offer {i}");
             }
         }
+        self.packages()?;
         Ok(self)
     }
 
@@ -313,11 +375,6 @@ impl Kits {
     pub fn grant_for(&self, interface: &str, function: &str) -> Option<&Grant> {
         let f = format!("{interface}#{function}");
         self.grants().find(|g| g.functions.contains(&f))
-    }
-
-    /// The kits' WIT files, apart from appos.wit.
-    pub fn wit(&self) -> Vec<(String, String)> {
-        self.0.iter().flat_map(|r| r.kit.wit()).collect()
     }
 
     /// Every interface and the kit that offers it: where commands go.
@@ -684,7 +741,6 @@ mod tests {
         assert_eq!(kits.names(), ["kv-read", "kv-write", "user-read", "leads-read", "leads-write"]);
         assert_eq!(kits.grant_for("acme:crm/leads", "count-leads").map(|g| g.name.as_str()), Some("leads-read"));
         assert!(kits.offers("acme:crm/leads") && kits.offers("appos:framework/kv") && !kits.offers("acme:crm/deals"));
-        assert_eq!(kits.wit().len(), 1);
         struct Wit(&'static str);
         impl Kit for Wit {
             fn wit(&self) -> Vec<(String, String)> {
@@ -725,12 +781,75 @@ mod tests {
             let err = kits.clone().with(Bad(vec![grant])).err().unwrap().to_string();
             assert!(err.contains(why), "{err}");
         }
+        let err = kits.clone().with(Bad(vec![Grant::new("deals-read", "", &["acme:crm/deals#list"], 1)])).err().unwrap().to_string();
+        assert!(err.contains("a grant names acme:crm/deals, which no kit's WIT has"), "{err}");
+
         // A kit may offer interfaces of several packages, and a package may
-        // be split across kits, as the shell's own is (kv, user).
-        let two = Bad(vec![Grant::new("a-read", "", &["acme:a/x#f"], 1), Grant::new("b-read", "", &["acme:b/x#f"], 1)]);
-        let kits = kits.with(two).unwrap();
+        // be split across kits, as the shell's own is (kv, users).
+        let kits = kits.with(Two).unwrap();
         let interfaces: Vec<String> = kits.interfaces().into_iter().map(|(i, _)| i).collect();
-        assert_eq!(interfaces, ["appos:framework/kv", "appos:framework/users", "acme:crm/leads", "acme:a/x", "acme:b/x"]);
+        assert_eq!(interfaces, ["appos:framework/kv", "appos:framework/users", "acme:crm/leads", "acme:a/x", "acme:b/y"]);
+    }
+
+    /// Offers acme:a/x and acme:b/y.
+    struct Two;
+
+    impl Kit for Two {
+        fn wit(&self) -> Vec<(String, String)> {
+            vec![
+                ("a.wit".into(), "package acme:a;\ninterface x { f: func(); }\n".into()),
+                ("b.wit".into(), "package acme:b@2.1.0;\ninterface y { record r { s: string } g: func() -> r; }\n".into()),
+            ]
+        }
+        fn grants(&self) -> Vec<Grant> {
+            vec![Grant::new("a-read", "", &["acme:a/x#f"], 1), Grant::new("b-read", "", &["acme:b/y#g"], 1)]
+        }
+        fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apps_build_against_appos_wit_and_the_kits_packages() {
+        let builtin = Kits::builtin().contract();
+        assert_eq!(builtin.keys().collect::<Vec<_>>(), ["appos.wit"]);
+        assert_eq!(builtin["appos.wit"], APPOS_WIT);
+
+        let contract = kits(&Crm::default()).with(Two).unwrap().contract();
+        assert_eq!(contract.keys().collect::<Vec<_>>(), ["appos.wit", "deps/acme-a/a.wit", "deps/acme-b/b.wit", "deps/acme-crm/crm.wit"]);
+        let imports = "    import acme:crm/leads@1.0.0;\n    import acme:a/x;\n    import acme:b/y@2.1.0;\n";
+        assert!(contract["appos.wit"].contains(&format!("{KIT_IMPORTS}{imports}")), "{}", contract["appos.wit"]);
+
+        // It is WIT that resolves, with the app world importing the kits.
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in &contract {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let mut resolve = wit_parser::Resolve::new();
+        let (package, _) = resolve.push_dir(dir.path()).unwrap();
+        let world = resolve.select_world(&[package], Some("app")).unwrap();
+        let imported: Vec<String> = resolve.worlds[world].imports.keys().map(|k| resolve.name_world_key(k)).collect();
+        assert!(imported.contains(&"acme:b/y@2.1.0".to_string()), "{imported:?}");
+    }
+
+    #[test]
+    fn a_kits_wit_must_parse() {
+        struct Broken;
+        impl Kit for Broken {
+            fn wit(&self) -> Vec<(String, String)> {
+                vec![("broken.wit".into(), "package acme:broken;\ninterface x { f: func(; }\n".into())]
+            }
+            fn grants(&self) -> Vec<Grant> {
+                vec![]
+            }
+            fn link(&self, _: &mut KitLinker<'_>) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        let err = Kits::builtin().with(Broken).err().unwrap().to_string();
+        assert!(err.starts_with("kit WIT broken.wit: "), "{err}");
     }
 
     #[test]

@@ -69,17 +69,23 @@ impl Lang {
     }
 }
 
-/// The contract built into this CLI, used when no platform is current.
-const BUILTIN_WIT: &[(&str, &str)] = &[("appos.wit", include_str!("../../wit/appos.wit"))];
-
 /// The grants an app can ask for, as this appos's shell knows them: its
 /// built-in kits'.
 pub fn builtin_capabilities() -> Vec<String> {
     appos_shell::kit::Kits::builtin().names()
 }
 
+/// The contract built into this CLI, used when no platform is current.
 pub fn builtin_wit() -> BTreeMap<String, String> {
-    BUILTIN_WIT.iter().map(|(name, text)| (name.to_string(), text.to_string())).collect()
+    appos_shell::kit::Kits::builtin().contract()
+}
+
+/// The contract of a platform's binary (`<shell> --contract`, from
+/// appos_shell::Platform::main): appos.wit and its kits' WIT.
+pub fn shell_contract(shell: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    let out = Command::new(shell).arg("--contract").output().with_context(|| format!("could not run {shell}"))?;
+    anyhow::ensure!(out.status.success(), "{shell} --contract failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    serde_json::from_slice(&out.stdout).with_context(|| format!("{shell} --contract printed no contract; is it built with appos_shell::Platform::main?"))
 }
 
 /// The contract an app is built against.
@@ -226,10 +232,14 @@ fn replace(file: &str, text: &str, pairs: &[(&str, String)]) -> anyhow::Result<S
 
 /// `appos sync`: src/appos.rs from this appos, wit/ from the current
 /// platform (or this appos). Nothing else changes.
-pub fn sync() -> anyhow::Result<()> {
+/// `shell`: take the contract from a platform's binary (shell_contract).
+pub fn sync(shell: Option<&str>) -> anyhow::Result<()> {
     let dir = std::env::current_dir()?;
     crate::app_info(&dir)?;
-    let Contract { wit, from, .. } = contract()?;
+    let Contract { wit, from, .. } = match shell {
+        Some(shell) => Contract { wit: shell_contract(shell)?, from: Some(shell.to_string()), git: None },
+        None => contract()?,
+    };
     let from = from.map_or("the contract built into appos".to_string(), |p| format!("the contract of {p}"));
     let changed = sync_files(&dir, &wit)?;
     let sdk = Lang::of(&dir).map(|l| format!("{} is the SDK of this appos, ", l.sdk_path())).unwrap_or_default();

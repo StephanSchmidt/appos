@@ -1,8 +1,9 @@
-# The native side: the shell and the `appos` CLI. Apps build for wasm in
-# their own workspaces (see examples/).
+# The native side: the shell, the `appos` CLI and an example platform
+# (examples/acme-platform). Apps build for wasm in their own workspaces
+# (see examples/).
 [workspace]
 resolver = "3"
-members = ["shell", "cli"]
+members = ["shell", "cli", "examples/acme-platform"]
 
 [workspace.package]
 rust-version = "1.100"

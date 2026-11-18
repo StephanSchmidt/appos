@@ -41,7 +41,8 @@ const NEW: Spec = Spec {
     options: &["--group"],
     ..Spec::bare("appos new <name> [--group <team>] [--ts | --java]")
 };
-const DEV: Spec = Spec { options: &["--addr"], ..Spec::bare("appos dev [--addr 127.0.0.1:8080]") };
+const DEV: Spec = Spec { options: &["--addr", "--shell"], ..Spec::bare("appos dev [--addr 127.0.0.1:8080] [--shell <binary>]") };
+const SYNC: Spec = Spec { options: &["--shell"], ..Spec::bare("appos sync [--shell <binary>]") };
 const LOGIN: Spec = Spec { required: 1, positional: 1, ..Spec::bare("appos login <url>") };
 const USE: Spec = Spec { required: 1, positional: 1, ..Spec::bare("appos use <name>") };
 const HOSTS: Spec = Spec { switches: &["--wit"], ..Spec::bare("appos hosts [--wit]") };
@@ -92,15 +93,15 @@ async fn run(cmd: &str, rest: &[String]) -> anyhow::Result<()> {
             let (name, group, lang) = new_args(rest)?;
             scaffold::new(name, group, lang)
         }
-        "sync" => {
-            Spec::bare("appos sync").parse(rest)?;
-            scaffold::sync()
-        }
+        "sync" => scaffold::sync(SYNC.parse(rest)?.option("--shell")),
         "build" => {
             Spec::bare("appos build").parse(rest)?;
             dev::build().map(drop)
         }
-        "dev" => dev::dev(DEV.parse(rest)?.option("--addr")).await,
+        "dev" => {
+            let args = DEV.parse(rest)?;
+            dev::dev(args.option("--addr"), args.option("--shell")).await
+        }
         "review" => {
             Spec::bare("appos review").parse(rest)?;
             review::review().await

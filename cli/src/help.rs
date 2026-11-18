@@ -483,7 +483,7 @@ src/main/java/app/Appos.java) is the SDK of this appos; `appos sync`
 updates both later.
 ";
 
-const HELP_DEV: &str = "appos dev [--addr 127.0.0.1:8080]
+const HELP_DEV: &str = "appos dev [--addr 127.0.0.1:8080] [--shell <binary>]
 
 Builds the app in this directory and runs it in a local shell at
 http://<addr>/<app-id>. Watches src/, templates/, wit/, .cargo/, app.toml,
@@ -498,6 +498,10 @@ kill and the process id it prints when it starts.
 It warns when the SDK (src/appos.rs, src/appos.ts or
 src/main/java/app/Appos.java) or wit/ differ from this appos's; `appos
 sync` updates them.
+
+--shell runs the app in a platform's binary instead, one built with
+appos_shell::Platform::main, so the app can call the platform's kits.
+Get their WIT first with appos sync --shell <binary>.
 
 One dev server per app: if one is already running for this app, appos dev
 prints its address and exits. If the port is taken by something else, it
@@ -719,13 +723,14 @@ Exits with 1 when a live app uses a package with a known vulnerability, so
 CI can run it every day. --json prints the findings as JSON.
 ";
 
-const HELP_SYNC: &str = "appos sync
+const HELP_SYNC: &str = "appos sync [--shell <binary>]
 
 Brings the app in this directory up to date with this appos: writes its
 SDK as src/appos.rs (src/appos.ts in a TypeScript app,
 src/main/java/app/Appos.java in a Java app; a Zig app keeps its own), and
 the contract of the current platform (or the one
-built into appos) into wit/, removing contract files it doesn't have. In
+built into appos, or with --shell that of a platform's binary) into wit/,
+removing contract files it doesn't have. In
 a TypeScript app it sets \"verbatimModuleSyntax\": true in tsconfig.json,
 which deps.json needs (appos audit --help); an import that brings only
 types is then `import type`, and the build says where one isn't.
