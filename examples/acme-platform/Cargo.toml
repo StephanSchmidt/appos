@@ -20,4 +20,4 @@ chrono = "0.4"
 rusqlite = { version = "0.42", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # The derives for WIT records (Customer, Note) expand to wasmtime paths.
-wasmtime = "50"
+wasmtime = "50.0.2"

@@ -36,10 +36,10 @@ tokio = { version = "1", features = ["full"] }
 # OIDC sign-in: discovery and the token endpoint (auth/oidc.rs).
 ureq = "3"
 toml = "1"
-wasmtime = "50"
+wasmtime = "50.0.2"
 # Reads kits' WIT, for the contract apps build against.
 wit-parser = "0.261"
-wasmtime-wasi = "50"
+wasmtime-wasi = "50.0.2"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
