@@ -8,3 +8,13 @@ wasm = "target/wasm32-wasip2/release/webinars.wasm"
 
 [capabilities]
 grant = ["kv-read", "kv-write"]
+
+[[data]]
+what = "Registrations: name, company and email address, with the consent text the person saw"
+where = "kv"
+why = "Give seats, keep the waiting list and show the team who comes"
+
+[[data]]
+what = "Sessions: title, time, description and link; nothing about people"
+where = "kv"
+why = "Show the webinars and take registrations"

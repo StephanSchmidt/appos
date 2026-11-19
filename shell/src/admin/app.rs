@@ -1,11 +1,12 @@
 //! One app in detail: its requests with its changes, its routes, its risk
-//! grant by grant, its versions with "Make live", and its last failures.
+//! grant by grant, the data it keeps, its versions with "Make live", and
+//! its last failures.
 //! Turn off, Turn on and Make live act at once; the console's toast says
 //! what happened and offers Undo.
 
 use crate::kit::{Kits, Offer, Reply};
 use crate::log_filter::{PLATFORM, Pick};
-use crate::manifest::Band;
+use crate::manifest::{Band, Data};
 use crate::platform::{Kind, Request, Version, VersionStatus, now_ms};
 use crate::runtime::IO_BUDGET;
 use crate::shell::Shell;
@@ -32,7 +33,7 @@ pub(super) async fn app_page(ask: Ask) -> Reply {
 }
 
 /// The app's section (templates/admin/app.html): its header, requests
-/// with its changes, routes, kits, risk, versions and last failures.
+/// with its changes, routes, kits, risk, data, versions and last failures.
 #[derive(askama::Template)]
 #[template(path = "admin/app.html")]
 struct Detail<'a> {
@@ -52,6 +53,7 @@ struct Detail<'a> {
     routes: Routes,
     kits: Option<KitsPart>,
     risk: RiskPart,
+    data: Option<DataPart>,
     versions: Option<Versions>,
     failures: Vec<Failure>,
     shown: usize,
@@ -134,6 +136,16 @@ struct User {
     kind: &'static str,
     grants: Vec<String>,
     now: String,
+}
+
+/// What data it keeps, where and why, as its app.toml says; none for a
+/// kit or an app that doesn't run.
+struct DataPart {
+    rows: Vec<Data>,
+    /// Its grants that let it keep data, if app.toml doesn't say what it
+    /// keeps: an app from the shell's folders, or deployed before deploys
+    /// needed it.
+    unsaid: Option<String>,
 }
 
 /// Why it is as risky as it is (none while it doesn't run), its grants,
@@ -238,6 +250,11 @@ pub(super) fn detail(shell: &Shell, apps: &[App], a: &App, marks: &[Mark], all_v
         routes: routes(a),
         kits: kits_part(shell, apps, a),
         risk: risk_part(shell, a),
+        data: a.running.as_ref().filter(|r| !r.is_kit()).map(|r| {
+            let keeping = r.manifest.keeping();
+            let unsaid = (r.manifest.data.is_empty() && !keeping.is_empty()).then(|| keeping.join(", "));
+            DataPart { rows: r.manifest.data.clone(), unsaid }
+        }),
         versions: versions(shell, a, all_versions),
         failures: last_failures(a),
         shown: SHOWN,
@@ -367,7 +384,7 @@ fn routes(a: &App) -> Routes {
 }
 
 /// Each grant with what it lets the app do and its level, riskiest first;
-/// the ones that set the app's risk are tinted. Since: when the risk file
+/// the riskiest are tinted. Since: when the risk file
 /// gave the grant its level, linked to that change in the log.
 fn risk_part(shell: &Shell, a: &App) -> RiskPart {
     let changes = of_app_kinds(PLATFORM, Pick::One(Kind::RiskChanged));
@@ -376,12 +393,17 @@ fn risk_part(shell: &Shell, a: &App) -> RiskPart {
     let mut grants: Vec<(&str, Option<u8>)> = r.manifest.capabilities.grant.iter().map(|g| (g.as_str(), shell.risk.of(g))).collect();
     // Unrated first, it makes the app's risk unknown; then riskiest first.
     grants.sort_by_key(|(g, l)| (l.is_some(), std::cmp::Reverse(*l), *g));
+    // Each grant and each rated combination it holds count; the riskiest
+    // are named.
+    let parts = shell.risk.parts(&r.manifest.capabilities.grant).unwrap_or_default();
+    let top = parts.iter().map(|(_, l)| *l).max();
     let why = match (level, grants.iter().find(|(_, l)| l.is_none())) {
         (_, Some((g, _))) => format!("unrated: {g} has no level"),
-        (Some(l), None) if grants.is_empty() => format!("{} {l}: granted nothing, it can only answer requests", Band::of(l).name()),
-        (Some(l), None) => {
-            let top: Vec<&str> = grants.iter().filter(|(_, x)| *x == Some(l)).map(|(g, _)| *g).collect();
-            format!("{} {l}, from {}", Band::of(l).name(), and(&top))
+        (Some(s), None) if grants.is_empty() => format!("{} {s}: granted nothing, it can only answer requests", Band::of(s).name()),
+        (Some(s), None) => {
+            let riskiest: Vec<&str> = parts.iter().filter(|(_, l)| Some(*l) == top).map(|(g, _)| *g).collect();
+            let more = if parts.len() > 1 { "; the others add to it" } else { "" };
+            format!("{} {s} of 100, riskiest {}{more}", Band::of(s).name(), and(&riskiest))
         }
         (None, None) => "unrated".to_string(),
     };
@@ -393,7 +415,7 @@ fn risk_part(shell: &Shell, a: &App) -> RiskPart {
             grant: g.to_string(),
             chip: grant_chip(*l),
             allows: kits.allows(g).to_string(),
-            sets: *l == level,
+            sets: l.is_some() && *l == top,
             since: since.get(*g).map(|e| Since { href: from_event(e.id, Some(PLATFORM)), full: local(e.at, FULL), clock: clock(e.at) }),
         })
         .collect();

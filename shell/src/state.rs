@@ -32,6 +32,9 @@ use crate::runtime::{AdminLimits, Budget, LoadedApp};
 /// Why a deploy waits while deploys are frozen.
 const FROZEN: &str = "Held: an admin froze deploys; an admin makes it live";
 
+/// Why a deploy waits while its review runs (`--review`).
+pub const REVIEWING: &str = "Waits for its review; appos versions shows when it is live or refused";
+
 /// Why a deploy waits, from the rollback that paused the app.
 fn held_reason(pause: &Event) -> String {
     match &pause.reason {
@@ -256,6 +259,33 @@ impl State {
             self.swap_in(app, kits);
         }
         Ok(held)
+    }
+
+    /// The review of `app`, which waits for it, ended (review.rs): see
+    /// `PlatformDb::reviewed`. One that no longer fits what runs is refused
+    /// too. Returns whether it went live.
+    pub async fn reviewed(&self, app: Arc<LoadedApp>, outcome: Result<(), String>) -> anyhow::Result<bool> {
+        let _change = self.change.lock().await;
+        let (failed, kits) = match outcome.map(|()| self.fits(&app)) {
+            Ok(Ok(kits)) => (None, Some(kits)),
+            Ok(Err(e)) => (Some(format!("{e:#}")), None),
+            Err(why) => (Some(why), None),
+        };
+        let (id, label, risk) = (app.manifest.app.id.clone(), app.label.clone(), self.risk.of_app(&app.manifest));
+        let live = self
+            .platform
+            .run(move |db| {
+                let held = match db.paused(&id)? {
+                    Some(pause) => Some(held_reason(&pause)),
+                    None => db.frozen()?.map(|_| FROZEN.to_string()),
+                };
+                db.reviewed(&id, &label, failed.as_deref(), held.as_deref(), risk)
+            })
+            .await?;
+        if live && let Some(kits) = kits {
+            self.swap_in(app, kits);
+        }
+        Ok(live)
     }
 
     /// The live version and the version a rollback makes live, if `ask`

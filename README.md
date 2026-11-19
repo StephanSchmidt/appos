@@ -54,8 +54,8 @@ check finds. `appos review` sets up the review: the shell writes the
 appfuzz manifest (grants, kv costs, the I/O budget, fuel, memory) and
 takes the data and one request per route from what you did in `appos
 dev`. [appfuzz](https://appfuzz.dev), one way to automate the review, runs
-it; `appos review` prints the command. Deploys don't run it yet, so run it
-before `appos deploy`.
+it; `appos review` prints the command. A shell started with `--review`
+reviews every deploy and makes it live only when the review passes.
 
 ## Deploying
 
@@ -66,7 +66,8 @@ cd events && appos deploy            # http://127.0.0.1:8080/events
 ```
 
 An app travels as one file, app.zip, and app.toml names its owner and its
-group; a deploy without them is refused. Each deploy is a new version that
+group, and says what data the app keeps, where and why; a deploy without
+them is refused. Each deploy is a new version that
 never changes. `appos versions` lists them and `appos rollback` goes back.
 If the live version fails 5 requests within a minute, the shell rolls back
 by itself and holds new deploys until an admin makes a version live.
@@ -84,7 +85,11 @@ only if both allow it, and the app checks nothing itself.
 p, anyone, webinars, kv-read
 p, signed-in, webinars, kv-write
 p, group:platform, *, admin-*
+p, group:marketing, apps:Marketing, admin-deploy
 ```
+
+The last line lets marketing deploy and roll back the apps of its group,
+and nothing else: not another team's apps, not Freeze or Stop all.
 
 People sign in through OIDC, a proxy's headers or a sign-in kit. Without a
 sign-in and a policy, the shell runs on this machine only and prints a link
@@ -96,7 +101,7 @@ policy, sign-in and the risk level of each grant.
 ![The AppOS admin console in dark mode: four apps from Marketing, Sales and Customer service with their limits, live requests per minute and failures, and the controls to roll back, limit or turn off an app](docs/admin.png)
 
 The admin screen at `/admin` shows every app with its owner, group,
-grants, versions and requests. An admin turns an app off, sets its limits
+grants, the data it keeps, versions and requests. An admin turns an app off, sets its limits
 or makes an earlier version live there. Each request gets 1 billion
 instructions, 64 MB memory, 100 I/O units and 2 seconds; a request over
 budget stops, and the shell and the other apps keep running. `appos audit`

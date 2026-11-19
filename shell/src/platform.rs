@@ -24,7 +24,7 @@ use crate::runtime::AdminLimits;
 
 /// Goes up with every change to SCHEMA. Unreleased, so there are no
 /// migrations: an older platform.db is refused with a message to delete it.
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 const SCHEMA: &str = r#"
 -- Every deploy, refused ones too. At most one version per app is live.
@@ -563,7 +563,10 @@ impl PlatformDb {
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         let found: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let empty: bool = conn.query_row("SELECT count(*) = 0 FROM sqlite_master", [], |r| r.get(0))?;
-        if !empty && found != SCHEMA_VERSION {
+        // 10: events keep an app's risk as a score of 0 to 100, not a level.
+        if !empty && found == 9 {
+            conn.execute("UPDATE events SET risk = risk * 10 WHERE risk IS NOT NULL", [])?;
+        } else if !empty && found != SCHEMA_VERSION {
             anyhow::bail!(
                 "{} was made by another shell (schema {found}, this one needs {SCHEMA_VERSION}). The schema is unreleased and not migrated: delete the file and deploy the apps again",
                 path.display()
@@ -715,14 +718,72 @@ impl PlatformDb {
     /// A deploy that loaded but waits, after `took`: the app is paused or
     /// deploys are frozen, and an admin makes it live.
     pub fn held(&self, v: &NewVersion, why: &str, took: Duration) -> anyhow::Result<()> {
+        self.waits(v, why, "Deploy held until an admin makes it live", took)
+    }
+
+    /// A deploy that loaded and waits for its review (`--review`), after
+    /// `took`; `reviewed` ends the wait.
+    pub fn reviewing(&self, v: &NewVersion, why: &str, took: Duration) -> anyhow::Result<()> {
+        self.waits(v, why, "Deploy waits for its review", took)
+    }
+
+    fn waits(&self, v: &NewVersion, why: &str, message: &str, took: Duration) -> anyhow::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         Self::insert_version(&tx, v, VersionStatus::Waiting, Some(why), took)?;
-        let message = "Deploy held until an admin makes it live";
         let e = NewEvent { reason: Some(why), risk: v.risk, person: v.person.as_deref(), ..NewEvent::new(&v.app_id, &v.label, Kind::Held, v.actor, message) };
         Self::write_event(&tx, &e)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The review of `label`, which waits for it, ended. `failed` refuses
+    /// it, with why. Else it goes live, unless `held` says why it waits for
+    /// an admin (paused, frozen) or a newer version went live meanwhile.
+    /// Returns whether it went live; false too if it no longer waits.
+    pub fn reviewed(&self, app_id: &str, label: &str, failed: Option<&str>, held: Option<&str>, risk: Option<u8>) -> anyhow::Result<bool> {
+        use VersionStatus::{Live, Refused, Retired, Waiting};
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let sql = format!("SELECT {VERSION_COLS} FROM versions WHERE app_id = ?1 AND label = ?2 AND status = ?3 ORDER BY id DESC LIMIT 1");
+        let Some(v) = tx.query_row(&sql, params![app_id, label, Waiting], version).optional()? else {
+            return Ok(false);
+        };
+        let live: Option<(i64, String)> = tx
+            .query_row("SELECT id, label FROM versions WHERE app_id = ?1 AND status = ?2", params![app_id, Live], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let newer = live.as_ref().is_some_and(|(id, _)| *id > v.id).then_some("Passed the review, but a newer version is live; an admin makes it live");
+        let (status, reason, kind, message) = match (failed, held.or(newer)) {
+            (Some(why), _) => (Refused, Some(why), Kind::Refused, "Refused by the review"),
+            (None, Some(why)) => (Waiting, Some(why), Kind::Held, "Passed the review; held until an admin makes it live"),
+            (None, None) => (Live, None, Kind::Deployed, "Passed the review, live"),
+        };
+        if status == Live {
+            tx.execute("UPDATE versions SET status = ?2 WHERE app_id = ?1 AND status = ?3", params![app_id, Retired, Live])?;
+        }
+        tx.execute("UPDATE versions SET status = ?2, reason = ?3 WHERE id = ?1", params![v.id, status, reason])?;
+        let before = live.as_ref().filter(|_| status == Live).map(|(_, l)| l.as_str());
+        Self::write_event(&tx, &NewEvent { reason, risk, before, ..NewEvent::new(app_id, label, kind, Actor::Shell, message) })?;
+        tx.commit()?;
+        Ok(status == Live)
+    }
+
+    /// Deploys that waited for a review when the shell stopped, `why` the
+    /// reason they wait with: refused, to deploy again. Returns how many.
+    pub fn reviews_cut_short(&self, why: &str) -> anyhow::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let cut: Vec<(i64, String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, app_id, label FROM versions WHERE status = ?1 AND reason = ?2")?;
+            stmt.query_map(params![VersionStatus::Waiting, why], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?
+        };
+        let reason = "The shell stopped while the review ran; deploy again";
+        for (id, app_id, label) in &cut {
+            tx.execute("UPDATE versions SET status = ?2, reason = ?3 WHERE id = ?1", params![id, VersionStatus::Refused, reason])?;
+            Self::write_event(&tx, &NewEvent { reason: Some(reason), ..NewEvent::new(app_id, label, Kind::Refused, Actor::Shell, "Refused by the review") })?;
+        }
+        tx.commit()?;
+        Ok(cut.len())
     }
 
     /// Switches on (`event` set) or off (none).
@@ -976,7 +1037,9 @@ impl PlatformDb {
                 (Some(a), None) => (format!("{grant}: no longer rated, was {a}"), None),
                 (None, None) => continue,
             };
-            Self::write_event(&tx, &NewEvent { risk: level, ..NewEvent::new("", "", Kind::RiskChanged, Actor::Shell, &message) })?;
+            // On the apps' scale, as every event's risk.
+            let risk = level.map(|l| crate::manifest::score(&[l]));
+            Self::write_event(&tx, &NewEvent { risk, ..NewEvent::new("", "", Kind::RiskChanged, Actor::Shell, &message) })?;
             changed += 1;
         }
         tx.execute("DELETE FROM risk_levels", [])?;
@@ -1013,6 +1076,14 @@ impl PlatformDb {
         let conn = self.conn();
         let sql = format!("SELECT {VERSION_COLS} FROM versions WHERE app_id = ?1 AND status = ?2");
         Ok(conn.query_row(&sql, params![app_id, VersionStatus::Live], version).optional()?)
+    }
+
+    /// The group an app has: its live version's, else its newest stored
+    /// one's. None for an app never deployed, or only refused.
+    pub fn group_of(&self, app_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn();
+        let sql = "SELECT app_group FROM versions WHERE app_id = ?1 AND status != ?2 ORDER BY status = ?3 DESC, id DESC LIMIT 1";
+        Ok(conn.query_row(sql, params![app_id, VersionStatus::Refused, VersionStatus::Live], |r| r.get(0)).optional()?)
     }
 
     /// An app's versions, newest first.
@@ -1323,6 +1394,32 @@ fn request(r: &rusqlite::Row, i: usize, shared: &mut Shared) -> rusqlite::Result
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_review_makes_live_holds_or_refuses() {
+        let db = PlatformDb::in_memory();
+        db.deployed(&v("one"), Duration::ZERO).unwrap();
+        db.reviewing(&v("two"), "reviewing", Duration::ZERO).unwrap();
+        db.reviewing(&v("three"), "reviewing", Duration::ZERO).unwrap();
+        db.reviewing(&v("four"), "reviewing", Duration::ZERO).unwrap();
+        let status = |label: &str| db.versions("a", 10).unwrap().into_iter().find(|v| v.label == label).map(|v| (v.status, v.reason)).unwrap();
+        // Three passes first: two, older, waits for an admin once it passes.
+        assert!(db.reviewed("a", "three", None, None, None).unwrap());
+        assert_eq!(status("one").0, VersionStatus::Retired);
+        assert!(!db.reviewed("a", "two", None, None, None).unwrap());
+        assert!(status("two").1.unwrap().contains("a newer version is live"));
+        assert!(!db.reviewed("a", "three", None, None, None).unwrap(), "it no longer waits");
+        assert!(!db.reviewed("a", "four", Some("leaks pii"), None, None).unwrap());
+        assert_eq!(status("four"), (VersionStatus::Refused, Some("leaks pii".into())));
+        db.reviewing(&v("five"), "reviewing", Duration::ZERO).unwrap();
+        assert!(!db.reviewed("a", "five", None, Some("frozen"), None).unwrap());
+        assert_eq!(status("five"), (VersionStatus::Waiting, Some("frozen".into())));
+        // The shell stopped during a review.
+        db.reviewing(&v("six"), "reviewing", Duration::ZERO).unwrap();
+        assert_eq!(db.reviews_cut_short("reviewing").unwrap(), 1);
+        assert_eq!(status("six").0, VersionStatus::Refused);
+        assert_eq!(status("five").0, VersionStatus::Waiting);
+    }
+
     fn v(label: &str) -> NewVersion {
         NewVersion {
             app_id: "a".into(),
@@ -1333,7 +1430,7 @@ mod tests {
             group: "Marketing".into(),
             actor: Actor::Cli,
             person: None,
-            risk: Some(8),
+            risk: Some(80),
             grants: vec![],
             routes: vec![],
             packages: None,
@@ -1389,6 +1486,21 @@ mod tests {
         assert!(err.contains("schema 0, this one needs") && err.contains("delete the file"), "{err}");
     }
 
+    /// Schema 9 kept an app's risk as a level of 0 to 10: it becomes a score.
+    #[test]
+    fn a_schema_9_db_gets_risk_scores() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("platform.db");
+        PlatformDb::open(&path).unwrap().deployed(&v("one"), Duration::ZERO).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE events SET risk = 8", []).unwrap();
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        drop(conn);
+        let db = PlatformDb::open(&path).unwrap();
+        assert_eq!(db.events(Some("a"), 1).unwrap()[0].risk, Some(80));
+        assert_eq!(PlatformDb::open(&path).unwrap().events(Some("a"), 1).unwrap()[0].risk, Some(80), "once");
+    }
+
     #[test]
     fn rollback_steps_back_through_deploys() {
         let db = PlatformDb::in_memory();
@@ -1409,7 +1521,7 @@ mod tests {
         let to = db.rollback_target("a", None).unwrap().unwrap();
         assert_eq!(to.label, "two");
         let from = db.live_of("a").unwrap();
-        let why = Rollback { actor: Actor::Shell, person: None, reason: Some("5 failed requests in 38 s"), risk: Some(8), recovery_ms: Some(41_000) };
+        let why = Rollback { actor: Actor::Shell, person: None, reason: Some("5 failed requests in 38 s"), risk: Some(80), recovery_ms: Some(41_000) };
         let id = db.rolled_back("a", &to, from.as_ref(), &why).unwrap();
         assert_eq!(db.live_of("a").unwrap().unwrap().label, "two");
         let e = &db.events(Some("a"), 1).unwrap()[0];
@@ -1482,7 +1594,7 @@ mod tests {
     fn an_app_is_off_until_turned_on() {
         let db = PlatformDb::in_memory();
         assert!(db.off("a").unwrap().is_none());
-        db.turned(&[Target { risk: Some(8), ..target("a") }], false, Actor::Admin, None, Some("leaks"), false).unwrap();
+        db.turned(&[Target { risk: Some(80), ..target("a") }], false, Actor::Admin, None, Some("leaks"), false).unwrap();
         db.turned(&[target("b")], false, Actor::Cli, None, None, false).unwrap();
         let e = db.off("a").unwrap().unwrap();
         assert_eq!((e.kind, e.actor, e.reason.as_deref(), e.severity), (Kind::TurnedOff, Actor::Admin, Some("leaks"), Severity::High));
@@ -1516,11 +1628,11 @@ mod tests {
     #[test]
     fn severity_follows_kind_and_risk() {
         assert_eq!(Severity::of(Kind::Deployed, None), Severity::Info);
-        assert_eq!(Severity::of(Kind::Deployed, Some(6)), Severity::Info);
-        assert_eq!(Severity::of(Kind::Deployed, Some(7)), Severity::Low);
-        assert_eq!(Severity::of(Kind::Refused, Some(10)), Severity::High);
-        assert_eq!(Severity::of(Kind::AutoRolledBack, Some(3)), Severity::High);
-        assert_eq!(Severity::of(Kind::AutoRolledBack, Some(9)), Severity::Critical);
+        assert_eq!(Severity::of(Kind::Deployed, Some(69)), Severity::Info);
+        assert_eq!(Severity::of(Kind::Deployed, Some(70)), Severity::Low);
+        assert_eq!(Severity::of(Kind::Refused, Some(100)), Severity::High);
+        assert_eq!(Severity::of(Kind::AutoRolledBack, Some(30)), Severity::High);
+        assert_eq!(Severity::of(Kind::AutoRolledBack, Some(90)), Severity::Critical);
         assert!(Severity::ALL.windows(2).all(|w| w[0] < w[1]));
     }
 
@@ -1630,7 +1742,7 @@ mod tests {
         };
         ev("a", Kind::Deployed, Actor::Cli, "Deployed, live in 3 ms", None, Some(1));
         ev("a", Kind::LimitHit, Actor::Shell, "Timed out on GET /", Some("wall-clock limit"), Some(1));
-        ev("b", Kind::Refused, Actor::Cli, "Refused", Some("uses kv::set"), Some(9));
+        ev("b", Kind::Refused, Actor::Cli, "Refused", Some("uses kv::set"), Some(90));
         ev("", Kind::RiskChanged, Actor::Shell, "kv-write: rated 2", None, Some(2));
         let ids = |q: LogQuery| db.log(&q, 10).unwrap().iter().map(|e| e.message.clone()).collect::<Vec<_>>();
         assert_eq!(ids(LogQuery::default()), ["kv-write: rated 2", "Refused", "Timed out on GET /", "Deployed, live in 3 ms"]);

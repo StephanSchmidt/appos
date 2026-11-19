@@ -58,6 +58,17 @@
 {%- endmatch -%}
 <p class="partfoot">Levels come from the platform's risk file; an app can't change them. <a href="{{ log }}">Its log</a> · <a href="{{ risk.changes }}">Risk changes</a></p></div>
 
+{#- What data it keeps, where and why, as its app.toml says. -#}
+{%- if let Some(d) = data %}
+<div class="part" id="data"><h4 id="data-h">Data <small>· what it keeps, as its app.toml says</small></h4>
+{%- if !d.rows.is_empty() %}<div class="scroll"><table class="data" aria-labelledby="data-h"><thead><tr><th scope="col">What</th><th scope="col">Where</th><th scope="col">Why</th></tr></thead><tbody>
+{%- for r in d.rows %}<tr><td>{{ r.what }}</td><td>{{ r.place }}</td><td>{{ r.why }}</td></tr>{% endfor -%}
+</tbody></table></div>
+{%- else if let Some(grants) = d.unsaid %}<p class="empty">Not said: its grants ({{ grants }}) let it keep data, and its app.toml has no [[data]].</p>
+{%- else %}<p class="empty">Nothing: no grant lets it keep data.</p>
+{%- endif %}</div>
+{%- endif %}
+
 {#- The versions, the live one first, with Make live. -#}
 <div class="part" id="versions"><h4>Versions</h4>
 {%- match versions -%}

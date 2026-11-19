@@ -67,6 +67,26 @@ owner = "Jane Doe <jane@example.com>"   # appos new fills it in from git
 group = "Marketing"                     # appos new --group Marketing
 ```
 
+An app whose grants let it keep data (`kv-write`, or any kit's grant) says
+what it keeps, where and why, one `[[data]]` entry for each kind of data,
+so the people who answer for the company's data (GDPR) can find it; a
+deploy without them is refused. `where` is `kv` or the kit the app hands
+the data to:
+
+```toml
+[[data]]
+what = "Name and email address of each sign-up"
+where = "kv"
+why = "Hold seats and send the webinar link"
+```
+
+The admin screen shows the entries with the app, and
+`/_platform/data` lists them for every running app as JSON. They are what
+the app's builder says. The review (Hardening in the README) checks the
+ones in kv: with `where = "kv"`, what the app reads from kv is personal
+data, and it may go to the page and back into kv, but not into logs,
+error pages or other calls to the platform.
+
 The shell checks a deployed app as it does at startup, keeps its app.zip
 in `<data>/apps/<app-id>/<version>/` and makes it live; its kv data stays.
 A version is the version from app.toml followed by 32 hex digits from a
@@ -74,6 +94,25 @@ SHA-256 hash of app.toml, the .wasm, icon.svg and deps.json. Stored
 versions are immutable: changing an icon creates a new version too.
 Versions use 1–200 ASCII letters, digits, dots, underscores, dashes or plus
 signs, so their stored bundles stay inside the app's directory.
+
+A shell started with `--review` reviews each app deploy before it goes
+live. The deploy is stored and waits while the shell writes appfuzz.toml,
+plan.json and the stored .wasm into
+`<data>/apps/<app-id>/<version>/review/` and runs the command there, one
+review at a time, for at most 30 minutes. Exit 0 makes the version live;
+anything else refuses it, with the end of review.log as the reason. The
+review runs on the bytes that go live, so it holds for that version's
+hash. The review gets no data from the shell's kv, which holds people's
+data. appfuzz is one way to review; any program that reads these files
+and exits 0 when the app passes will do:
+
+```sh
+appos-shell --review 'appfuzz review --plan plan.json'   # a program and its arguments, no shell
+```
+
+While the review runs, the version is waiting; an admin can still make it
+live on the admin screen. Kits aren't reviewed: deploying one needs
+admin-write.
 
 ```sh
 appos versions             # live, retired, failed, refused or waiting, and why
@@ -100,8 +139,10 @@ with their errors, so a builder or their agent can see why the app failed.
 Scripts get the same as JSON from `/_platform/log?app=<app-id>`.
 
 The admin screen and the platform API are for those the policy gives
-admin-read, to look, and admin-write, to change (see [Who may do what](access.md#who-may-do-what)); the
-API takes a token (see Platforms).
+admin-read, to look, and admin-write, to change; admin-deploy and
+admin-off give deploying and turning off for some apps only, through the
+API (see [Who may do what](access.md#who-may-do-what)). The API takes a
+token (see Platforms).
 The shell answers only under its own names: the host of `--origin`, of the
 platform listener, localhost and IP addresses, so a web page can't reach
 a shell on your machine under a name of its own (DNS rebinding). Behind a

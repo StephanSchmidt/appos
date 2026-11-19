@@ -8,3 +8,8 @@ wasm = "target/wasm32-wasip2/release/packages.wasm"
 
 [capabilities]
 grant = ["booking-read", "booking-choose", "booking-terms"]
+
+[[data]]
+what = "The plan, offer and terms a customer picks; nothing about people"
+where = "booking kit"
+why = "Book the plan"

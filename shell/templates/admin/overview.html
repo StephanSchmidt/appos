@@ -8,7 +8,7 @@ appos deploy</code></pre>
 <p>It shows up here with its requests, versions and risk. From the app's folder, <code>appos versions</code> then tells what happened to each version, and <code>appos log</code> why a request failed.</p></section><section class="card rules" aria-labelledby="rules-h"><h2 id="rules-h">Guardrails <small>· for every app, from the first</small></h2><ul>
 <li><b>{{ s.seconds }} s</b><p><strong>Limits per request.</strong> {{ s.seconds }} s unless the app asks for more, up to {{ s.max_seconds }} s; {{ s.billions }} billion instructions; an I/O budget of {{ s.io }}, where a read costs 1 and a write 5; {{ s.mb }} MB of memory. Over a limit, the request stops.</p></li>
 <li><b>{{ s.failures }} failures</b><p><strong>Automatic rollback.</strong> {{ s.failures }} failed requests within {{ s.window }} make the version before live again. New deploys then wait until someone makes a version live here.</p></li>
-<li><b>0–{{ s.max_risk }}</b><p><strong>Risk per grant.</strong> {{ s.grants|safe }}<br>{% if s.rated %}Levels come from the platform's risk file; an app can't change them.{% else %}No grant has a level yet: start the shell with <code>--risk</code> and a risk file.{% endif %}</p></li>
+<li><b>0–{{ s.max_risk }}</b><p><strong>Risk per grant.</strong> {{ s.grants|safe }}<br>{% if s.rated %}Levels come from the platform's risk file; an app can't change them. An app scores 0–100 from its grants together: low ones add up to little, high ones to more.{% else %}No grant has a level yet: start the shell with <code>--risk</code> and a risk file.{% endif %}</p></li>
 </ul></section></div>
 {%- endif -%}
 {%- if let Some(p) = parts -%}
@@ -16,7 +16,7 @@ appos deploy</code></pre>
 {{ p.board|safe }}{{ p.kpis|safe }}<div class="row">{{ p.requests|safe }}{{ p.failures|safe }}</div><div class="row" id="detail">{{ p.heat|safe }}{{ p.detail|safe }}</div>
 
 {#- Every app in a row. -#}
-<section class="card inventory" id="inventory" aria-labelledby="inv-h"><div class="cardhead"><h2 id="inv-h">Inventory <small>· an app is as risky as its riskiest grant <span class="bands">{{ p.legend|safe }}</span></small></h2></div><div class="scroll"><table><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Group</th><th scope="col">Owner</th><th scope="col">Live version</th><th scope="col">Risk</th><th scope="col">Grants and their risk</th><th scope="col" class="num">Requests, last hour</th><th scope="col">Last change</th><th scope="col" class="num">Refused deploys</th></tr></thead><tbody>
+<section class="card inventory" id="inventory" aria-labelledby="inv-h"><div class="cardhead"><h2 id="inv-h">Inventory <small>· an app scores 0–100 from its grants together <span class="bands">{{ p.legend|safe }}</span></small></h2></div><div class="scroll"><table><thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Group</th><th scope="col">Owner</th><th scope="col">Live version</th><th scope="col">Risk</th><th scope="col">Grants and their risk</th><th scope="col" class="num">Requests, last hour</th><th scope="col">Last change</th><th scope="col" class="num">Refused deploys</th></tr></thead><tbody>
 {%- for i in p.inventory -%}
 <tr><th scope="row"><a class="who-app" href="/admin/apps/{{ i.id }}#detail">{{ i.icon|safe }}<span class="names"><b>{{ i.name }}</b><code class="id">{{ i.id }}</code></span></a></th><td>{{ i.kind }}</td>
 {%- match i.group %}{% when Some(g) %}<td>{{ g }}</td>{% when None %}<td><span class="none">—</span></td>{% endmatch -%}

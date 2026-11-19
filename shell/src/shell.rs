@@ -44,6 +44,10 @@ pub struct Shell {
     /// Deploys unzip, compile and run init one at a time, outside the
     /// state's lock: a zip bomb or a slow compile can't pile up.
     pub loads: tokio::sync::Semaphore,
+    /// What reviews an app deploy before it goes live (`--review`).
+    pub review: Option<String>,
+    /// Reviews run one at a time.
+    pub reviews: tokio::sync::Semaphore,
 }
 
 /// What a shell is made of.
@@ -59,6 +63,7 @@ pub struct Parts {
     /// The platform's own kits: the Wasm kits come as they load.
     pub kits: Kits,
     pub keep_examples: bool,
+    pub review: Option<String>,
     pub auth: Option<Auth>,
     pub policy: Option<Arc<Policies>>,
 }
@@ -95,6 +100,8 @@ impl Shell {
             policy: p.policy,
             state,
             loads: tokio::sync::Semaphore::new(1),
+            review: p.review,
+            reviews: tokio::sync::Semaphore::new(1),
         }))
     }
 

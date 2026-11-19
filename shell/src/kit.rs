@@ -86,6 +86,10 @@ pub const USER_READ: &str = "user-read";
 /// platform with (and the platform API's reads and changes).
 pub const ADMIN_READ: &str = "admin-read";
 pub const ADMIN_WRITE: &str = "admin-write";
+/// AdminKit's for some apps only, by id or group: to deploy and roll
+/// back, and to turn off and on. admin-write gives both for every app.
+pub const ADMIN_DEPLOY: &str = "admin-deploy";
+pub const ADMIN_OFF: &str = "admin-off";
 
 /// What AppOS tells a kit about a call, like Go's context.Context. AppOS
 /// builds it, never the caller. Cheap to clone.
@@ -327,7 +331,8 @@ pub struct KitRoute {
 impl KitRoute {
     /// GET `path`, like "/booking/:draft", where ":draft" takes any one
     /// segment; a last "*rest" takes the rest, one segment or more. The
-    /// person needs `grant`, one of the kit's.
+    /// person needs `grant`, one of the kit's, or one a pattern like
+    /// `admin-*` matches.
     pub fn get(path: &str, grant: &str, f: impl Fn(Context, KitRequest) -> Respond + Send + Sync + 'static) -> KitRoute {
         KitRoute::new("GET", path, grant, Arc::new(f))
     }
@@ -357,6 +362,12 @@ impl KitRoute {
     /// The grant the person needs.
     pub fn grant(&self) -> &str {
         &self.grant
+    }
+
+    /// Whether holding `grant` lets someone in: it is the route's, or its
+    /// pattern matches it.
+    pub fn takes(&self, grant: &str) -> bool {
+        casbin::function_map::key_match(grant, &self.grant)
     }
 
     /// Like "GET /booking/:draft".
@@ -669,7 +680,7 @@ fn check_routes(all: &[Registered]) -> anyhow::Result<()> {
             if !route.platform {
                 crate::manifest::validate_app_id(name).map_err(|e| anyhow::anyhow!("page {pattern}: it must start with a name: {e}"))?;
             }
-            anyhow::ensure!(r.grants.iter().any(|g| g.name == route.grant), "page {pattern}: {} is none of the kit's grants", route.grant);
+            anyhow::ensure!(r.grants.iter().any(|g| route.takes(&g.name)), "page {pattern}: {} is none of the kit's grants", route.grant);
             anyhow::ensure!(route.segments.iter().rev().skip(1).all(|s| !s.starts_with('*')), "page {pattern}: *name goes last");
             let shape = |s: &String| {
                 if s.starts_with(':') {
@@ -1507,7 +1518,7 @@ mod tests {
     fn grants_and_functions_are_each_one_kits() {
         let crm = Crm::default();
         let kits = kits(&crm);
-        assert_eq!(kits.names(), ["kv-read", "kv-write", "user-read", "admin-read", "admin-write", "leads-read", "leads-write"]);
+        assert_eq!(kits.names(), ["kv-read", "kv-write", "user-read", "admin-read", "admin-write", "admin-deploy", "admin-off", "leads-read", "leads-write"]);
         assert_eq!(kits.grant_for("acme:crm/leads", "count-leads").map(|g| g.name.as_str()), Some("leads-read"));
         assert!(kits.offers("acme:crm/leads") && kits.offers("appos:framework/kv") && !kits.offers("acme:crm/deals"));
         struct Wit(&'static str);

@@ -8,12 +8,15 @@ use crate::terminal_println as println;
 const USAGE: &str = "\
 PROGRAM [--addr 127.0.0.1:8080] [--platform-addr IP:PORT] [--name NAME] [--git URL]
         [--origin URL] [--data DIR] [--risk FILE] [--auth FILE --policy FILE | --no-auth]
-        [--kit DIR]... [APP...]
+        [--kit DIR]... [--review COMMAND] [APP...]
 PROGRAM --contract    the WIT apps build against, as JSON (appos sync --shell)
 PROGRAM --fakes DIR   writes the kits' fakes into DIR, for appos dev (appos sync --shell)
 PROGRAM --dev APP...  what appos dev --shell runs: the apps, open, reloading on each line on stdin
 
 --kit DIR: a kit in Wasm, its kit.toml in DIR; once per kit
+--review COMMAND: each app deploy waits until COMMAND passes (exit 0), run
+  in a folder with appfuzz.toml, plan.json and the app's .wasm, e.g.
+  --review 'appfuzz review --plan plan.json'
 PROGRAM --version";
 
 /// What the command line asks for.
@@ -48,6 +51,7 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
         reload: None,
         risk: Default::default(),
         keep_examples: false,
+        review: None,
         auth: None,
         policy: None,
         no_auth: false,
@@ -68,6 +72,7 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Ru
             "--contract" => contract = true,
             "--fakes" => fakes = Some(PathBuf::from(value(&mut args, &arg)?)),
             "--kit" => opts.kits.push(value(&mut args, &arg)?.into()),
+            "--review" => opts.review = Some(value(&mut args, &arg)?),
             "--risk" => {
                 let path = value(&mut args, &arg)?;
                 opts.risk = crate::Risk::load(std::path::Path::new(&path))?;
@@ -135,7 +140,7 @@ mod tests {
 
     #[test]
     fn missing_values_never_fall_back_to_other_listener_settings() {
-        for flag in ["--addr", "--origin", "--platform-addr", "--git", "--name", "--data", "--risk", "--auth", "--policy"] {
+        for flag in ["--addr", "--origin", "--platform-addr", "--git", "--name", "--data", "--risk", "--auth", "--policy", "--review"] {
             assert!(serve(["--addr", "0.0.0.0:8080", flag].into_iter().map(String::from)).is_err(), "accepted missing {flag} value");
         }
     }

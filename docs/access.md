@@ -37,6 +37,9 @@ p, alice@acme.com, pricing, kv-read
 # the admin screen and the platform API: admin-read looks, admin-write changes
 p, group:platform, *, admin-*
 p, group:support, *, admin-read
+# admin-deploy deploys and rolls back, admin-off turns off and on: some apps only
+p, group:marketing, apps:Marketing, admin-deploy
+p, group:support, apps:Marketing, admin-off
 # g, who, group: puts someone in a group
 g, bob@acme.com, group:platform
 ```
@@ -45,8 +48,10 @@ Who: an email, `group:<name>` (from the sign-in, or given with `g`),
 `signed-in` or `anyone`. Where: an app id, `apps:<group>` (the group in
 app.toml) or `*`. What: a grant or a pattern like `kv-*`. The admin
 screen's grants, admin-read and admin-write, go with `*` and by name: a
-pattern like `*` that would also give them is refused. What no line
-allows is denied. The rules
+pattern like `*` that would also give them is refused. admin-deploy and
+admin-off give part of admin-write for the apps their where names, by id
+or group: marketing deploys and rolls back its own apps and can't turn
+off the CRM team's, Freeze or Stop all. What no line allows is denied. The rules
 are [casbin](https://casbin.org)'s, with a model built into the shell.
 
 A host call the policy denies ends the request and drops its writes. A
@@ -63,7 +68,12 @@ with admin-read look, those with admin-write also change (with admin-read
 alone the controls show and don't act, and the header says "Look only");
 anyone else is sent to sign in or gets "Not allowed". The platform API
 asks the same of a token: admin-read for a GET, admin-write for a deploy
-or another change. It shows who is signed in, logs each change with
+or another change. For one app it also takes admin-deploy (`appos
+deploy`, `appos rollback`, `appos versions`) or admin-off (`appos off`,
+`appos on`) for that app or its group. A deploy needs it for the group in
+app.toml and for the group the app has on the platform, so no one moves
+another team's app into their own group. Kits need admin-write. Anyone
+with an admin- grant, for any app, makes a token at /admin/token. It shows who is signed in, logs each change with
 their email ("Admin screen, ann@acme.com"), and lists the policy under
 Policy, as sentences by who, with a file that was refused and why. With
 `--platform-addr`, sign-in for the admin screen runs on that address: an
@@ -145,9 +155,26 @@ in a file it keeps; apps can't change it:
 # risk.toml, used with: appos-shell --risk risk.toml
 kv-read = 1
 kv-write = 2
+user-read = 1
+# grants together: knows who the user is, and keeps data
+"kv-write+user-read" = 4
 ```
 
-An app is as risky as its riskiest grant; a grant without a level leaves
-the app unrated. The admin screen shows each app's risk, `appos hosts` the
-grants'. What a level means, such as who may use grants above 5, is up to
-the company.
+A combination of grants counts when an app holds all of them:
+`"crm-read+fetch-post" = 9` says reading the CRM is fine and sending to
+the internet is fine, but an app that can do both can leak the CRM.
+
+An app scores 0 to 100 from its grants and combinations together. Each
+level is a chance of harm, and the score is the chance that at least one
+grant does harm:
+
+```
+score = 100 × √(1 − (1 − (l₁/10)²) × (1 − (l₂/10)²) × …)
+```
+
+One grant scores its level × 10. Low levels add up to little, high ones
+to more: three grants at 1 score 17, less than one at 3 (30); three at 9
+score 99, more than one at 9 (90). Low is 0–39, Medium 40–69, High 70–89,
+Critical 90–100. A grant without a level leaves the app unrated. The admin
+screen shows each app's score, `appos hosts` the grants' levels. What a
+score means, such as who may deploy apps above 50, is up to the company.

@@ -14,23 +14,27 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 
 use serde_json::{Map, Value, json};
 
-use crate::bundle::Bundle;
+use crate::bundle::{Bundle, Checked};
 use crate::kit::{KV_READ, KV_WRITE};
 use crate::manifest::Manifest;
-use crate::runtime::{self, ALLOWED_WASI, ALWAYS, FRAMEWORK, FUEL, IO_BUDGET, MEMORY, READ, Request, Route, WRITE};
+use crate::runtime::{self, ALLOWED_WASI, ALWAYS, FRAMEWORK, FUEL, IO_BUDGET, LoadedApp, MEMORY, READ, Request, Route, WRITE};
 use crate::shell::Shell;
 use crate::terminal_errorln as eprintln;
+use crate::terminal_println as println;
 use crate::tx::{self, MAX_SCAN};
 
 /// The oldest appfuzz that reads what this writes: `[entry] examples`,
 /// `req.` paths, `clock.rfc3339` and the `json` label came in 0.8.0,
-/// `[[entry.rules]]` in 0.8.1.
-pub const MIN_APPFUZZ: (u32, u32, u32) = (0, 8, 1);
+/// `[[entry.rules]]` in 0.8.1, `[entry.response]`, `$` label paths and
+/// several labels per parameter in 0.9.0.
+pub const MIN_APPFUZZ: (u32, u32, u32) = (0, 9, 0);
 
 /// Where `appos dev` serves, for the requests made up here.
 const ORIGIN: &str = "http://127.0.0.1:8080";
@@ -70,8 +74,71 @@ pub(crate) fn keep(shell: &Shell, app: &str, handler: &str, req: &Request) {
 pub async fn prepare(dir: &Path, data: &Path, wasm: &str) -> anyhow::Result<Review> {
     let path = dir.to_path_buf();
     let checked = tokio::task::spawn_blocking(move || Bundle::from_dir(&path)?.checked()).await??;
+    of(&checked, data, wasm).await
+}
+
+/// How long the review of a deploy may run.
+const REVIEW_TIME: Duration = Duration::from_secs(30 * 60);
+
+/// Reviews an app deploy that waits for it (`--review`), one at a time,
+/// and makes it live or refuses it. `command` runs in review/ next to the
+/// stored version, with the .wasm the shell stored, so what passes is
+/// what goes live; review.log there keeps what it printed. It gets no
+/// data: the shell's kv is people's.
+pub(crate) async fn gate(shell: Arc<Shell>, app: Arc<LoadedApp>, checked: Checked, command: String) {
+    let _one_at_a_time = shell.reviews.acquire().await;
+    let (id, label) = (app.manifest.app.id.clone(), app.label.clone());
+    let outcome = run(&shell, &checked, &command).await.unwrap_or_else(|e| Err(format!("the review could not run: {e:#}")));
+    let failed = outcome.as_ref().err().cloned();
+    match (shell.state.reviewed(app, outcome).await, failed) {
+        (Ok(true), _) => println!("deployed {id} {label}: it passed the review"),
+        (Ok(false), Some(why)) => println!("refused {id} {label}: {why}"),
+        (Ok(false), None) => println!("held {id} {label}: it passed the review"),
+        (Err(e), _) => eprintln!("[{id}] the review of {label} ended, but: {e:#}"),
+    }
+}
+
+/// Writes what the review needs and runs `command` on it: Ok(Err(why))
+/// when it doesn't pass.
+async fn run(shell: &Shell, checked: &Checked, command: &str) -> anyhow::Result<Result<(), String>> {
+    let id = &checked.manifest.app.id;
+    let dir = crate::deploy::version_dir(&shell.data, id, &checked.label)?.join("review");
+    tokio::fs::create_dir_all(&dir).await?;
+    let wasm = format!("{id}.wasm");
+    tokio::fs::write(dir.join(&wasm), &checked.bundle.wasm).await?;
+    let r = of(checked, &dir, &wasm).await?;
+    tokio::fs::write(dir.join("appfuzz.toml"), &r.manifest).await?;
+    tokio::fs::write(dir.join("plan.json"), &r.plan).await?;
+    let log = std::fs::File::create(dir.join("review.log"))?;
+    // A program and its arguments, no shell: on timeout it is killed.
+    let mut words = command.split_whitespace();
+    let program = words.next().context("--review names no command")?;
+    let mut child = tokio::process::Command::new(program)
+        .args(words)
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("could not start {program}"))?;
+    let status = match tokio::time::timeout(REVIEW_TIME, child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => return Ok(Err(format!("the review ran longer than {} minutes", REVIEW_TIME.as_secs() / 60))),
+    };
+    if status.success() {
+        return Ok(Ok(()));
+    }
+    let printed = tokio::fs::read_to_string(dir.join("review.log")).await.unwrap_or_default();
+    let mut last: Vec<&str> = printed.lines().rev().filter(|l| !l.trim().is_empty()).take(5).collect();
+    last.reverse();
+    Ok(Err(format!("the review failed ({status}); review.log ends:\n{}", last.join("\n"))))
+}
+
+/// The review of a checked app, as `prepare`.
+async fn of(checked: &Checked, data: &Path, wasm: &str) -> anyhow::Result<Review> {
     // init can't use kv; the routes are all this load is for.
-    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &crate::kit::Kits::builtin(), &checked, data).await?;
+    let app = runtime::load(&runtime::engine()?, tx::in_memory(), &crate::kit::Kits::builtin(), checked, data).await?;
     let m = &app.manifest;
     let (entries, kept) = match data.join("appos.db") {
         db if db.is_file() => {
@@ -190,20 +257,35 @@ fn manifest(m: &Manifest, wasm: &str, requests: &[Value], now: &str, handlers: &
     writeln!(t, "[limits]\nfuel = {FUEL}\nmemory = \"{}MiB\"", MEMORY / (1024 * 1024))?;
     writeln!(t, "cost_per_request = {IO_BUDGET}\ndefault_cost = 0")?;
 
+    // The page the app builds is the response, as the shell sends it.
+    let page = |call: &str| format!("\"{FRAMEWORK}page#{call}\"");
+    writeln!(t, "\n[entry.response]\nbody = {{ call = {}, arg = \"html\" }}", page("set-html"))?;
+    writeln!(t, "\"headers.location\" = {{ call = {}, arg = \"path\" }}", page("redirect"))?;
+    writeln!(t, "status = [{{ value = 200 }}, {{ call = {}, arg = \"code\" }}, {{ call = {}, value = 303 }}]", page("set-status"), page("redirect"))?;
+
     let function = |t: &mut String, name: &str, body: &str| writeln!(t, "\n[functions.\"{FRAMEWORK}{name}\"]\n{body}");
-    // The SDK stores JSON (set_json, get_json). A scan's values stay
-    // unlabelled: a label can't name one element of its (key, value) pairs.
+    // The SDK stores JSON (set_json, get_json). An app whose [[data]] says
+    // it keeps personal data in kv reads records of it and may store them
+    // again, but not log them or hand them to anything else (pii_leak).
+    let pii = m.data.iter().any(|d| d.place.trim().eq_ignore_ascii_case("kv"));
     if read {
-        function(&mut t, "kv#get", &format!("cost = {READ}\neffect = \"read\"\nresult = \"json\""))?;
-        function(&mut t, "kv#scan", &format!("cost = {READ}\neffect = \"read\""))?;
+        let (get, scan) = match pii {
+            true => (r#"{ "" = "json", "$.*" = "pii" }"#, r#"{ "*" = "json", "*.$.*" = "pii" }"#),
+            false => (r#""json""#, r#"{ "*" = "json" }"#),
+        };
+        function(&mut t, "kv#get", &format!("cost = {READ}\neffect = \"read\"\nresult = {get}"))?;
+        function(&mut t, "kv#scan", &format!("cost = {READ}\neffect = \"read\"\nresult = {scan}"))?;
     }
     if write {
-        function(&mut t, "kv#set", &format!("cost = {WRITE}\neffect = \"write\"\nparams = {{ value = \"json\" }}"))?;
+        let value = if pii { r#"["json", "pii"]"# } else { r#""json""# };
+        function(&mut t, "kv#set", &format!("cost = {WRITE}\neffect = \"write\"\nparams = {{ value = {value} }}"))?;
         function(&mut t, "kv#delete", &format!("cost = {WRITE}\neffect = \"delete\""))?;
     }
     // The shell puts both into the page as they are.
     function(&mut t, "page#set-html", "params = { html = \"html\" }")?;
-    function(&mut t, "page#add-header", "params = { html = \"html\" }")?;
+    // The head is the page too: a <title> may name the visitor.
+    let head = if pii { r#"params = { html = ["html", "pii"] }"# } else { r#"params = { html = "html" }"# };
+    function(&mut t, "page#add-header", head)?;
     Ok(t)
 }
 
@@ -279,8 +361,28 @@ mod tests {
         assert_eq!(f["appos:framework/kv#set"]["params"]["value"].as_str(), Some("json"));
         assert_eq!(f["appos:framework/kv#delete"]["effect"].as_str(), Some("delete"));
         assert_eq!(f["appos:framework/page#set-html"]["params"]["html"].as_str(), Some("html"));
+        assert_eq!(f["appos:framework/kv#scan"]["result"]["*"].as_str(), Some("json"));
+        let response = &t["entry"]["response"];
+        assert_eq!(response["body"]["call"].as_str(), Some("appos:framework/page#set-html"));
+        assert_eq!(response["headers.location"]["arg"].as_str(), Some("path"));
+        assert_eq!(response["status"][2]["value"].as_integer(), Some(303));
         let wasi: Vec<&str> = t["grants"]["wasi"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
         assert_eq!(wasi, ["wasi:io", "wasi:clocks", "wasi:random", "wasi:cli"]);
+    }
+
+    /// [[data]] in kv: what kv holds is personal data, and appfuzz checks
+    /// it goes nowhere but kv and the page.
+    #[test]
+    fn personal_data_in_kv_is_labelled_pii() {
+        let text = "[app]\nid = 'events'\nname = 'Events'\nversion = '1.0'\n[capabilities]\ngrant = ['kv-read', 'kv-write']\n";
+        let keeps = Manifest::parse(&format!("{text}[[data]]\nwhat = 'Emails'\nwhere = 'kv'\nwhy = 'Send the link'\n")).unwrap();
+        let f = &written(&keeps, &["GET /"])["functions"];
+        assert_eq!(f["appos:framework/kv#get"]["result"]["$.*"].as_str(), Some("pii"));
+        assert_eq!(f["appos:framework/kv#get"]["result"][""].as_str(), Some("json"));
+        assert_eq!(f["appos:framework/kv#scan"]["result"]["*.$.*"].as_str(), Some("pii"));
+        let value: Vec<&str> = f["appos:framework/kv#set"]["params"]["value"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(value, ["json", "pii"]);
+        assert_eq!(f["appos:framework/page#add-header"]["params"]["html"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]

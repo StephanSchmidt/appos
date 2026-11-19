@@ -51,7 +51,7 @@ use axum::response::sse::{self, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt};
 
 use crate::auth::Who;
-use crate::kit::{ADMIN_READ, ADMIN_WRITE, Context, Grant, Kit, KitLinker, KitRequest, KitRoute, Reply, Respond};
+use crate::kit::{ADMIN_DEPLOY, ADMIN_OFF, ADMIN_READ, ADMIN_WRITE, Context, Grant, Kit, KitLinker, KitRequest, KitRoute, Reply, Respond};
 use crate::platform::{Newest, now_ms};
 use crate::shell::Shell;
 use crate::web::{HTMX, escape};
@@ -74,6 +74,8 @@ impl Kit for AdminKit {
         vec![
             Grant::new(ADMIN_READ, "Look at the admin screen and read the platform API: apps, the log, messages, the policy", &[], 0),
             Grant::new(ADMIN_WRITE, "Change apps and the platform: deploy, make a version live, turn apps off and on, limits, Freeze, Stop all, Undo", &[], 0),
+            Grant::new(ADMIN_DEPLOY, "Deploy and roll back the apps the policy names, with the platform API (appos deploy, appos rollback)", &[], 0),
+            Grant::new(ADMIN_OFF, "Turn the apps the policy names off and on, with the platform API (appos off, appos on)", &[], 0),
         ]
     }
 
@@ -89,9 +91,10 @@ impl Kit for AdminKit {
             route("GET", "/admin/policy", look, policy::policy_page),
             route("GET", "/admin/messages", look, messages::messages_page),
             route("POST", "/admin/messages/:id/retry", change, messages::retry),
-            route("GET", "/admin/token", look, token::token_page),
+            // admin-deploy or admin-off for some apps is enough for a token.
+            route("GET", "/admin/token", "admin-*", token::token_page),
             // A token acts as its maker, with what policy.csv gives them.
-            route("POST", "/admin/token", look, token::make),
+            route("POST", "/admin/token", "admin-*", token::make),
             route("GET", "/admin/apps/:id", look, app::app_page),
             route("POST", "/admin/apps/:id/rollback", change, actions::make_live),
             route("POST", "/admin/apps/:id/off", change, actions::turn_off),

@@ -1,4 +1,7 @@
 # How much harm each grant can do, from 0 (none) to 10. The company running
 # the shell decides, not the apps: appos-shell --risk risk.toml
+# An app scores 0 to 100 from its grants together (docs/access.md).
 kv-read = 1
 kv-write = 2
+# Grants together can be rated higher than each alone, like
+# "crm-read+fetch-post" = 9: an app that can do both can leak the CRM.

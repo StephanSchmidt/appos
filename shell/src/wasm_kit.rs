@@ -177,7 +177,13 @@ pub(crate) fn manifest(text: &str) -> anyhow::Result<Manifest> {
     }
     let About { id, name, version, owner, group, wasm, wit, commands, fake } = toml.kit;
     let offers = Offers { grants, commands, wit, fake, hosts, config: toml.config, config_env: toml.config_env };
-    Ok(Manifest { app: AppInfo { id, name, version, owner, group, wasm }, capabilities: toml.capabilities, limits: toml.limits, kit: Some(offers) })
+    Ok(Manifest {
+        app: AppInfo { id, name, version, owner, group, wasm },
+        capabilities: toml.capabilities,
+        limits: toml.limits,
+        data: vec![],
+        kit: Some(offers),
+    })
 }
 
 /// A version of a Wasm kit, loaded (runtime::load): compiled, linked to
@@ -1184,13 +1190,16 @@ mod tests {
         kit_zip(CRM_KIT, wat, ("crm.wit", CRM_WIT))
     }
 
-    /// The app "test", holding `grants`.
+    /// The app "test", holding `grants`, which hands the kit leads.
     fn app_zip(grants: &str, wat: &[u8]) -> Vec<u8> {
-        let manifest = format!("[app]\nid = 'test'\nname = 'Test'\nversion = '1'\nowner = 'Tests'\ngroup = 'Tests'\n[capabilities]\ngrant = [{grants}]\n");
+        let manifest = format!(
+            "[app]\nid = 'test'\nname = 'Test'\nversion = '1'\nowner = 'Tests'\ngroup = 'Tests'\n[capabilities]\ngrant = [{grants}]\n\
+             [[data]]\nwhat = 'Leads'\nwhere = 'crm kit'\nwhy = 'Sales follows up'\n"
+        );
         Bundle { manifest, wasm: wat.to_vec(), icon: None, deps: None, kit: None }.pack().unwrap()
     }
 
-    async fn deploy(shell: &crate::shell::Shell, zip: &[u8]) -> Result<(), String> {
+    async fn deploy(shell: &Arc<crate::shell::Shell>, zip: &[u8]) -> Result<(), String> {
         crate::deploy::deploy(shell, zip, crate::platform::Actor::Cli).await.map(|_| ()).map_err(|e| format!("{e:#}"))
     }
 

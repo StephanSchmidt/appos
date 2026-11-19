@@ -29,7 +29,7 @@ use serde::Serialize;
 use crate::api;
 use crate::auth::Who;
 use crate::deploy::Ask;
-use crate::kit::{ADMIN_READ, ADMIN_WRITE, About, Context, Grant, KitRequest, KitRoute};
+use crate::kit::{ADMIN_DEPLOY, ADMIN_OFF, ADMIN_READ, ADMIN_WRITE, About, Context, Grant, KitRequest, KitRoute};
 use crate::log_filter;
 use crate::platform::{Actor, Kind, Outcome, Usage, now_ms};
 use crate::runtime::{self, LoadedApp, QUEUE_WAIT};
@@ -312,6 +312,7 @@ pub fn platform_router(shell: Arc<Shell>, own: Option<&str>) -> Router {
         .route("/_platform/deploy", post(deploy).layer(DefaultBodyLimit::max(crate::bundle::MAX)))
         .route("/_platform/apps/{id}/versions", get(versions))
         .route("/_platform/packages", get(packages))
+        .route("/_platform/data", get(data))
         .route("/_platform/apps/{id}/news", get(news))
         .route("/_platform/log", get(log))
         .route("/_platform/apps/{id}/rollback", post(rollback))
@@ -346,7 +347,9 @@ pub fn platform_router(shell: Arc<Shell>, own: Option<&str>) -> Router {
 /// The platform API takes a token from `appos login` (auth/tokens.rs) as
 /// `Authorization: Bearer`, of someone the policy makes an admin, checked
 /// at every call; a browser's cookie doesn't count. Without a policy
-/// (`--no-auth`) it is open. Spec, install and logout need none.
+/// (`--no-auth`) it is open. Spec, install and logout need none. The calls
+/// on one app (`per_app`) also take admin-deploy or admin-off for it,
+/// which they check themselves; `me` takes any token.
 async fn api_only(State(shell): S, mut req: Request, next: axum::middleware::Next) -> Response {
     let Some(policies) = &shell.policy else { return next.run(req).await };
     let login = format!("appos login {}", platform_url(req.headers()));
@@ -368,12 +371,24 @@ async fn api_only(State(shell): S, mut req: Request, next: axum::middleware::Nex
     let who = Who::signed_in(identity);
     // Looking needs admin-read; a deploy or another change, admin-write.
     let grant = if matches!(*req.method(), Method::GET | Method::HEAD) { ADMIN_READ } else { ADMIN_WRITE };
-    if !policies.current().may(&who, grant) {
+    if !policies.current().may(&who, grant) && !per_app(req.uri().path()) {
         let email = who.person().unwrap_or_default();
         return refuse(StatusCode::FORBIDDEN, format!("{email} may not use the platform API for this: it needs {grant}, which policy.csv doesn't give them"));
     }
     req.extensions_mut().insert(who);
     next.run(req).await
+}
+
+/// The platform API's calls on one app, and `me`, which check the policy
+/// themselves (access::may_change, may_look, may_deploy).
+fn per_app(path: &str) -> bool {
+    matches!(path, "/_platform/me" | "/_platform/deploy") || path.starts_with("/_platform/apps/")
+}
+
+/// A refusal of the platform API: 403 for what the policy doesn't allow.
+fn refused(e: &anyhow::Error) -> Response {
+    let status = if e.is::<crate::access::Forbidden>() { StatusCode::FORBIDDEN } else { StatusCode::UNPROCESSABLE_ENTITY };
+    (status, format!("{e:#}")).into_response()
 }
 
 /// `appos login`: whom the token signs in.
@@ -474,7 +489,7 @@ async fn platform_headers(resp: Response) -> Response {
 /// and makes it live (see deploy.rs). An app the shell refuses gets 422 and
 /// why.
 async fn deploy(State(shell): S, who: Who, headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    match crate::deploy::deploy_as(&shell, &body, Actor::Cli, who.person()).await {
+    match crate::deploy::deploy_as(&shell, &body, Actor::Cli, Some(&who)).await {
         Ok(crate::deploy::Deployed { app, held }) => {
             let m = &app.manifest.app;
             let status = match &held {
@@ -487,7 +502,11 @@ async fn deploy(State(shell): S, who: Who, headers: HeaderMap, body: axum::body:
                     StatusCode::ACCEPTED
                 }
             };
-            let admin = held.is_some().then(|| format!("{}/admin/apps/{}?page=versions#console", platform_url(&headers), m.id));
+            // A review ends on its own; anything else waits for an admin.
+            let admin = held
+                .as_deref()
+                .filter(|h| *h != crate::state::REVIEWING)
+                .map(|_| format!("{}/admin/apps/{}?page=versions#console", platform_url(&headers), m.id));
             let body = api::Deployed {
                 id: m.id.clone(),
                 name: m.name.clone(),
@@ -501,13 +520,16 @@ async fn deploy(State(shell): S, who: Who, headers: HeaderMap, body: axum::body:
         }
         Err(e) => {
             eprintln!("refused deploy: {e:#}");
-            (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response()
+            refused(&e)
         }
     }
 }
 
 /// `appos versions`: an app's versions, newest first.
-async fn versions(State(shell): S, Path(id): Path<String>) -> Response {
+async fn versions(State(shell): S, who: Who, Path(id): Path<String>) -> Response {
+    if let Err(e) = crate::access::may_look(&shell, &who, &id).await {
+        return refused(&e);
+    }
     let app_id = id.clone();
     match shell.platform.run(move |db| db.versions(&app_id, 50)).await {
         Ok(v) if v.is_empty() => (StatusCode::NOT_FOUND, format!("{id} was never deployed here")).into_response(),
@@ -533,6 +555,29 @@ async fn packages(State(shell): S) -> Response {
     }))
 }
 
+/// What data each running app keeps, where and why.
+async fn data(State(shell): S) -> Response {
+    let apps = shell.state.apps();
+    let text = |t: &Option<String>| t.as_deref().unwrap_or("").trim().to_string();
+    let data: Vec<api::AppData> = apps
+        .values()
+        .filter(|a| !a.is_kit())
+        .map(|a| {
+            let m = &a.manifest;
+            api::AppData {
+                id: m.app.id.clone(),
+                name: m.app.name.clone(),
+                label: a.label.clone(),
+                owner: text(&m.app.owner),
+                group: text(&m.app.group),
+                keeping: m.keeping().into_iter().map(str::to_string).collect(),
+                data: m.data.clone(),
+            }
+        })
+        .collect();
+    json(Ok(data))
+}
+
 /// What a builder hears about: the platform or an admin acting on their app.
 const NEWS: [Kind; 6] = [Kind::AutoRolledBack, Kind::RolledBack, Kind::Deployed, Kind::Refused, Kind::TurnedOff, Kind::TurnedOn];
 /// Without an earlier look, the news of this long.
@@ -550,7 +595,10 @@ struct Since {
 /// builder last looked (rollbacks, refusals, versions an admin made live,
 /// turned off or on), whether its deploys wait for an admin and whether it
 /// is off. `now` is the next `since`.
-async fn news(State(shell): S, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<Since>) -> Response {
+async fn news(State(shell): S, who: Who, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<Since>) -> Response {
+    if let Err(e) = crate::access::may_look(&shell, &who, &id).await {
+        return refused(&e);
+    }
     let now = now_ms();
     let since = match q.since {
         None => now - FIRST_LOOK_MS,
@@ -660,6 +708,9 @@ async fn turn_on(State(shell): S, who: Who, Path(id): Path<String>, axum::Json(r
 }
 
 async fn turn(shell: &Shell, who: &Who, id: &str, on: bool, req: api::SwitchRequest) -> Response {
+    if let Err(e) = crate::access::may_change(shell, who, ADMIN_OFF, id).await {
+        return refused(&e);
+    }
     let reason = req.reason.as_deref().and_then(crate::deploy::reason);
     match shell.state.turn(id, on, Actor::Cli, who.person(), reason).await {
         Ok(_) => {
@@ -672,6 +723,9 @@ async fn turn(shell: &Shell, who: &Who, id: &str, on: bool, req: api::SwitchRequ
 
 /// `appos rollback`: makes an earlier version live again.
 async fn rollback(State(shell): S, who: Who, Path(id): Path<String>, axum::Json(req): axum::Json<api::RollbackRequest>) -> Response {
+    if let Err(e) = crate::access::may_change(&shell, &who, ADMIN_DEPLOY, &id).await {
+        return refused(&e);
+    }
     let reason = req.reason.as_deref().and_then(crate::deploy::reason);
     match crate::deploy::rollback(&shell, &id, req.label.as_deref(), Ask::Cli { reason, person: who.person() }).await {
         Ok((v, _)) => {
@@ -1062,11 +1116,15 @@ async fn kit_page(
     let may: Vec<String> = match &shell.policy {
         None => held,
         Some(policies) => {
-            let access = policies.current().access(who, &name, "", &held);
-            held.into_iter().enumerate().filter(|(bit, _)| access.allows(*bit as u32)).map(|(_, g)| g).collect()
+            let p = policies.current();
+            let access = p.access(who, &name, "", &held);
+            // admin-deploy and admin-off name apps, not the admin screen:
+            // held for any app, they count on its pages (the token page).
+            let per_app = |g: &String| route.on_platform() && crate::access::PER_APP.contains(&g.as_str()) && p.may_somewhere(who, g);
+            held.into_iter().enumerate().filter(|(bit, g)| access.allows(*bit as u32) || per_app(g)).map(|(_, g)| g).collect()
         }
     };
-    if !may.iter().any(|g| g == route.grant()) {
+    if !may.iter().any(|g| route.takes(g)) {
         let whom = if who.identity().is_some() { "signed in" } else { "not signed in" };
         println!("[{name}] {}: denied {} ({whom})", route.pattern(), route.grant());
         if route.on_platform() && (who.identity().is_some() || shell.auth.is_none()) {
@@ -1262,6 +1320,27 @@ mod tests {
         let live: Vec<crate::api::LivePackages> = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
         let seen: Vec<_> = live.iter().map(|a| (a.id.as_str(), a.version.as_str(), a.packages.clone())).collect();
         assert_eq!(seen, [("other", "1", None), ("test", "2", Some(vec!["pkg:cargo/serde@1.0.228".into(), "pkg:cargo/time@0.3.47".into()]))]);
+    }
+
+    #[tokio::test]
+    async fn the_platform_tells_what_data_each_app_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = crate::testing::shell(dir.path().to_path_buf());
+        let keeping = |data: &str| crate::bundle::Bundle {
+            manifest: format!("{}[capabilities]\ngrant = ['kv-read', 'kv-write']\n{data}", crate::testing::bundle("1", None).manifest),
+            ..crate::testing::bundle("1", None)
+        };
+        let Err(refused) = crate::deploy::deploy(&shell, &keeping("").pack().unwrap(), Actor::Cli).await else { panic!("deployed without [[data]]") };
+        assert!(format!("{refused:#}").contains("needs a [[data]] entry: its grants (kv-write) let it keep data"), "{refused:#}");
+        let entry = "[[data]]\nwhat = 'Email address of each sign-up'\nwhere = 'kv'\nwhy = 'Send the link'\n";
+        crate::deploy::deploy(&shell, &keeping(entry).pack().unwrap(), Actor::Cli).await.unwrap();
+        let response = platform_router(shell, None).oneshot(Request::builder().uri("/_platform/data").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let apps: Vec<crate::api::AppData> = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        let test = apps.iter().find(|a| a.id == "test").unwrap();
+        assert_eq!(test.keeping, ["kv-write"]);
+        let data: Vec<_> = test.data.iter().map(|d| (d.what.as_str(), d.place.as_str(), d.why.as_str())).collect();
+        assert_eq!(data, [("Email address of each sign-up", "kv", "Send the link")]);
     }
 
     #[tokio::test]

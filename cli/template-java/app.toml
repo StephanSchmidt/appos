@@ -8,3 +8,8 @@ wasm = "target/hello.wasm"
 
 [capabilities]
 grant = ["kv-read", "kv-write"]
+
+[[data]]
+what = ""
+where = "kv"
+why = ""

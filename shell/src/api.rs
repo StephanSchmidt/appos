@@ -98,6 +98,7 @@ pub struct LogEvent {
     pub actor: Actor,
     pub message: String,
     pub reason: Option<String>,
+    /// The app's risk score then, 0 to 100.
     pub risk: Option<u8>,
     pub recovery_ms: Option<i64>,
     /// On the admin screen: the email of who was signed in.
@@ -174,6 +175,24 @@ pub struct LivePackages {
     /// Package URLs like pkg:cargo/serde@1.0.228. None: the app has no
     /// deps.json (not a Rust app, or packed by an older appos).
     pub packages: Option<Vec<String>>,
+}
+
+/// `GET /_platform/data`: what data each running app keeps, where and
+/// why, from the `[[data]]` in its app.toml.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppData {
+    pub id: String,
+    pub name: String,
+    /// The running version, like "0.3.0-3f2a9c1d0e4b5867a8b9c0d1e2f30415".
+    pub label: String,
+    pub owner: String,
+    pub group: String,
+    /// Its grants that let it keep data: kv-write and the kits'.
+    pub keeping: Vec<String>,
+    /// Empty when it keeps nothing, or (while `keeping` isn't) its
+    /// app.toml doesn't say: an app from the shell's folders, or
+    /// deployed before deploys needed it.
+    pub data: Vec<crate::manifest::Data>,
 }
 
 /// `GET /_platform/spec`: what this platform offers.

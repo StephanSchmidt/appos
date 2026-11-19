@@ -10,9 +10,9 @@ Its screen shows what needs you, one app at a time (Seen clears it until
 something new happens), every app with its group and its last 16 minutes
 (or hours, days), needs-you first and turned-off apps in red, an app's
 story, one minute's requests, its versions and a map by group; Find, in its
-first line, narrows it by name, owner or group. On the left you browse:
-the App knob (a light per app, A to Z; click one for that app), Group (one
-group's apps) and Range. On the right are what to do with the app (its
+first line, narrows it by name, owner, group or the data an app keeps. On
+the left you browse: the App knob (a light per app, A to Z; click one for
+that app), Group (one group's apps) and Range. On the right are what to do with the app (its
 story, requests, versions), its on/off slide (a green LED while visitors
 get it, red once turned off) and three faders for its limits per request:
 memory, time and fuel (instructions). Bottom right is the platform: a power
@@ -24,8 +24,9 @@ undone from its toast for ten minutes.
 Below the console are the last 30 days in numbers (apps live, deploys,
 what the platform stopped, time to recovery), the last hour in charts, one
 app in detail (its icon from `icon.svg`, owner, routes, grants and their
-risk, versions with "Make live", last failures, "Turn off"), the inventory
-of all apps with their groups and owners, and what was refused, rolled
+risk, the data it keeps from app.toml's `[[data]]`, versions with "Make
+live", last failures, "Turn off"), the inventory of all apps with their
+groups and owners, and what was refused, rolled
 back or turned off. The page updates within a second of a deploy, rollback
 or turn-off, and every few seconds while requests come in. The log at
 `/admin/log` lists every event, newest first, filtered by text, app, kind,

@@ -79,8 +79,9 @@ FILES (as appos new creates them)
   app.toml             id, name, version, owner (who to ask about the app,
                        like "Jane Doe <jane@example.com>"), group (the team
                        it belongs to, like "Marketing"; a deploy needs both),
-                       the .wasm path, and the capabilities the app is
-                       granted
+                       the .wasm path, the capabilities the app is granted,
+                       and [[data]]: what data it keeps, where and why
+                       (appos deploy --help)
   Cargo.toml           a normal Rust crate. Add crates that build for
                        wasm32-wasip2 (pure Rust, no networking or files).
                        serde, serde_json, thiserror and uuid are already
@@ -254,6 +255,8 @@ STORAGE
   same state. Keys up to 1 KB, values up to 1 MB.
   Needs grants in app.toml: "kv-read" for get and scan, "kv-write" for set
   and delete. An app that only shows data grants only "kv-read".
+  An app with "kv-write" says what it keeps, where and why in app.toml's
+  [[data]] (appos deploy --help).
   Each request is a transaction. Its writes are applied together when it
   ends, or not at all if it fails; until then only the request itself sees
   them. If another request changed a key this one read with kv::get, this
@@ -527,7 +530,9 @@ Java, compiled with TeaVM (appos guide java).
 
 app.toml gets the owner from git (user.name and user.email) and the group
 from --group: the team the app belongs to, like \"Marketing\". The admin
-screen groups apps by it. A deploy needs both; set them in app.toml.
+screen groups apps by it. A deploy needs both; set them in app.toml. It
+also needs [[data]] filled in: what data the app keeps, where and why
+(appos deploy --help).
 
 If a platform is current (appos platforms), the app is built against that
 platform's contract (wit/); otherwise against the one built into appos, which
@@ -604,9 +609,11 @@ opened in appos dev gets a request made from its pattern (:name becomes
 review reaches every page.
 
 appfuzz keeps its runs there too: appfuzz --human findings there shows
-the findings again. appos review writes its files anew each time.
+the findings again. appos review writes its files anew each time. A
+platform started with appos-shell --review runs a review on every
+deploy itself.
 
-Needs appfuzz 0.8.1 or newer: curl -fsSL https://appfuzz.dev/install.sh | sh
+Needs appfuzz 0.9.0 or newer: curl -fsSL https://appfuzz.dev/install.sh | sh
 ";
 
 const HELP_BUILD: &str = "appos build
@@ -629,7 +636,8 @@ A shell with sign-in takes a token: make one on its admin screen at
 <url>/admin/token, signed in, and paste it when asked, or pipe it in
 (echo \"$TOKEN\" | appos login <url>). It acts as you for 30 days, with
 what the shell's policy gives you: admin-read to look, admin-write to
-deploy and change. A token kept from before
+deploy and change, or admin-deploy and admin-off for some apps only.
+A token kept from before
 is used again while it works.
 ";
 
@@ -670,10 +678,26 @@ the app: owner = \"Jane Doe <jane@example.com>\", and the group it belongs
 to: group = \"Marketing\". The admin screen shows both with every version
 and groups the apps by group.
 
+An app whose grants let it keep data (kv-write, or any kit's grant) must
+say what it keeps, where and why, one [[data]] entry for each kind of data,
+so the people who answer for the company's data (GDPR) can find it:
+
+  [[data]]
+  what = \"Name and email address of each sign-up\"
+  where = \"kv\"
+  why = \"Hold seats and send the webinar link\"
+
+where is \"kv\" or the kit the app hands the data to. When it keeps nothing
+about people, say so in what. Keep the entries true as the app changes: the
+admin screen shows them with the app, and the platform lists them for all
+apps.
+
 Every version is kept. If the live version keeps failing (5 failed
 requests within a minute), the platform rolls back to the version before
 it by itself. After that, deploys are stored but not made live until an
-admin makes a version live on the admin screen; the CLI prints where.
+admin makes a version live on the admin screen; the CLI prints where. A
+platform that reviews deploys (appos-shell --review) makes the version
+live when the review passes; appos versions shows how it went.
 
 Before deploying, it tells what happened to the app since you last looked
 (here or with `appos versions`): rollbacks, refused deploys, versions an
@@ -699,7 +723,8 @@ target/app.zip, or the file given; in a kit's directory, target/kit.zip.
 deploying later or from somewhere else.
 
 The same app gives the same bytes, so the zip of a commit can be compared.
-app.toml must name an owner and a group, as for a deploy (appos deploy --help).
+app.toml must name an owner and a group and say what data the app keeps,
+as for a deploy (appos deploy --help).
 ";
 
 const HELP_VERSIONS: &str = "appos versions
@@ -712,7 +737,8 @@ deployed, with the reason on the next line when there is one.
   retired    was live; `appos rollback <version>` makes it live again
   failed     rolled back automatically: it kept failing
   refused    never ran: the platform said no at deploy, and why
-  waiting    stored after an automatic rollback; an admin makes it live
+  waiting    its review runs, or stored after an automatic rollback or
+             while deploys are frozen: an admin makes it live
 
 A version is the version from app.toml followed by 32 hex digits from a
 hash of all bundle files, including the icon. Every changed bundle is a

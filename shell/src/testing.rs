@@ -30,6 +30,7 @@ pub fn parts(data: PathBuf, risk: Risk) -> Parts {
         risk,
         kits: Default::default(),
         keep_examples: false,
+        review: None,
         auth: None,
         policy: None,
     }
@@ -68,7 +69,8 @@ pub async fn shell_with_token(secret: &str) -> (tempfile::TempDir, Arc<Shell>) {
 /// An app that reads kv on GET / and writes it on POST / (testing-kv.wat).
 pub fn kv_bundle() -> Bundle {
     Bundle {
-        manifest: "[app]\nid = 'test'\nname = 'Test'\nversion = '1'\nowner = 'Tess Tester'\ngroup = 'Tests'\n[capabilities]\ngrant = ['kv-read', 'kv-write']\n"
+        manifest: "[app]\nid = 'test'\nname = 'Test'\nversion = '1'\nowner = 'Tess Tester'\ngroup = 'Tests'\n[capabilities]\ngrant = ['kv-read', 'kv-write']\n\
+                   [[data]]\nwhat = 'Notes'\nwhere = 'kv'\nwhy = 'Tests'\n"
             .into(),
         wasm: include_bytes!("testing-kv.wat").to_vec(),
         icon: None,

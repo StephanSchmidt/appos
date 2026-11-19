@@ -197,10 +197,16 @@ pub fn new(name: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
          It is a working hello world{kind}: change anything in it, or all of it.\n\n  \
          cd {name} && appos dev    run it at http://127.0.0.1:8080/{name}; changes reload\n  \
          appos guide{pad}    routes, the page, htmx, storage, styles, rules\n\n\
-         {code}\n\n{owner}{group}{git}"
+         {code}\n\n{owner}{group}{DATA}{git}"
     );
     Ok(())
 }
+
+/// What `appos new` says about app.toml's [[data]], which only the app's
+/// builder can fill in.
+const DATA: &str = "app.toml doesn't say yet what data the app keeps: fill in what, where and\n\
+                    why under [[data]] before `appos deploy`, one entry for each kind of data\n\
+                    (appos deploy --help).\n\n";
 
 fn write_project(dir: &Path, name: &str, wit: &BTreeMap<String, String>, owner: &str, group: &str, lang: Lang) -> anyhow::Result<()> {
     let files = project_files(name, owner, group, lang)?;

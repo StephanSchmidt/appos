@@ -8,3 +8,8 @@ wasm = "target/wasm32-wasip2/release/discounts.wasm"
 
 [capabilities]
 grant = ["kv-read", "kv-write"]
+
+[[data]]
+what = "Discount requests: the customer, the terms, the justification and who did what, by their sign-in id"
+where = "kv"
+why = "Approve discounts and keep the record of who approved what"

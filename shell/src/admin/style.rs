@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use crate::manifest::{Band, MAX_RISK, Risk};
+use crate::manifest::{Band, MAX_RISK, MAX_SCORE, Risk};
 use crate::platform::Outcome;
 use crate::web::escape;
 
@@ -125,22 +125,21 @@ pub(super) fn risk_label(risk: &Risk, a: &App) -> Option<String> {
     Some(risk_chip(risk.of_app(&r.manifest)))
 }
 
-/// An app's risk level as a badge, or "Unrated".
-pub(super) fn risk_chip(level: Option<u8>) -> String {
-    level_chip(level, ": the level of its riskiest grant", "A grant it uses has no level in the risk file")
+/// An app's risk score as a badge, or "Unrated".
+pub(super) fn risk_chip(score: Option<u8>) -> String {
+    chip(score.map(|s| (s, Band::of(s), MAX_SCORE)), ": its grants together", "A grant it uses has no level in the risk file")
 }
 
 /// A grant's risk level as a badge, or "Unrated".
 pub(super) fn grant_chip(level: Option<u8>) -> String {
-    level_chip(level, "", "No level in the risk file")
+    chip(level.map(|l| (l, Band::of_level(l), MAX_RISK)), "", "No level in the risk file")
 }
 
-fn level_chip(level: Option<u8>, why: &str, unrated: &str) -> String {
-    match level {
-        Some(level) => {
-            let band = Band::of(level);
+fn chip(rated: Option<(u8, Band, u8)>, why: &str, unrated: &str) -> String {
+    match rated {
+        Some((level, band, max)) => {
             format!(
-                r#"<span class="risk risk-{}" title="Risk {level} of {MAX_RISK}, {}{why}">{SHIELD}{} {level}</span>"#,
+                r#"<span class="risk risk-{}" title="Risk {level} of {max}, {}{why}">{SHIELD}{} {level}</span>"#,
                 band.name().to_lowercase(),
                 band.name().to_lowercase(),
                 band.name()
@@ -154,7 +153,7 @@ fn level_chip(level: Option<u8>, why: &str, unrated: &str) -> String {
 pub(super) fn grant_label(grant: &str, level: Option<u8>) -> String {
     match level {
         Some(level) => {
-            let band = Band::of(level);
+            let band = Band::of_level(level);
             format!(
                 r#"<span class="grant risk-{}" title="Risk {level} of {MAX_RISK}, {}">{}<b>{level}</b></span>"#,
                 band.name().to_lowercase(),
@@ -166,7 +165,7 @@ pub(super) fn grant_label(grant: &str, level: Option<u8>) -> String {
     }
 }
 
-/// The bands with their levels, as a legend.
+/// The bands with their scores, as a legend.
 pub(super) fn risk_legend() -> String {
     Band::ALL.iter().map(|b| format!(r#"<span class="risk risk-{}">{} {}</span>"#, b.name().to_lowercase(), b.name(), b.levels())).collect()
 }
@@ -479,6 +478,10 @@ tr.reason pre { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient:
 .grants td { white-space: nowrap; }
 .grants td:nth-child(3) { width: 100%; color: var(--muted); }
 .grants tr.sets td { background: var(--accent-2); }
+/* What an app keeps reads as sentences: it wraps. */
+.data { min-width: 560px; }
+.data td { vertical-align: top; }
+.data td:nth-child(2) { white-space: nowrap; }
 .uses { min-width: 560px; }
 .uses td { white-space: nowrap; }
 .uses td:nth-child(3) { width: 100%; }

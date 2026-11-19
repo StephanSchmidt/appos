@@ -8,3 +8,8 @@ wasm = "target/status-ts.wasm"
 
 [capabilities]
 grant = ["kv-read", "kv-write"]
+
+[[data]]
+what = "Incidents, maintenance and status changes; nothing about people"
+where = "kv"
+why = "Show the status page and its history"

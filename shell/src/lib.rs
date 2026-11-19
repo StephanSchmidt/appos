@@ -70,6 +70,9 @@ pub struct Options {
     /// Keep each route's last request that worked, as the example
     /// `appos review` starts from (review.rs). `appos dev` does.
     pub keep_examples: bool,
+    /// A command that reviews each app deploy before it goes live, like
+    /// "appfuzz review --plan plan.json" (review.rs, `gate`).
+    pub review: Option<String>,
     /// auth.toml: how people sign in; it goes with `policy`. Without
     /// either (and without `no_auth`), the token sign-in: a link printed at
     /// start signs in as an admin who may do everything (auth/token.rs).
@@ -175,6 +178,7 @@ impl Options {
             reload: Some(reload),
             risk: Default::default(),
             keep_examples: true,
+            review: None,
             auth: None,
             policy: None,
             no_auth: true,
@@ -241,6 +245,11 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
     // No platform.db yet: the first start, with no last one to compare with.
     let first = !opts.data.join("platform.db").exists();
     let platform = platform::PlatformDb::open(&opts.data.join("platform.db"))?;
+    match platform.reviews_cut_short(state::REVIEWING) {
+        Ok(0) => {}
+        Ok(n) => println!("{n} deploys waited for their review when the shell stopped: refused, deploy them again"),
+        Err(e) => eprintln!("could not end the reviews cut short: {e:#}"),
+    }
     match platform.risk_levels(opts.risk.levels()) {
         Ok(0) => {}
         Ok(_) if first => {}
@@ -282,6 +291,7 @@ async fn serve_with(mut opts: Options, kits: kit::Kits) -> anyhow::Result<()> {
         risk: opts.risk.clone(),
         kits: kits.clone(),
         keep_examples: opts.keep_examples,
+        review: opts.review.clone(),
         auth,
         policy,
     })?;
@@ -383,6 +393,7 @@ mod check_auth_tests {
             reload: None,
             risk: Default::default(),
             keep_examples: false,
+            review: None,
             auth: auth.then(|| "auth.toml".into()),
             policy: policy.then(|| "policy.csv".into()),
             no_auth,
@@ -411,6 +422,7 @@ mod check_auth_tests {
             reload: None,
             risk: Default::default(),
             keep_examples: false,
+            review: None,
             auth: None,
             policy: None,
             no_auth: false,

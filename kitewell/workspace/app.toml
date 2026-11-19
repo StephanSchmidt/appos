@@ -8,3 +8,13 @@ wasm = "target/workspace.wasm"
 
 [capabilities]
 grant = ["booking-read", "booking-configure", "booking-setup", "kv-read", "kv-write"]
+
+[[data]]
+what = "Name and email address of each team member the customer adds"
+where = "booking kit"
+why = "Set up the customer's workspace"
+
+[[data]]
+what = "Add-ons and template a customer picks, and which bookings are configured; nothing about people"
+where = "booking kit and kv"
+why = "Configure the workspace"

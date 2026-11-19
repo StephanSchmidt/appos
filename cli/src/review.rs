@@ -62,6 +62,6 @@ mod tests {
     fn it_says_how_to_run_appfuzz_and_where() {
         let text = next("appos-data/review");
         assert!(text.contains("cd appos-data/review && appfuzz --human review --plan plan.json"), "{text}");
-        assert!(text.contains("appfuzz 0.8.1 or newer") && text.contains("https://appfuzz.dev/install.sh"), "{text}");
+        assert!(text.contains("appfuzz 0.9.0 or newer") && text.contains("https://appfuzz.dev/install.sh"), "{text}");
     }
 }

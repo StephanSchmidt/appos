@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::log_filter::CHANGES;
-use crate::manifest::{Band, MAX_RISK, Risk, SECONDS};
+use crate::manifest::{Band, MAX_SCORE, Risk, SECONDS};
 use crate::platform::{Actor, Event, Kind, Outcome, Request, Version, VersionStatus};
 use crate::runtime::{AdminLimits, Budget, IO_BUDGET, LoadedApp};
 use crate::shell::Shell;
@@ -217,6 +217,12 @@ impl App {
             .map(str::trim)
             .filter(|g| !g.is_empty())
             .or_else(|| live.into_iter().chain(&self.versions).map(|v| v.group.as_str()).find(|g| !g.is_empty()))
+    }
+
+    /// What data it keeps and where, as its running app.toml says, one
+    /// line each: for Find.
+    pub(super) fn data(&self) -> String {
+        self.running.as_ref().map_or(String::new(), |r| r.manifest.data.iter().map(|d| format!("{} {}", d.what, d.place)).collect::<Vec<_>>().join("\n"))
     }
 
     /// Whether it is a Wasm kit: apps call it.
@@ -646,12 +652,12 @@ pub(super) fn name_of<'a>(apps: &'a [App], id: &'a str) -> &'a str {
     apps.iter().find(|a| a.id == id).map_or(id, |a| a.name.as_str())
 }
 
-/// A running app's risk in words, like "low risk (2 of 10)"; none when it
-/// isn't running.
+/// A running app's risk in words, like "low risk (28 of 100)"; none when
+/// it isn't running.
 pub(super) fn risk_of(risk: &Risk, a: &App) -> Option<String> {
     let r = a.running.as_ref()?;
     Some(match risk.of_app(&r.manifest) {
-        Some(level) => format!("{} risk ({level} of {MAX_RISK})", Band::of(level).name().to_lowercase()),
+        Some(score) => format!("{} risk ({score} of {MAX_SCORE})", Band::of(score).name().to_lowercase()),
         None => "risk unrated".to_string(),
     })
 }
@@ -721,8 +727,10 @@ mod tests {
 
     #[test]
     fn levels_fall_into_fixed_bands() {
-        let bands: Vec<Band> = (0..=MAX_RISK).map(Band::of).collect();
+        let bands: Vec<Band> = (0..=crate::manifest::MAX_RISK).map(Band::of_level).collect();
         use Band::*;
         assert_eq!(bands, [Low, Low, Low, Low, Medium, Medium, Medium, High, High, Critical, Critical]);
+        let scores = [0, 39, 40, 69, 70, 89, 90, 100].map(Band::of);
+        assert_eq!(scores, [Low, Low, Medium, Medium, High, High, Critical, Critical]);
     }
 }

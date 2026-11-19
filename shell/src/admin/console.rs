@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use askama::Template;
 
-use crate::manifest::{MAX_RISK, Risk};
+use crate::manifest::{MAX_SCORE, Risk};
 use crate::platform::{Cell, Event, Kind, Outcome, Request, Version, VersionStatus};
 use crate::runtime::{AdminLimits, Budget};
 use crate::shell::Shell;
@@ -509,7 +509,7 @@ impl<'a> Board<'a> {
 
     fn risk(&self, a: &App) -> i32 {
         match &a.running {
-            Some(r) => self.shell.risk.of_app(&r.manifest).map_or(MAX_RISK as i32 + 1, i32::from),
+            Some(r) => self.shell.risk.of_app(&r.manifest).map_or(MAX_SCORE as i32 + 1, i32::from),
             None => -1,
         }
     }
@@ -522,8 +522,9 @@ impl<'a> Board<'a> {
             .iter()
             .filter(|a| self.view.group.as_deref().is_none_or(|g| same_group(&group_of(a), g)))
             .filter(|a| {
-                find.as_ref()
-                    .is_none_or(|f| [&a.name, &a.id, a.owner().unwrap_or(""), a.group().unwrap_or("")].iter().any(|t| t.to_lowercase().contains(f.as_str())))
+                find.as_ref().is_none_or(|f| {
+                    [&a.name, &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), &a.data()].iter().any(|t| t.to_lowercase().contains(f.as_str()))
+                })
             })
             .collect();
         let name = |a: &App| a.name.to_lowercase();
@@ -1725,7 +1726,7 @@ impl Board<'_> {
             href: v.link(Some(&a.id)),
             select: v.path(Some(&a.id)),
             open: v.to(Page::Story).path(Some(&a.id)),
-            find: [a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), kind].map(str::to_lowercase).join("\n"),
+            find: [a.name.as_str(), &a.id, a.owner().unwrap_or(""), a.group().unwrap_or(""), kind, &a.data()].map(str::to_lowercase).join("\n"),
             word,
             tone: ink.class(),
             name_ink: if ink == Ink::Dim { Ink::White } else { ink }.class(),

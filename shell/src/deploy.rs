@@ -22,9 +22,9 @@
 //! turns those back on.
 //!
 //! The platform API takes a token from `appos login`, and admin-read from
-//! the policy to look, admin-write to change (web.rs, `api_only`); with
-//! `--no-auth`, whoever reaches it can
-//! deploy, roll back and turn apps off.
+//! the policy to look, admin-write to change (web.rs, `api_only`), or
+//! admin-deploy and admin-off for some apps only (access.rs); with
+//! `--no-auth`, whoever reaches it can deploy, roll back and turn apps off.
 //!
 //! A Wasm kit is deployed the same way, as kit.zip, and held like an app:
 //! versions, rollback, off and on. At startup the kits load first, each
@@ -49,7 +49,7 @@ pub const FAILURES_BEFORE_ROLLBACK: usize = 5;
 
 /// Where a version is kept. Ids and labels come from platform.db: they
 /// are checked before they become a path.
-fn version_dir(data: &Path, app_id: &str, label: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn version_dir(data: &Path, app_id: &str, label: &str) -> anyhow::Result<PathBuf> {
     for part in [app_id, label] {
         let mut components = Path::new(part).components();
         if !matches!(components.next(), Some(std::path::Component::Normal(_)))
@@ -75,12 +75,13 @@ pub struct Deployed {
 /// changes nothing and is recorded as refused; a zip without a readable
 /// app.toml names no app and is only answered.
 #[cfg(test)]
-pub async fn deploy(shell: &Shell, zip: &[u8], actor: Actor) -> anyhow::Result<Deployed> {
+pub async fn deploy(shell: &Arc<Shell>, zip: &[u8], actor: Actor) -> anyhow::Result<Deployed> {
     deploy_as(shell, zip, actor, None).await
 }
 
-/// `deploy`, by `person` (the email of who sent it).
-pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<String>) -> anyhow::Result<Deployed> {
+/// `deploy`, by `who`, if the policy lets them deploy this app
+/// (access::may_deploy): refused with access::Forbidden, and not recorded.
+pub async fn deploy_as(shell: &Arc<Shell>, zip: &[u8], actor: Actor, who: Option<&crate::auth::Who>) -> anyhow::Result<Deployed> {
     let started = Instant::now();
     if zip.len() > bundle::MAX {
         bail!("app.zip is larger than {} MB", bundle::MAX >> 20);
@@ -96,6 +97,10 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
         anyhow::Ok((bundle, m))
     })
     .await??;
+    if let Some(who) = who {
+        crate::access::may_deploy(shell, who, &m).await?;
+    }
+    let person = who.and_then(crate::auth::Who::person);
     let v = NewVersion {
         app_id: m.app.id.clone(),
         label: bundle.label(&m.app.version),
@@ -127,11 +132,11 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
             store_bundle(&dir.join(bundle::FILE), &stored)
         })
         .await??;
-        anyhow::Ok((app, packages))
+        anyhow::Ok((app, packages, checked))
     }
     .await;
-    let (app, packages) = match loaded {
-        Ok((app, packages)) => (Arc::new(app), packages),
+    let (app, packages, checked) = match loaded {
+        Ok((app, packages, checked)) => (Arc::new(app), packages, checked),
         Err(e) => {
             let (refused, why) = (v.clone(), format!("{e:#}"));
             shell.platform.run(move |db| db.refused(&refused, &why, started.elapsed())).await?;
@@ -139,6 +144,14 @@ pub async fn deploy_as(shell: &Shell, zip: &[u8], actor: Actor, person: Option<S
         }
     };
     let v = NewVersion { routes: app.routes.iter().map(|r| r.pattern()).collect(), packages, ..v };
+    // An app (a kit needs admin-write) waits for its review, on the stored
+    // bytes: what passes is what goes live.
+    if let Some(command) = shell.review.as_ref().filter(|_| !app.manifest.is_kit()) {
+        let why = crate::state::REVIEWING;
+        shell.platform.run(move |db| db.reviewing(&v, why, started.elapsed())).await?;
+        tokio::spawn(crate::review::gate(shell.clone(), app.clone(), checked, command.clone()));
+        return Ok(Deployed { app, held: Some(why.to_string()) });
+    }
     let held = shell.state.deployed(app.clone(), v, started).await?;
     Ok(Deployed { app, held })
 }
@@ -402,7 +415,40 @@ mod tests {
         let first = deploy(&shell, &risky.pack().unwrap(), Actor::Cli).await.unwrap();
         deploy(&shell, &crate::testing::bundle("2.0", None).pack().unwrap(), Actor::Cli).await.unwrap();
         rollback(&shell, "test", Some(&first.app.label), Ask::Cli { reason: None, person: None }).await.unwrap();
-        assert_eq!(shell.platform.events(Some("test"), 1).unwrap()[0].risk, Some(9));
+        assert_eq!(shell.platform.events(Some("test"), 1).unwrap()[0].risk, Some(90));
+    }
+
+    /// With `--review`, a deploy waits; the review, on the stored .wasm,
+    /// makes it live or refuses it with the end of what it printed.
+    #[tokio::test]
+    async fn a_deploy_waits_for_its_review() {
+        async fn reviewed(review: &str, version: &str) -> (Arc<Shell>, Version, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let parts = crate::testing::parts(dir.path().to_path_buf(), Default::default());
+            let shell = Shell::new(crate::shell::Parts { review: Some(review.into()), ..parts }).unwrap();
+            let done = deploy(&shell, &crate::testing::bundle(version, None).pack().unwrap(), Actor::Cli).await.unwrap();
+            assert_eq!(done.held.as_deref(), Some(crate::state::REVIEWING));
+            for _ in 0..200 {
+                let v = shell.platform.versions("test", 1).unwrap().remove(0);
+                if v.status != crate::platform::VersionStatus::Waiting {
+                    return (shell, v, dir);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the review never ended");
+        }
+        let (shell, v, dir) = reviewed("test -s appfuzz.toml -a -s plan.json -a -s test.wasm", "1").await;
+        assert_eq!(v.status, crate::platform::VersionStatus::Live, "{:?}", v.reason);
+        assert_eq!(shell.state.app("test").map(|a| a.label.clone()), Some(v.label.clone()));
+        let stored = Bundle::unpack(&std::fs::read(version_dir(dir.path(), "test", &v.label).unwrap().join(bundle::FILE)).unwrap()).unwrap();
+        assert_eq!(std::fs::read(version_dir(dir.path(), "test", &v.label).unwrap().join("review/test.wasm")).unwrap(), stored.wasm);
+
+        let (shell, v, _dir) = reviewed("ls no-such-file", "1").await;
+        assert_eq!(v.status, crate::platform::VersionStatus::Refused);
+        let why = v.reason.unwrap();
+        assert!(why.contains("the review failed") && why.contains("no-such-file"), "{why}");
+        assert!(shell.state.app("test").is_none());
+        assert!(rollback(&shell, "test", Some(&v.label), Ask::Admin { person: None }).await.is_err(), "refused is never live");
     }
 
     #[tokio::test]

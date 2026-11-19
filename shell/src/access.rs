@@ -11,6 +11,7 @@
 //! p, group:marketing, apps:Marketing, kv-read
 //! p, group:platform, *, admin-*
 //! p, group:support, *, admin-read
+//! p, group:marketing, apps:Marketing, admin-deploy
 //! g, bob@acme.com, group:platform
 //! ```
 //!
@@ -19,7 +20,10 @@
 //! `apps:<group>` (the group in app.toml) or `*`. What: a grant, or a
 //! pattern like `kv-*`. AdminKit's grants are the admin screen and the
 //! platform API: admin-read to look, admin-write to change, with `*` as
-//! where.
+//! where. admin-deploy (deploy and roll back) and admin-off (turn off and
+//! on) give that much of admin-write, through the platform API, for the
+//! apps their where names: marketing deploys its apps and can't touch the
+//! CRM team's, or Freeze.
 //! `g, who, group:<name>` puts someone in a group. What no line allows is
 //! denied; with `--no-auth` there is no policy and everything is allowed.
 //!
@@ -38,7 +42,7 @@ use casbin::{CoreApi, DefaultModel, Enforcer, MemoryAdapter, MgmtApi};
 use parking_lot::{Mutex, RwLock};
 
 use crate::auth::{ANYONE, SIGNED_IN, Who};
-use crate::kit::User;
+use crate::kit::{ADMIN_DEPLOY, ADMIN_OFF, ADMIN_READ, ADMIN_WRITE, User};
 use crate::manifest::{MAX_GRANTS, validate_app_id};
 use crate::platform::{Actor, Kind, NewEvent, now_ms};
 use crate::runtime::LoadedApp;
@@ -213,6 +217,21 @@ impl Policy {
         who.subjects().iter().any(|s| self.allows(s, "", "", act))
     }
 
+    /// Whether a line gives someone `act` for some app, by their email or
+    /// one of their groups.
+    pub fn may_somewhere(&self, who: &Who, act: &str) -> bool {
+        let mut subjects: BTreeSet<String> = who.subjects().into_iter().collect();
+        subjects.extend(self.groups(who).into_iter().map(|g| format!("group:{g}")));
+        self.lines.0.iter().any(|l| subjects.contains(&l[0]) && key_match(act, &l[2]))
+    }
+
+    /// Whether someone may use admin-deploy or admin-off on the app
+    /// `app_id` of `group`: by a line for the app, its group or `*`.
+    pub fn may_in(&self, who: &Who, act: &str, app_id: &str, group: &str) -> bool {
+        let group = format!("apps:{}", group.trim());
+        who.subjects().iter().any(|s| self.allows(s, app_id, &group, act))
+    }
+
     /// Fails closed: casbin failing is a no.
     fn allows(&self, sub: &str, app: &str, group: &str, act: &str) -> bool {
         self.enforcer.enforce((sub, app, group, act)).unwrap_or_else(|e| {
@@ -220,6 +239,102 @@ impl Policy {
             false
         })
     }
+}
+
+/// The admin- grants a policy line may give for some apps only.
+pub const PER_APP: [&str; 2] = [ADMIN_DEPLOY, ADMIN_OFF];
+
+/// A change the policy doesn't let this person make: the platform API
+/// answers 403.
+#[derive(Debug)]
+pub struct Forbidden(pub String);
+
+impl std::fmt::Display for Forbidden {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Forbidden {}
+
+/// Whether `who` may use `grant` (admin-deploy, admin-off) on the app
+/// `id` through the platform API: admin-write gives it for every app,
+/// `grant` for the app or the group it has here. A new app has no group
+/// yet. Without a policy everyone may.
+pub async fn may_change(shell: &Shell, who: &Who, grant: &str, id: &str) -> anyhow::Result<()> {
+    let Some(policies) = &shell.policy else { return Ok(()) };
+    let p = policies.current();
+    if p.may(who, ADMIN_WRITE) {
+        return Ok(());
+    }
+    let group = group_here(shell, id).await?;
+    if p.may_in(who, grant, id, group.as_deref().unwrap_or_default()) {
+        return Ok(());
+    }
+    Err(Forbidden(format!(
+        "{} may not {} {id}: it needs admin-write, or {grant} for {id} or its group, which policy.csv doesn't give them",
+        person(who),
+        doing(grant)
+    ))
+    .into())
+}
+
+/// Whether `who` may look at the app `id`'s versions and news: with
+/// admin-read, or admin-deploy or admin-off for it.
+pub async fn may_look(shell: &Shell, who: &Who, id: &str) -> anyhow::Result<()> {
+    let Some(policies) = &shell.policy else { return Ok(()) };
+    let p = policies.current();
+    if p.may(who, ADMIN_READ) || p.may(who, ADMIN_WRITE) {
+        return Ok(());
+    }
+    let group = group_here(shell, id).await?;
+    if PER_APP.iter().any(|g| p.may_in(who, g, id, group.as_deref().unwrap_or_default())) {
+        return Ok(());
+    }
+    Err(Forbidden(format!("{} may not look at {id}: it needs admin-read, or admin-deploy or admin-off for {id} or its group", person(who))).into())
+}
+
+/// Whether `who` may deploy what app.toml (or kit.toml) `m` says: an app
+/// with admin-deploy for its id and the group in `m`, and also the group
+/// the app has here, so no one moves another team's app into their own
+/// group by deploying it. A kit needs admin-write.
+pub async fn may_deploy(shell: &Shell, who: &Who, m: &crate::manifest::Manifest) -> anyhow::Result<()> {
+    let Some(policies) = &shell.policy else { return Ok(()) };
+    let p = policies.current();
+    if p.may(who, ADMIN_WRITE) {
+        return Ok(());
+    }
+    let id = &m.app.id;
+    if m.is_kit() {
+        return Err(Forbidden(format!("{} may not deploy the kit {id}: kits need admin-write, which policy.csv doesn't give them", person(who))).into());
+    }
+    let to = m.app.group.as_deref().unwrap_or_default();
+    let here = group_here(shell, id).await?;
+    let groups = std::iter::once(to).chain(here.as_deref());
+    if let Some(group) = groups.into_iter().find(|g| !p.may_in(who, ADMIN_DEPLOY, id, g)) {
+        let which = if group.trim().is_empty() { String::new() } else { format!(" or apps:{}", group.trim()) };
+        return Err(Forbidden(format!(
+            "{} may not deploy {id} to group {group:?}: it needs admin-write, or admin-deploy for {id}{which}, which policy.csv doesn't give them",
+            person(who)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// The group the app `id` has here: its live version's, else its newest
+/// stored one's. None for an app never deployed.
+async fn group_here(shell: &Shell, id: &str) -> anyhow::Result<Option<String>> {
+    let id = id.to_string();
+    shell.platform.run(move |db| db.group_of(&id)).await
+}
+
+fn person(who: &Who) -> String {
+    who.person().unwrap_or_else(|| "someone not signed in".into())
+}
+
+fn doing(grant: &str) -> &'static str {
+    if grant == ADMIN_OFF { "turn off or on" } else { "deploy or roll back" }
 }
 
 /// `p, who, app, what`. `what` is a grant or a pattern; a grant no kit
@@ -240,8 +355,10 @@ fn rule(who: &str, app: &str, what: &str, grants: &[String], built_in: bool) -> 
     }
     let admin: Vec<&str> = grants_of(what, grants).into_iter().filter(|g| g.starts_with(ADMIN_PREFIX)).collect();
     if what.starts_with(ADMIN_PREFIX) {
-        if app != "*" {
-            return Err(format!("{what} is the admin screen's, for the whole platform: give * as the app"));
+        if app != "*" && (admin.is_empty() || admin.iter().any(|g| !PER_APP.contains(g))) {
+            return Err(format!(
+                "{what} is the admin screen's, for the whole platform: give * as the app; admin-deploy and admin-off can name an app or apps:<group>"
+            ));
         }
     } else if !admin.is_empty() && !built_in {
         let given = admin.join(" and ");
@@ -503,6 +620,24 @@ mod tests {
         assert!(!p.may(&ops, ADMIN_READ), "every kv grant is no admin grant");
         assert!(!p.may(&Who::default(), ADMIN_READ));
         assert_eq!(may(&p, &bob, "webinars", "Marketing"), (false, false), "admin-* gives no app's grant");
+    }
+
+    #[tokio::test]
+    async fn admin_deploy_and_admin_off_go_by_app_or_group() {
+        use crate::kit::{ADMIN_DEPLOY, ADMIN_OFF, ADMIN_WRITE};
+        let csv = "p, group:marketing, apps:Marketing, admin-deploy\np, sam@acme.com, discounts, admin-off\np, group:platform, *, admin-*\n";
+        let p = Policy::parse(csv, &kv()).await.unwrap();
+        let (mo, sam, bob) = (person("mo@acme.com", &["marketing"]), person("sam@acme.com", &[]), person("bob@acme.com", &["platform"]));
+        assert!(p.may_in(&mo, ADMIN_DEPLOY, "webinars", "Marketing") && !p.may_in(&mo, ADMIN_DEPLOY, "discounts", "Sales"));
+        assert!(!p.may_in(&mo, ADMIN_OFF, "webinars", "Marketing"), "deploying is no turning off");
+        assert!(!p.may_in(&mo, ADMIN_DEPLOY, "webinars", ""), "an app without a group is in none");
+        assert!(p.may_in(&sam, ADMIN_OFF, "discounts", "Sales") && !p.may_in(&sam, ADMIN_OFF, "webinars", "Sales"));
+        assert!(!p.may(&mo, ADMIN_DEPLOY) && !p.may(&mo, ADMIN_WRITE), "no platform-wide grant");
+        assert!(p.may_in(&bob, ADMIN_DEPLOY, "webinars", "Marketing"), "admin-* gives it for every app");
+        assert!(p.may_somewhere(&mo, ADMIN_DEPLOY) && !p.may_somewhere(&mo, ADMIN_OFF) && !p.may_somewhere(&Who::default(), ADMIN_DEPLOY));
+        let err = |text: &'static str| async move { Policy::parse(text, &kv()).await.err().map(|e| e.to_string()).unwrap_or_default() };
+        assert!(err("p, anyone, apps:Marketing, admin-*").await.contains("give * as the app; admin-deploy and admin-off can name an app"));
+        assert!(err("p, anyone, webinars, admin-write").await.contains("give * as the app"));
     }
 
     #[tokio::test]

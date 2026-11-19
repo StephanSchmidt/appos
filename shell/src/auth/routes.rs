@@ -596,6 +596,64 @@ pub(crate) mod tests {
         assert!(!shell.state.is_off("test"));
     }
 
+    /// `appos deploy`: app.zip with a token.
+    fn deploy(zip: Vec<u8>, token: &str) -> Request<Body> {
+        let req = Request::post("/_platform/deploy").header(header::HOST, "localhost").header(header::AUTHORIZATION, format!("Bearer {token}"));
+        req.body(Body::from(zip)).unwrap()
+    }
+
+    /// The test app as `id`, in `group`, at `version`.
+    fn app_in(id: &str, group: &str, version: &str) -> Vec<u8> {
+        let mut b = crate::testing::bundle(version, None);
+        b.manifest = b.manifest.replace("id = 'test'", &format!("id = '{id}'")).replace("group = 'Tests'", &format!("group = '{group}'"));
+        b.pack().unwrap()
+    }
+
+    /// admin-deploy for a group ships and rolls back its apps through the
+    /// platform API, and nothing else; admin-off turns apps off and on.
+    #[tokio::test]
+    async fn admin_deploy_and_admin_off_are_for_the_apps_the_policy_names() {
+        let csv = "p, group:platform, *, admin-*\np, group:marketing, apps:Marketing, admin-deploy\np, group:support, apps:Tests, admin-off\n";
+        let (_dir, shell) = crate::testing::shell_with_policy("provider = \"dev\"", csv).await;
+        let app = both(&shell);
+        let forbidden = StatusCode::FORBIDDEN;
+        // Mo has no admin screen, but a token for appos login.
+        let mo = sign_in(&app, "email=mo%40acme.com&groups=marketing").await;
+        assert_eq!(send(&app, get("/admin", &mo)).await.0, forbidden);
+        let token = make_token(&app, &mo).await;
+        assert_eq!(send(&app, api("GET", "/_platform/me", &token)).await.0, StatusCode::OK);
+
+        // Marketing's apps: a new one, a second version, back to the first.
+        assert_eq!(send(&app, deploy(app_in("promo", "Marketing", "1"), &token)).await.0, StatusCode::OK);
+        assert_eq!(send(&app, deploy(app_in("promo", "Marketing", "2"), &token)).await.0, StatusCode::OK);
+        let (status, _, body) = send(&app, api("POST", "/_platform/apps/promo/rollback", &token)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(send(&app, api("GET", "/_platform/apps/promo/versions", &token)).await.0, StatusCode::OK);
+
+        // Not another group's app, not even moved into Marketing.
+        let (status, _, body) = send(&app, deploy(app_in("test", "Tests", "9"), &token)).await;
+        assert!(status == forbidden && body.contains("mo@acme.com may not deploy test"), "{body}");
+        let (status, _, body) = send(&app, deploy(app_in("test", "Marketing", "9"), &token)).await;
+        assert!(status == forbidden && body.contains("to group \"Tests\"") && body.contains("apps:Tests"), "{body}");
+        assert_eq!(shell.platform.versions("test", 10).unwrap().len(), 1, "a refused deploy is no version");
+        assert_eq!(send(&app, api("POST", "/_platform/apps/test/rollback", &token)).await.0, forbidden);
+        assert_eq!(send(&app, api("GET", "/_platform/apps/test/versions", &token)).await.0, forbidden);
+        // Not off, the log or the platform's controls.
+        let (status, _, body) = send(&app, api("POST", "/_platform/apps/promo/off", &token)).await;
+        assert!(status == forbidden && body.contains("needs admin-write, or admin-off for promo"), "{body}");
+        assert!(!shell.state.is_off("promo"));
+        assert_eq!(send(&app, api("GET", "/_platform/log", &token)).await.0, forbidden);
+
+        // Support turns the Tests apps off and on, and deploys nothing.
+        let sue = sign_in(&app, "email=sue%40acme.com&groups=support").await;
+        let token = make_token(&app, &sue).await;
+        assert_eq!(send(&app, api("POST", "/_platform/apps/test/off", &token)).await.0, StatusCode::OK);
+        assert!(shell.state.is_off("test"));
+        assert_eq!(send(&app, api("POST", "/_platform/apps/test/on", &token)).await.0, StatusCode::OK);
+        assert_eq!(send(&app, api("POST", "/_platform/apps/promo/off", &token)).await.0, forbidden);
+        assert_eq!(send(&app, deploy(app_in("test", "Tests", "9"), &token)).await.0, forbidden);
+    }
+
     #[tokio::test]
     async fn without_sign_in_only_a_policy_naming_anyone_lets_in() {
         let (_dir, shell) = crate::testing::shell_with_policy("", ADMINS).await;

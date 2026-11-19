@@ -318,12 +318,14 @@ fn wit_name(name: &str) -> bool {
 
 /// What the shell checks of app.toml (or a kit's kit.toml) before it
 /// loads a deploy, beyond `Bundle::checked`: it names an owner and a
-/// group. Returns the id. `appos deploy` checks the same before it builds.
+/// group, and says what data it keeps. Returns the id. `appos deploy`
+/// checks the same before it builds.
 pub fn check(manifest: &str) -> anyhow::Result<String> {
     let kit = toml::from_str::<toml::Table>(manifest).is_ok_and(|t| t.contains_key("kit"));
     let m = if kit { Manifest::parse_kit(manifest)? } else { Manifest::parse(manifest)? };
     m.owner()?;
     m.group()?;
+    m.data()?;
     Ok(m.app.id)
 }
 
