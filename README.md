@@ -1,4 +1,4 @@
-# AppOS
+# <picture><source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg"><img alt="" src="docs/logo-light.svg" height="28"></picture> AppOS
 
 Marketing ships to production, and so do sales, customer service and
 anyone else with an idea and an AI agent. That takes shift left to the
